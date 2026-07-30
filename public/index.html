@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>我们的日常</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💕</text></svg>" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="site-title" href="#/">我们的日常</a>
+      <div class="days" id="days" hidden></div>
+      <nav class="site-nav">
+        <a href="#/" data-nav="timeline">时间轴</a>
+        <a href="#/gallery" data-nav="gallery">相册</a>
+        <span id="userArea"></span>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="container"></main>
+
+  <!-- 图片灯箱 -->
+  <div id="lightbox" class="lightbox" hidden>
+    <button class="lb-btn lb-close" aria-label="关闭">×</button>
+    <button class="lb-btn lb-prev" aria-label="上一张">‹</button>
+    <img id="lightboxImg" alt="" />
+    <button class="lb-btn lb-next" aria-label="下一张">›</button>
+  </div>
+
+  <script src="/vendor/marked.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

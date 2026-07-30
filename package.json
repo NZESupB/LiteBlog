@@ -1,0 +1,17 @@
+{
+  "name": "couple-blog",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "情侣日常记录博客,轻量自托管",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "hono": "^4.7.0"
+  }
+}
