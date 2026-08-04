@@ -454,17 +454,24 @@ app.post('/api/storage/webdav/test', requireAuth, async (c) => {
 
 // ---------- AI 润色(LLM 代理:凭据只存服务端,前端不接触 API Key) ----------
 
-// LLM 配置读写:全局默认 + 用户自定义。mode=default 时用全局配置,mode=custom 时用本人配置
+// LLM 配置读写:共享 API + 个人模型,或用户独立 API。旧 default 模式兼容为 shared。
 app.get('/api/llm', requireAuth, (c) => {
   const me = c.get('user')
-  const mode = getUserSetting(me.id, 'llm_mode', 'default')
+  const shared = sharedLlmConfig()
   return c.json({
-    mode,
-    global: {
-      baseUrl: getSetting('llm_base_url', process.env.LLM_BASE_URL || ''),
-      model: getSetting('llm_model', process.env.LLM_MODEL || ''),
-      hasApiKey: Boolean(getSetting('llm_api_key', process.env.LLM_API_KEY || '')),
+    mode: llmMode(me.id),
+    shared: {
+      baseUrl: shared.baseUrl,
+      model: shared.model,
+      hasApiKey: Boolean(shared.apiKey),
     },
+    // 兼容旧客户端:global 与 shared 指向同一份共享配置,仍不返回明文 Key。
+    global: {
+      baseUrl: shared.baseUrl,
+      model: shared.model,
+      hasApiKey: Boolean(shared.apiKey),
+    },
+    sharedModel: getUserSetting(me.id, 'llm_shared_model', shared.model),
     custom: {
       baseUrl: getUserSetting(me.id, 'llm_base_url', ''),
       model: getUserSetting(me.id, 'llm_model', ''),
@@ -476,30 +483,36 @@ app.get('/api/llm', requireAuth, (c) => {
 app.put('/api/llm', requireAuth, async (c) => {
   const me = c.get('user')
   const body = await c.req.json().catch(() => ({}))
-  const mode = body.mode === 'custom' ? 'custom' : 'default'
-  setUserSetting(me.id, 'llm_mode', mode)
-  if (mode === 'custom') {
-    const baseUrl = String(body.baseUrl ?? '').trim()
-    const model = String(body.model ?? '').trim()
-    const apiKey = String(body.apiKey ?? '').trim()
-    if (!baseUrl || !/^https?:\/\/\S+/.test(baseUrl)) {
-      return c.json({ error: '请填写合法的接口地址(以 http:// 或 https:// 开头)' }, 400)
-    }
-    setUserSetting(me.id, 'llm_base_url', baseUrl)
-    setUserSetting(me.id, 'llm_model', model)
-    if (apiKey) setUserSetting(me.id, 'llm_api_key', apiKey)
+  const cfg = draftLlmConfig(me.id, body)
+  if (!isLlmBaseUrl(cfg.baseUrl)) {
+    return c.json({ error: cfg.mode === 'shared' ? '请先配置共享接口地址(以 http:// 或 https:// 开头)' : '请填写合法的接口地址(以 http:// 或 https:// 开头)' }, 400)
   }
+
+  if (cfg.mode === 'shared') {
+    const sharedBaseUrl = String(body.sharedBaseUrl ?? body.baseUrl ?? '').trim()
+    const sharedApiKey = String(body.sharedApiKey ?? body.apiKey ?? '').trim()
+    if (sharedBaseUrl) setSetting('llm_base_url', sharedBaseUrl)
+    if (sharedApiKey) setSetting('llm_api_key', sharedApiKey)
+    // 保留旧的全局模型作为尚未选择个人模型时的回退,兼容已有环境变量配置。
+    if (!sharedLlmConfig().model && cfg.model) setSetting('llm_model', cfg.model)
+    setUserSetting(me.id, 'llm_shared_model', cfg.model)
+  } else {
+    setUserSetting(me.id, 'llm_base_url', cfg.baseUrl)
+    setUserSetting(me.id, 'llm_model', cfg.model)
+    if (String(body.apiKey ?? '').trim()) setUserSetting(me.id, 'llm_api_key', cfg.apiKey)
+  }
+  setUserSetting(me.id, 'llm_mode', cfg.mode)
   return c.json({ ok: true })
 })
 
-// 自动获取模型列表:请求 OpenAI 兼容的 /models 端点
+// 自动获取模型列表:凭据由当前用户选中的共享/独立配置在服务端解析,不要求前端回传已保存的 Key。
 app.post('/api/llm/models', requireAuth, async (c) => {
+  const me = c.get('user')
   const body = await c.req.json().catch(() => ({}))
-  const baseUrl = String(body.baseUrl ?? '').trim()
-  const apiKey = String(body.apiKey ?? '').trim()
-  if (!baseUrl) return c.json({ error: '请先填写接口地址' }, 400)
-  const url = baseUrl.replace(/\/+$/, '') + '/models'
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } }).catch((e) => null)
+  const cfg = draftLlmConfig(me.id, body)
+  if (!isLlmBaseUrl(cfg.baseUrl)) return c.json({ error: '请先填写合法的接口地址' }, 400)
+  const url = cfg.baseUrl.replace(/\/+$/, '') + '/models'
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${cfg.apiKey}` } }).catch(() => null)
   if (!res) return c.json({ error: '无法连接接口地址' }, 400)
   if (!res.ok) {
     const t = await res.text().catch(() => '')
@@ -510,21 +523,12 @@ app.post('/api/llm/models', requireAuth, async (c) => {
   return c.json({ models })
 })
 
-// 测试连通性:发一个最小请求验证地址与 Key(按当前用户生效配置)
+// 测试连通性:只验证当前表单中的候选配置,不修改任何已保存的配置。
 app.post('/api/llm/test', requireAuth, async (c) => {
   const me = c.get('user')
   const body = await c.req.json().catch(() => ({}))
-  const mode = body.mode === 'custom' ? 'custom' : 'default'
-  if (mode === 'custom') {
-    const baseUrl = String(body.baseUrl ?? '').trim()
-    const model = String(body.model ?? '').trim()
-    const apiKey = String(body.apiKey ?? '').trim()
-    if (baseUrl) setUserSetting(me.id, 'llm_base_url', baseUrl)
-    if (model) setUserSetting(me.id, 'llm_model', model)
-    if (apiKey) setUserSetting(me.id, 'llm_api_key', apiKey)
-  }
-  const cfg = llmConfig(me.id)
-  if (!cfg.baseUrl) return c.json({ ok: false, message: '请先填写接口地址' }, 400)
+  const cfg = draftLlmConfig(me.id, body)
+  if (!isLlmBaseUrl(cfg.baseUrl)) return c.json({ ok: false, message: '请先填写合法的接口地址' }, 400)
   const r = await llmChat(cfg, '请回复「ok」', true).catch((e) => ({ ok: false, message: e.message }))
   return c.json(r, r.ok ? 200 : 400)
 })
@@ -542,20 +546,52 @@ app.post('/api/llm/polish', requireAuth, async (c) => {
   return c.json({ text: r.text })
 })
 
-// LLM 配置读取:mode=default 用全局配置,mode=custom 用该用户自己的配置
+function isLlmBaseUrl(value) {
+  return /^https?:\/\/\S+/.test(value)
+}
+
+function llmMode(userId) {
+  return getUserSetting(userId, 'llm_mode', 'shared') === 'custom' ? 'custom' : 'shared'
+}
+
+function sharedLlmConfig() {
+  return {
+    baseUrl: getSetting('llm_base_url', process.env.LLM_BASE_URL || ''),
+    model: getSetting('llm_model', process.env.LLM_MODEL || ''),
+    apiKey: getSetting('llm_api_key', process.env.LLM_API_KEY || ''),
+  }
+}
+
+// 表单可带尚未保存的地址/密钥;留空时沿用对应来源中已保存的值。
+function draftLlmConfig(userId, body) {
+  const mode = body.mode === 'custom' ? 'custom' : 'shared'
+  const saved = mode === 'custom'
+    ? {
+        baseUrl: getUserSetting(userId, 'llm_base_url', ''),
+        model: getUserSetting(userId, 'llm_model', ''),
+        apiKey: getUserSetting(userId, 'llm_api_key', ''),
+      }
+    : (() => {
+        const shared = sharedLlmConfig()
+        return { ...shared, model: getUserSetting(userId, 'llm_shared_model', shared.model) }
+      })()
+  const baseUrl = String(mode === 'custom' ? body.baseUrl ?? '' : body.sharedBaseUrl ?? body.baseUrl ?? '').trim() || saved.baseUrl
+  const apiKey = String(mode === 'custom' ? body.apiKey ?? '' : body.sharedApiKey ?? body.apiKey ?? '').trim() || saved.apiKey
+  const model = String(body.model ?? '').trim() || saved.model
+  return { mode, baseUrl, model, apiKey }
+}
+
+// 共享模式读取共享凭据和个人模型;独立模式完全读取当前用户自己的配置。
 function llmConfig(userId) {
-  if (userId && getUserSetting(userId, 'llm_mode', 'default') === 'custom') {
+  if (userId && llmMode(userId) === 'custom') {
     return {
       baseUrl: getUserSetting(userId, 'llm_base_url', ''),
       model: getUserSetting(userId, 'llm_model', ''),
       apiKey: getUserSetting(userId, 'llm_api_key', ''),
     }
   }
-  return {
-    baseUrl: getSetting('llm_base_url', process.env.LLM_BASE_URL || ''),
-    model: getSetting('llm_model', process.env.LLM_MODEL || ''),
-    apiKey: getSetting('llm_api_key', process.env.LLM_API_KEY || ''),
-  }
+  const shared = sharedLlmConfig()
+  return { ...shared, model: userId ? getUserSetting(userId, 'llm_shared_model', shared.model) : shared.model }
 }
 
 // 调用兼容 OpenAI Chat Completions 的接口

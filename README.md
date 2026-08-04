@@ -10,7 +10,8 @@
 ## VPS 部署(Docker)
 
 1. 把整个项目目录上传到 VPS(或 `git clone`)。
-2. 编辑 `docker-compose.yml` 中的环境变量:
+2. 在 VPS 上将 `docker-compose.yml.bak` 自行复制为 `docker-compose.yml`；如果已有本地配置,请不要覆盖。
+3. 编辑 `docker-compose.yml` 中的环境变量:
 
    | 变量 | 说明 |
    |---|---|
@@ -19,7 +20,7 @@
    | `PRIVATE_MODE` | `true` 时访客必须登录才能浏览 |
    | `JWT_SECRET` | **必改**,登录会话签名密钥,`openssl rand -hex 32` 生成 |
 
-3. 启动:
+4. 启动:
 
    ```bash
    docker compose up -d --build

@@ -15,4 +15,5 @@ Thumbs.db
 .env
 .agentdocs
 
+# 部署机本地复制模板后生成,不得被上传覆盖
 docker-compose.yml

@@ -752,7 +752,7 @@ function renderSettings() {
   renderLlmCard()
 }
 
-// AI 润色配置(兼容 OpenAI Chat Completions 接口):全局默认 + 用户自定义
+// AI 润色配置(兼容 OpenAI Chat Completions 接口):共享 API 可各自选模型,也可使用独立 API。
 async function renderLlmCard() {
   let s
   try {
@@ -767,21 +767,35 @@ async function renderLlmCard() {
       <h2>AI 润色</h2>
       <div class="storage-status">在发布框点「✨ 润色」即可调用,凭据只存本服务器</div>
       <label class="row">
-        <input name="mode" type="checkbox" ${custom ? 'checked' : ''} />
-        <span>使用自定义配置(不勾选则用上方默认配置)</span>
+        <input name="mode" type="radio" value="shared" ${custom ? '' : 'checked'} />
+        <span>使用已配置的共享 API</span>
       </label>
-      <div class="llm-global-hint">${s.global.baseUrl ? `默认配置:${esc(s.global.baseUrl)} · ${esc(s.global.model || '未设模型')}` : '尚未配置默认接口'}</div>
+      <label class="row">
+        <input name="mode" type="radio" value="custom" ${custom ? 'checked' : ''} />
+        <span>配置独立 API</span>
+      </label>
+      <div class="llm-shared" ${custom ? 'hidden' : ''}>
+        <div class="llm-global-hint">${s.shared.baseUrl ? `共享接口:${esc(s.shared.baseUrl)} · 默认模型:${esc(s.shared.model || '未设模型')}` : '尚未配置共享接口,可由任一账号首次填写'}</div>
+        <label>共享接口地址(OpenAI 兼容)<input name="sharedBaseUrl" value="${esc(s.shared.baseUrl)}" placeholder="https://api.openai.com/v1" /></label>
+        <label>共享 API Key<input name="sharedApiKey" type="password" placeholder="${s.shared.hasApiKey ? '已保存,留空表示不修改' : 'sk-…'}" /></label>
+        <label>本次使用模型
+          <span class="llm-model-row">
+            <input name="sharedModel" list="llm-model-list" value="${esc(s.sharedModel)}" placeholder="gpt-4o-mini" />
+            <button type="button" class="btn-ghost fetch-models">自动获取</button>
+          </span>
+        </label>
+      </div>
       <div class="llm-custom" ${custom ? '' : 'hidden'}>
         <label>接口地址(OpenAI 兼容)<input name="baseUrl" value="${esc(s.custom.baseUrl)}" placeholder="https://api.openai.com/v1" /></label>
         <label>模型
           <span class="llm-model-row">
-            <input name="model" list="llm-model-list" value="${esc(s.custom.model)}" placeholder="gpt-4o-mini" />
-            <datalist id="llm-model-list"></datalist>
+            <input name="customModel" list="llm-model-list" value="${esc(s.custom.model)}" placeholder="gpt-4o-mini" />
             <button type="button" class="btn-ghost fetch-models">自动获取</button>
           </span>
         </label>
         <label>API Key<input name="apiKey" type="password" placeholder="${s.custom.hasApiKey ? '已保存,留空表示不修改' : 'sk-…'}" /></label>
       </div>
+      <datalist id="llm-model-list"></datalist>
       <div class="settings-actions">
         <span class="save-tip" hidden>已保存 ✓</span>
         <span class="spacer"></span>
@@ -791,28 +805,45 @@ async function renderLlmCard() {
       <div class="form-error"></div>
     </div>`)
   const err = $('.form-error', card)
-  const modeBox = $('[name=mode]', card)
+  const modeBoxes = card.querySelectorAll('[name=mode]')
+  const sharedWrap = $('.llm-shared', card)
   const customWrap = $('.llm-custom', card)
-  modeBox.onchange = () => { customWrap.hidden = !modeBox.checked }
+  const selectedMode = () => $('[name=mode]:checked', card).value
+  const updateMode = () => {
+    const shared = selectedMode() === 'shared'
+    sharedWrap.hidden = !shared
+    customWrap.hidden = shared
+  }
+  for (const modeBox of modeBoxes) modeBox.onchange = updateMode
 
-  const currentPayload = () => ({
-    mode: modeBox.checked ? 'custom' : 'default',
-    baseUrl: $('[name=baseUrl]', card).value,
-    model: $('[name=model]', card).value,
-    apiKey: $('[name=apiKey]', card).value,
-  })
+  const currentPayload = () => {
+    const mode = selectedMode()
+    return mode === 'shared'
+      ? {
+          mode,
+          sharedBaseUrl: $('[name=sharedBaseUrl]', card).value,
+          sharedApiKey: $('[name=sharedApiKey]', card).value,
+          model: $('[name=sharedModel]', card).value,
+        }
+      : {
+          mode,
+          baseUrl: $('[name=baseUrl]', card).value,
+          apiKey: $('[name=apiKey]', card).value,
+          model: $('[name=customModel]', card).value,
+        }
+  }
 
-  $('.fetch-models', card).onclick = async () => {
+  for (const fetchButton of card.querySelectorAll('.fetch-models')) fetchButton.onclick = async () => {
     err.textContent = ''
     err.style.color = ''
-    const btn = $('.fetch-models', card)
+    const btn = fetchButton
     btn.disabled = true
     btn.textContent = '获取中…'
     try {
       const r = await api('/api/llm/models', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl: $('[name=baseUrl]', card).value, apiKey: $('[name=apiKey]', card).value }),
+        body: JSON.stringify(currentPayload()),
       })
       const list = $('#llm-model-list', card)
       list.innerHTML = ''
