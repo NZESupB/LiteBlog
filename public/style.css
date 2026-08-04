@@ -1,4 +1,4 @@
-/* 温暖轻盈的情侣日常风格 */
+/* 温暖轻盈的日常记录风格 */
 :root {
   --bg: #fdf9f6;
   --card: #ffffff;
@@ -107,6 +107,10 @@ img { max-width: 100%; }
   background: none; border: 1px solid var(--border); color: var(--muted);
   border-radius: 999px; padding: 6px 14px;
 }
+.public-opts { display: flex; align-items: center; gap: 16px; margin-top: 10px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.public-opts-tip { flex-shrink: 0; }
+.public-opts label.row { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.public-opts input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; }
 .preview-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .preview-item { position: relative; width: 86px; height: 86px; }
 .preview-item img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; }
@@ -150,6 +154,24 @@ img { max-width: 100%; }
   width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px;
 }
 .img-grid img { cursor: zoom-in; display: block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.preview-item .upload-overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.45); border-radius: 8px; color: #fff; font-size: 12px; gap: 6px;
+}
+.preview-item .upload-overlay .spinner {
+  width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+.preview-item .upload-overlay.error { background: rgba(200,60,60,0.82); }
+/* 上传完成只在右下角打个勾,不遮住缩略图 */
+.preview-item .upload-badge {
+  position: absolute; right: 3px; bottom: 3px;
+  width: 18px; height: 18px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(42,157,74,0.92); color: #fff; font-size: 11px; line-height: 1;
+}
+.img-hidden-note { color: var(--muted); font-size: 12.5px; font-style: italic; }
 
 .load-more { display: block; margin: 8px auto; }
 .empty-tip { text-align: center; color: var(--muted); padding: 40px 0; }
@@ -180,6 +202,58 @@ img { max-width: 100%; }
 .login-card .btn { width: 100%; padding: 10px; }
 .form-error { color: var(--accent); font-size: 13.5px; min-height: 20px; margin: 4px 0; }
 
+/* ---------- 账号页 ---------- */
+.account-page {
+  --account-accent: #b64d58;
+  --account-muted: #716966;
+  --account-success: #397348;
+  width: 100%; max-width: 520px; margin: 12px auto 0;
+}
+.account-page-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 4px 0 14px;
+}
+.account-page-header h1 {
+  margin: 0; outline: none;
+  font-size: 22px; line-height: 1.4; letter-spacing: 0;
+}
+.account-back {
+  width: 36px; height: 36px; flex: 0 0 36px;
+  display: grid; place-items: center;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--card); color: var(--account-muted); font-size: 20px; line-height: 1;
+}
+.account-back:hover { color: var(--account-accent); border-color: var(--account-accent); }
+.account-back:focus-visible {
+  color: var(--account-accent); border-color: var(--account-accent);
+  outline: 2px solid var(--account-accent); outline-offset: 2px;
+}
+.account-section { padding: 22px 0 24px; border-top: 1px solid var(--border); }
+.account-section h2 { margin: 0 0 16px; font-size: 17px; letter-spacing: 0; }
+.account-section label {
+  display: block; margin: 0 0 5px;
+  color: var(--account-muted); font-size: 13.5px;
+}
+.account-section input {
+  width: 100%; padding: 10px 13px; margin: 0 0 13px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card); color: var(--text); font: inherit;
+}
+.account-section input:focus { border-color: var(--account-accent); }
+.account-section input:focus-visible {
+  outline: 2px solid var(--account-accent); outline-offset: 2px;
+}
+.account-section input[readonly] { background: var(--bg); color: var(--account-muted); cursor: default; }
+.account-section input[aria-invalid="true"] { border-color: var(--account-accent); }
+.account-hint { margin-top: -4px; color: var(--account-muted); font-size: 12.5px; }
+.profile-form .account-hint { margin-bottom: 14px; }
+.form-message { min-height: 22px; margin-top: 8px; color: var(--account-accent); font-size: 13.5px; }
+.form-message[data-state="success"] { color: var(--account-success); }
+.form-message[data-state="neutral"] { color: var(--account-muted); }
+.account-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+.account-page .btn { background: var(--account-accent); }
+.account-page .btn:focus-visible { outline: 2px solid var(--account-accent); outline-offset: 2px; }
+
 /* ---------- 设置页 ---------- */
 .settings-card { max-width: 420px; margin: 30px auto 0; }
 .settings-card h2 { margin: 0 0 18px; font-size: 18px; }
@@ -192,8 +266,19 @@ img { max-width: 100%; }
 }
 .settings-card input:focus { border-color: var(--accent); }
 .settings-card input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--accent); margin: 0; }
+.settings-card select {
+  width: 100%; padding: 9px 13px; margin-top: 5px;
+  border: 1px solid var(--border); border-radius: 10px;
+  font: inherit; outline: none; background: var(--bg); color: var(--text);
+}
+.settings-card select:focus { border-color: var(--accent); }
 .settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 6px; }
 .save-tip { color: #7cb98a; font-size: 13.5px; }
+.storage-status { font-size: 14px; margin-bottom: 16px; }
+.storage-hint { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+.llm-global-hint { font-size: 13px; color: var(--muted); margin: -4px 0 12px; }
+.llm-model-row { display: flex; gap: 8px; align-items: center; margin-top: 5px; }
+.llm-model-row input { flex: 1; margin-top: 0 !important; }
 
 /* ---------- 灯箱 ---------- */
 .lightbox {
@@ -211,3 +296,43 @@ img { max-width: 100%; }
 .lb-close { top: 6px; right: 10px; }
 .lb-prev { left: 4px; top: 50%; transform: translateY(-50%); }
 .lb-next { right: 4px; top: 50%; transform: translateY(-50%); }
+
+/* ---------- emoji 面板 ---------- */
+.emoji-panel {
+  margin: 4px 0 8px; padding: 8px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+}
+.emoji-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+.emoji-btn {
+  min-width: 32px; height: 32px; background: none; border: none; border-radius: 7px;
+  font-size: 19px; line-height: 1;
+}
+.emoji-btn:hover { background: var(--accent-soft); }
+
+/* ---------- AI 润色按钮 ---------- */
+.md-polish {
+  margin-left: auto; height: 28px; padding: 0 10px;
+  background: var(--accent-soft); border: 1px solid var(--border); border-radius: 7px;
+  color: var(--accent); font-size: 13px; font-weight: 600;
+}
+.md-polish:hover { background: var(--accent); color: #fff; }
+.md-polish:disabled { opacity: 0.5; cursor: default; }
+
+/* ---------- 评论 ---------- */
+.btn.tiny { padding: 5px 14px; font-size: 13.5px; }
+.avatar.tiny { width: 26px; height: 26px; font-size: 12px; }
+.comments { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.comments-list { display: flex; flex-direction: column; gap: 10px; }
+.comment { display: flex; align-items: flex-start; gap: 8px; }
+.comment-body { flex: 1; min-width: 0; }
+.comment-meta { font-size: 13px; }
+.comment-meta .comment-time { color: var(--muted); margin-left: 6px; font-size: 12px; }
+.comment-text { font-size: 14px; word-break: break-word; margin-top: 1px; }
+.comment-del { flex-shrink: 0; }
+.comment-form { display: flex; gap: 8px; margin-top: 10px; }
+.comment-input {
+  flex: 1; padding: 7px 12px; border: 1px solid var(--border); border-radius: 999px;
+  font: inherit; outline: none; background: var(--bg);
+}
+.comment-input:focus { border-color: var(--accent); }
+

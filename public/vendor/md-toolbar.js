@@ -75,6 +75,36 @@ const ACTIONS = {
   'list-ul': (ta) => prefixLines(ta, '- '),
   'list-ol': (ta) => prefixLines(ta, '', true),
   tasklist: (ta) => prefixLines(ta, '- [ ] '),
+  emoji: toggleEmojiPanel,
+}
+
+// 常用表情
+const EMOJIS = '😀 😂 🥰 😍 🤣 😘 😊 🥺 😢 😭 😅 😎 🤔 😴 😮‍💨 ❤️ 💕 💑 🌹 ✨ 🎉 📷 🍽️ ☕ 🌸 🌞 🌙 ⭐ 🎈 🍰 🍷 🐱 🐶 🌈 🍃'.split(' ')
+
+let emojiPanel = null
+function toggleEmojiPanel(ta) {
+  if (emojiPanel && emojiPanel.isConnected) { emojiPanel.remove(); emojiPanel = null; return }
+  const panel = document.createElement('div')
+  panel.className = 'emoji-panel'
+  panel.innerHTML = `<div class="emoji-grid">${EMOJIS.map((e) => `<button type="button" class="emoji-btn">${e}</button>`).join('')}</div>`
+  panel.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.emoji-btn')
+    if (!btn) return
+    ev.preventDefault()
+    ev.stopPropagation()
+    replaceSelection(ta, btn.textContent)
+    ta.focus()
+  })
+  // 关闭面板:点击面板外部时移除
+  const closer = (e) => {
+    if (panel.contains(e.target) || e.target.closest('[data-md="emoji"]')) return
+    panel.remove()
+    emojiPanel = null
+    document.removeEventListener('click', closer)
+  }
+  setTimeout(() => document.addEventListener('click', closer), 0)
+  ta.parentElement.insertBefore(panel, ta)
+  emojiPanel = panel
 }
 
 export function attachMdToolbar(toolbar, textarea) {

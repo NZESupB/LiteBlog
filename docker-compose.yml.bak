@@ -6,14 +6,12 @@ services:
     ports:
       - "3000:3000"
     environment:
-      SITE_TITLE: 我们的日常
-      # 在一起的日期,用于顶栏"在一起 N 天"
+      SITE_TITLE: 标题
+      # 开始的日期
       ANNIVERSARY: "2024-05-20"
       # true 时访客必须登录才能浏览
       PRIVATE_MODE: "false"
       # 必改!随机长字符串,可用 openssl rand -hex 32 生成
       JWT_SECRET: "change-me-to-a-random-string"
-      # 初始账号(仅首次启动生效),格式: 昵称:密码,昵称:密码
-      USERS: "小A:123456,小B:123456"
     volumes:
       - ./data:/app/data

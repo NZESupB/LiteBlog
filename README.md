@@ -1,6 +1,6 @@
-# 我们的日常 · 情侣双人博客
+# 双人共享博客
 
-轻量自托管的情侣日常记录博客:双人账号发图文动态、时间轴、相册、恋爱天数,支持在线发布与编辑。
+轻量自托管的多人共享博客:多账号发图文动态、时间轴、相册、天数计数,支持在线发布与编辑。
 
 - 后端:Node 24 + Hono,SQLite 用 Node 内置模块,**全部依赖仅 2 个包,无原生编译**
 - 前端:原生 HTML/CSS/JS,无构建步骤,支持 Markdown
@@ -15,10 +15,9 @@
    | 变量 | 说明 |
    |---|---|
    | `SITE_TITLE` | 站点名称 |
-   | `ANNIVERSARY` | 在一起的日期(YYYY-MM-DD),顶栏显示"在一起 N 天" |
+   | `ANNIVERSARY` | 起始日期(YYYY-MM-DD),顶栏显示「第 N 天」,留空则不显示 |
    | `PRIVATE_MODE` | `true` 时访客必须登录才能浏览 |
    | `JWT_SECRET` | **必改**,登录会话签名密钥,`openssl rand -hex 32` 生成 |
-   | `USERS` | 初始账号,`昵称:密码` 逗号分隔,仅数据库为空时生效 |
 
 3. 启动:
 
@@ -26,7 +25,9 @@
    docker compose up -d --build
    ```
 
-4. 访问 `http://VPS_IP:3000`,用初始账号登录。登录后建议立即通过顶栏"改密码"修改密码。
+4. 访问 `http://VPS_IP:3000`,用初始账号登录(固定为 `user1 / pass1`、`user2 / pass2`,仅首次启动自动创建),并立即在「头像菜单 → 账号设置」中分别修改登录账号、显示名称和密码。
+
+**注意:初始账号只在数据库为空的首次启动时创建。** 重建镜像不会重置已有数据;如需重新初始化,先删除 `./data` 目录再启动。
 
 数据(数据库 + 图片)都在 `./data` 目录,备份该目录即可;升级时 `git pull && docker compose up -d --build`,数据不受影响。
 
@@ -44,7 +45,7 @@ blog.example.com {
 
 ```bash
 npm install
-npm start          # http://localhost:3000,默认账号 小A/123456、小B/123456
+npm start          # http://localhost:3000,默认账号 user1/pass1、user2/pass2
 ```
 
 环境变量与容器一致,可通过 `SITE_TITLE=xx PORT=3000 npm start` 方式覆盖。

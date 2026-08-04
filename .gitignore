@@ -4,6 +4,8 @@ node_modules/
 # 运行数据(SQLite + 上传图片,Docker 卷挂载点)
 data/
 
+TODO
+
 # 系统与编辑器
 .DS_Store
 Thumbs.db
@@ -12,3 +14,5 @@ Thumbs.db
 # 环境变量备份
 .env
 .agentdocs
+
+docker-compose.yml

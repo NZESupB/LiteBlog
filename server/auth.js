@@ -2,6 +2,7 @@
 import { sign, verify } from 'hono/jwt'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { randomBytes } from 'node:crypto'
+import { db } from './db.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || randomBytes(32).toString('hex')
 if (!process.env.JWT_SECRET) {
@@ -12,8 +13,10 @@ const COOKIE_NAME = 'session'
 const SESSION_DAYS = 30
 
 export async function createSession(c, user) {
+  const username = user.username || user.name
+  const name = user.displayName || user.name || username
   const token = await sign(
-    { uid: user.id, name: user.name, exp: Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400 },
+    { uid: user.id, username, name, displayName: name, exp: Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400 },
     JWT_SECRET
   )
   setCookie(c, COOKIE_NAME, token, {
@@ -35,7 +38,15 @@ export async function sessionMiddleware(c, next) {
   if (token) {
     try {
       const payload = await verify(token, JWT_SECRET, 'HS256')
-      user = { id: payload.uid, name: payload.name }
+      const current = db.prepare('SELECT username, name FROM users WHERE id = ?').get(payload.uid)
+      if (!current) throw new Error('会话用户不存在')
+      const legacyName = payload.displayName || payload.name || payload.username
+      user = {
+        id: payload.uid,
+        username: current.username || payload.username || legacyName,
+        name: current.name || legacyName,
+        displayName: current.name || payload.displayName || legacyName,
+      }
     } catch {
       // 过期或无效的会话按未登录处理
     }
