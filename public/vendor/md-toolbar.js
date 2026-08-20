@@ -79,10 +79,11 @@ const ACTIONS = {
 }
 
 // 常用表情
-const EMOJIS = '😀 😂 🥰 😍 🤣 😘 😊 🥺 😢 😭 😅 😎 🤔 😴 😮‍💨 ❤️ 💕 💑 🌹 ✨ 🎉 📷 🍽️ ☕ 🌸 🌞 🌙 ⭐ 🎈 🍰 🍷 🐱 🐶 🌈 🍃'.split(' ')
+const EMOJIS = '😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 🤔 🫡 🤗 😴 🥺 😢 😭 😤 😡 🤬 😱 😮 😲 🫠 😶‍🌫️ ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💕 💞 💓 💗 💖 💘 💝 💟 👍 👎 👏 🙌 👐 🤝 💪 🔥 ✨ 🎉 🎊 🌹 🌸 🌞 🌙 ⭐ 🎈 🍰 🍷 ☕ 🍽️ 📷 🌈 🍃 🐱 🐶'.split(' ')
 
 let emojiPanel = null
-function toggleEmojiPanel(ta) {
+// 表情面板:textarea 与单行 input 通用,trigger 为触发按钮(再次点击收起、点击面板外关闭)
+function toggleEmojiPanel(ta, trigger) {
   if (emojiPanel && emojiPanel.isConnected) { emojiPanel.remove(); emojiPanel = null; return }
   const panel = document.createElement('div')
   panel.className = 'emoji-panel'
@@ -97,7 +98,7 @@ function toggleEmojiPanel(ta) {
   })
   // 关闭面板:点击面板外部时移除
   const closer = (e) => {
-    if (panel.contains(e.target) || e.target.closest('[data-md="emoji"]')) return
+    if (panel.contains(e.target) || (trigger && trigger.contains(e.target))) return
     panel.remove()
     emojiPanel = null
     document.removeEventListener('click', closer)
@@ -107,12 +108,20 @@ function toggleEmojiPanel(ta) {
   emojiPanel = panel
 }
 
+// 给任意输入框挂表情按钮(评论框等,不带完整 Markdown 工具栏时用)
+export function attachEmojiButton(btn, input) {
+  btn.addEventListener('click', (e) => {
+    e.preventDefault()
+    toggleEmojiPanel(input, btn)
+  })
+}
+
 export function attachMdToolbar(toolbar, textarea) {
   toolbar.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-md]')
     if (!btn) return
     e.preventDefault()
-    ACTIONS[btn.dataset.md]?.(textarea)
+    ACTIONS[btn.dataset.md]?.(textarea, btn)
   })
   // 快捷键:Cmd/Ctrl+B 加粗,Cmd/Ctrl+I 斜体,Cmd/Ctrl+K 链接
   textarea.addEventListener('keydown', (e) => {

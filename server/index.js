@@ -143,6 +143,21 @@ function attachImages(posts) {
   return posts
 }
 
+function attachReactions(posts, userId = null) {
+  if (posts.length === 0) return posts
+  const ids = posts.map((p) => p.id)
+  const rows = db.prepare(`
+    SELECT post_id, emoji, COUNT(*) AS count,
+      SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) AS reacted
+    FROM post_reactions
+    WHERE post_id IN (${ids.map(() => '?').join(',')})
+    GROUP BY post_id, emoji
+    ORDER BY post_id, emoji`).all(userId || 0, ...ids)
+  const byPost = new Map(posts.map((p) => [p.id, (p.reactions = [])]))
+  for (const row of rows) byPost.get(row.post_id).push({ emoji: row.emoji, count: row.count, reacted: Boolean(row.reacted) })
+  return posts
+}
+
 app.get('/api/posts', (c) => {
   const limit = Math.min(Number(c.req.query('limit')) || 20, 50)
   const offset = Math.max(Number(c.req.query('offset')) || 0, 0)
@@ -153,7 +168,7 @@ app.get('/api/posts', (c) => {
       FROM posts p JOIN users u ON u.id = p.user_id
       ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`)
     .all(limit, offset)
-  const withImages = attachImages(posts)
+  const withImages = attachReactions(attachImages(posts), c.get('user')?.id)
   // 私密模式下未登录访客:按文章开关决定可见性,默认全隐
   if (siteConfig().privateMode && !c.get('user')) {
     for (const p of withImages) {
@@ -162,6 +177,22 @@ app.get('/api/posts', (c) => {
     }
   }
   return c.json({ total, posts: withImages })
+})
+
+// 单条动态(站内通知跳转的落地页),访客可见性规则与列表一致
+app.get('/api/posts/:id', (c) => {
+  const post = db
+    .prepare(`
+      SELECT p.id, p.content, p.created_at, p.updated_at, p.user_id, p.public_text, p.public_images, u.name AS author
+      FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`)
+    .get(Number(c.req.param('id')))
+  if (!post) return c.json({ error: '动态不存在' }, 404)
+  attachReactions(attachImages([post]), c.get('user')?.id)
+  if (siteConfig().privateMode && !c.get('user')) {
+    if (!post.public_text) post.content = ''
+    if (!post.public_images) post.images = []
+  }
+  return c.json({ post })
 })
 
 // ---------- 图片上传(选图即上传,发布时才归属动态) ----------
@@ -292,8 +323,8 @@ function ownPostOr404(c) {
 
 // 编辑/删除仅限发布后 24 小时内
 const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000
-function withinEditWindow(post) {
-  return Date.now() - new Date(post.created_at.replace(' ', 'T') + 'Z').getTime() <= EDIT_WINDOW_MS
+function withinEditWindow(record) {
+  return Date.now() - new Date(record.created_at.replace(' ', 'T') + 'Z').getTime() <= EDIT_WINDOW_MS
 }
 
 app.put('/api/posts/:id', requireAuth, async (c) => {
@@ -344,19 +375,25 @@ app.delete('/api/posts/:id', requireAuth, async (c) => {
 // ---------- 评论(仅登录用户,动态作者可管理本动态下的评论) ----------
 
 function postOr404(c) {
-  const post = db.prepare('SELECT id, user_id FROM posts WHERE id = ?').get(Number(c.req.param('id')))
+  const post = db.prepare('SELECT id, user_id, public_text FROM posts WHERE id = ?').get(Number(c.req.param('id')))
   if (!post) return [null, c.json({ error: '动态不存在' }, 404)]
   return [post, null]
 }
 
-// 取某条动态的评论(私密模式下未登录访客同样可看文字评论)
+// 评论属于文字内容，私密模式下访客只可读取公开正文所属文章的评论。
 app.get('/api/posts/:id/comments', (c) => {
   const [post, err] = postOr404(c)
   if (err) return err
+  if (siteConfig().privateMode && !c.get('user') && !post.public_text) {
+    return c.json({ error: '请先登录' }, 401)
+  }
   const rows = db
     .prepare(`
-      SELECT c.id, c.content, c.created_at, c.user_id, u.name AS author
+      SELECT c.id, c.content, c.created_at, c.user_id, c.reply_to, u.name AS author,
+             reply_user.name AS reply_author, reply.content AS reply_content
       FROM comments c JOIN users u ON u.id = c.user_id
+      LEFT JOIN comments reply ON reply.id = c.reply_to AND reply.post_id = c.post_id
+      LEFT JOIN users reply_user ON reply_user.id = reply.user_id
       WHERE c.post_id = ? ORDER BY c.id ASC`)
     .all(post.id)
   return c.json({ comments: rows })
@@ -365,26 +402,93 @@ app.get('/api/posts/:id/comments', (c) => {
 app.post('/api/posts/:id/comments', requireAuth, async (c) => {
   const [post, err] = postOr404(c)
   if (err) return err
-  const content = String((await c.req.json().catch(() => ({}))).content ?? '').trim()
+  const body = await c.req.json().catch(() => ({}))
+  const content = String(body.content ?? '').trim()
   if (!content) return c.json({ error: '评论不能为空' }, 400)
   if (content.length > 500) return c.json({ error: '评论不超过 500 字' }, 400)
+
+  const replyToId = body.replyToId == null || body.replyToId === '' ? null : Number(body.replyToId)
+  if (replyToId !== null && (!Number.isSafeInteger(replyToId) || replyToId < 1)) {
+    return c.json({ error: '回复目标无效' }, 400)
+  }
+  let replyAuthor = null
+  if (replyToId !== null) {
+    const reply = db
+      .prepare('SELECT c.id, u.name AS author FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ? AND c.post_id = ?')
+      .get(replyToId, post.id)
+    if (!reply) return c.json({ error: '回复的评论不存在' }, 400)
+    replyAuthor = reply.author
+  }
+
   const me = c.get('user')
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)')
-    .run(post.id, me.id, content)
-  return c.json({ id: Number(lastInsertRowid), content, user_id: me.id, author: me.name, created_at: new Date().toISOString().slice(0, 19).replace('T', ' ') })
+    .prepare('INSERT INTO comments (post_id, user_id, reply_to, content) VALUES (?, ?, ?, ?)')
+    .run(post.id, me.id, replyToId, content)
+  return c.json({
+    id: Number(lastInsertRowid), content, user_id: me.id, author: me.name,
+    reply_to: replyToId, reply_author: replyAuthor,
+    created_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+  })
 })
 
 // 删除评论:评论作者本人,或该动态的作者(在自己地盘可管理)
 app.delete('/api/posts/:id/comments/:cid', requireAuth, async (c) => {
-  const comment = db.prepare('SELECT c.id, c.user_id, p.user_id AS post_owner FROM comments c JOIN posts p ON p.id = c.post_id WHERE c.id = ?').get(Number(c.req.param('cid')))
+  const comment = db
+    .prepare('SELECT c.id, c.post_id, c.user_id, c.created_at, p.user_id AS post_owner FROM comments c JOIN posts p ON p.id = c.post_id WHERE c.id = ? AND c.post_id = ?')
+    .get(Number(c.req.param('cid')), Number(c.req.param('id')))
   if (!comment) return c.json({ error: '评论不存在' }, 404)
   const me = c.get('user')
   if (comment.user_id !== me.id && comment.post_owner !== me.id) {
     return c.json({ error: '只能删除自己的评论或自己动态下的评论' }, 403)
   }
+  if (!withinEditWindow(comment)) return c.json({ error: '评论发布超过 24 小时,不能再删除' }, 403)
+  // 被回复的评论删除后,其他评论回退为普通评论,不留下失效引用。
+  db.prepare('UPDATE comments SET reply_to = NULL WHERE reply_to = ?').run(comment.id)
   db.prepare('DELETE FROM comments WHERE id = ?').run(comment.id)
   return c.json({ ok: true })
+})
+
+// ---------- 站内通知(对方新评论提醒) ----------
+// 水位线方案:user_settings.comments_seen_id 记录已读的最大评论 id,
+// 晚于它且非本人发表的评论即为未读;双人博客里对方的任何评论都值得提醒。
+
+app.get('/api/notifications', requireAuth, (c) => {
+  const me = c.get('user')
+  const seenId = Number(getUserSetting(me.id, 'comments_seen_id', '0')) || 0
+  const items = db
+    .prepare(`
+      SELECT c.id, c.post_id, c.content, c.created_at, u.name AS author,
+             substr(p.content, 1, 60) AS post_excerpt,
+             (reply.user_id = ?) AS reply_to_me
+      FROM comments c
+      JOIN users u ON u.id = c.user_id
+      JOIN posts p ON p.id = c.post_id
+      LEFT JOIN comments reply ON reply.id = c.reply_to
+      WHERE c.id > ? AND c.user_id != ?
+      ORDER BY c.id DESC LIMIT 20`)
+    .all(me.id, seenId, me.id)
+  return c.json({ items: items.map((it) => ({ ...it, reply_to_me: Boolean(it.reply_to_me) })) })
+})
+
+app.post('/api/notifications/read', requireAuth, (c) => {
+  const maxId = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM comments').get().m
+  setUserSetting(c.get('user').id, 'comments_seen_id', String(maxId))
+  return c.json({ ok: true })
+})
+
+// 表情点评:同一用户对同一动态的同一表情可切换开关。
+const REACTION_EMOJIS = new Set('👍 ❤️ 😂 😍 🎉 😢 😡 👏 🔥 💯 🙌 🥰 😮 🤔'.split(' '))
+app.post('/api/posts/:id/reactions', requireAuth, async (c) => {
+  const [post, err] = postOr404(c)
+  if (err) return err
+  const emoji = String((await c.req.json().catch(() => ({}))).emoji ?? '')
+  if (!REACTION_EMOJIS.has(emoji)) return c.json({ error: '不支持的表情' }, 400)
+  const me = c.get('user')
+  const existing = db.prepare('SELECT 1 FROM post_reactions WHERE post_id = ? AND user_id = ? AND emoji = ?').get(post.id, me.id, emoji)
+  if (existing) db.prepare('DELETE FROM post_reactions WHERE post_id = ? AND user_id = ? AND emoji = ?').run(post.id, me.id, emoji)
+  else db.prepare('INSERT INTO post_reactions (post_id, user_id, emoji) VALUES (?, ?, ?)').run(post.id, me.id, emoji)
+  const rows = db.prepare('SELECT emoji, COUNT(*) AS count, SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END) AS reacted FROM post_reactions WHERE post_id = ? GROUP BY emoji ORDER BY emoji').all(me.id, post.id)
+  return c.json({ reactions: rows.map((row) => ({ emoji: row.emoji, count: row.count, reacted: Boolean(row.reacted) })) })
 })
 
 // ---------- 相册 ----------
@@ -452,7 +556,7 @@ app.post('/api/storage/webdav/test', requireAuth, async (c) => {
   return c.json(r, r.ok ? 200 : 400)
 })
 
-// ---------- AI 润色(LLM 代理:凭据只存服务端,前端不接触 API Key) ----------
+// ---------- AI 优化(LLM 代理:凭据只存服务端,前端不接触 API Key) ----------
 
 // LLM 配置读写:共享 API + 个人模型,或用户独立 API。旧 default 模式兼容为 shared。
 app.get('/api/llm', requireAuth, (c) => {
@@ -533,18 +637,54 @@ app.post('/api/llm/test', requireAuth, async (c) => {
   return c.json(r, r.ok ? 200 : 400)
 })
 
-// 润色:接收正文,返回润色后的 Markdown(按当前用户生效配置)
+// AI 优化:接收正文,以 SSE 流式返回优化后的 Markdown(按当前用户生效配置)。
+// 上游连不通时仍走普通 JSON 错误响应,前端沿用原有错误处理。
 app.post('/api/llm/polish', requireAuth, async (c) => {
   const { text } = await c.req.json().catch(() => ({}))
   const content = String(text ?? '').trim()
-  if (!content) return c.json({ error: '正文为空,无需润色' }, 400)
+  if (!content) return c.json({ error: '正文为空,无需优化' }, 400)
   const cfg = llmConfig(c.get('user').id)
-  if (!cfg.baseUrl) return c.json({ error: '尚未配置 AI 润色接口,请到站点设置填写' }, 400)
-  const prompt = `请润色下面这段 Markdown 日记正文,保持原意与第一人称语气,使其更流畅自然,保留 Markdown 结构与图片链接,只输出润色后的正文,不要任何解释或代码块包裹:\n\n${content}`
-  const r = await llmChat(cfg, prompt, false).catch((e) => ({ ok: false, message: e.message }))
-  if (!r.ok) return c.json({ error: r.message || 'AI 润色失败' }, 400)
-  return c.json({ text: r.text })
+  if (!cfg.baseUrl) return c.json({ error: '尚未配置 AI 优化接口,请到站点设置填写' }, 400)
+  let upstream
+  try {
+    upstream = await llmChatStream(cfg, polishPrompt(content))
+  } catch (e) {
+    return c.json({ error: e.message || 'AI 优化失败' }, 400)
+  }
+  return new Response(sseFromUpstream(upstream), {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no', // 反代(nginx)下禁用缓冲,否则流式会被攒成一整块
+    },
+  })
 })
+
+function polishPrompt(content) {
+  return `你是一位温暖细腻的日记优化助手。请把下面的 Markdown 日记正文优化得更好。
+
+【必须保持】
+- 第一人称视角、原意与真实情感,不新增事实,不编造细节
+- 所有图片链接与外部链接必须原样保留,不得改动或丢失
+- 原有 Markdown 结构(标题、列表、引用、加粗、分割线等)整体保留并理顺
+
+【优化方向】
+- 口语化、自然真诚,像本人随手写下的文字,避免书面腔与 AI 味
+- 修正错别字、病句与啰嗦的表达,让句子流畅有节奏
+- 过长的段落可适度拆分,让排版更易读
+- 可用少量 emoji 点缀情感(整篇不超过 5 个、位置自然),不强行堆砌
+
+【语气】
+- 顺着原文的情绪走:开心的轻快活泼,平淡的克制温和,难过的安静不煽情
+
+【输出要求】
+- 只输出优化后的完整 Markdown 正文,不要任何解释、前言或结尾
+- 不要用代码块包裹,直接输出正文
+
+待优化正文:
+${content}`
+}
 
 function isLlmBaseUrl(value) {
   return /^https?:\/\/\S+/.test(value)
@@ -594,6 +734,23 @@ function llmConfig(userId) {
   return { ...shared, model: userId ? getUserSetting(userId, 'llm_shared_model', shared.model) : shared.model }
 }
 
+function llmContentText(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (typeof part === 'string') return part
+      if (typeof part?.text === 'string') return part.text
+      if (typeof part?.text?.value === 'string') return part.text.value
+      return ''
+    }).join('')
+  }
+  return ''
+}
+
+function llmMessageText(message) {
+  return llmContentText(message?.content).trim()
+}
+
 // 调用兼容 OpenAI Chat Completions 的接口
 async function llmChat(cfg, userText, isTest) {
   const url = cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions'
@@ -612,9 +769,77 @@ async function llmChat(cfg, userText, isTest) {
     throw new Error(`接口返回错误 (${res.status}): ${t.slice(0, 200)}`)
   }
   const data = await res.json().catch(() => null)
-  const text = data?.choices?.[0]?.message?.content ?? ''
-  if (!text) throw new Error('接口未返回有效内容')
-  return { ok: true, text: text.trim() }
+  const text = llmMessageText(data?.choices?.[0]?.message)
+  // 测试连接只验证上游请求是否成功；优化则必须取得可写入正文的文本。
+  if (!text && !isTest) throw new Error('接口未返回有效内容')
+  return { ok: true, text }
+}
+
+// 流式调用:先拿到上游响应并校验状态,便于失败时仍以 JSON 报错而不是发一个空流
+async function llmChatStream(cfg, userText) {
+  const url = cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions'
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    body: JSON.stringify({
+      model: cfg.model || 'gpt-4o-mini',
+      messages: [{ role: 'user', content: userText }],
+      stream: true,
+    }),
+  })
+  if (!res.ok) {
+    const t = await res.text().catch(() => '')
+    throw new Error(`接口返回错误 (${res.status}): ${t.slice(0, 200)}`)
+  }
+  if (!res.body) throw new Error('接口未返回流式内容')
+  return res
+}
+
+// 把上游 OpenAI 兼容 SSE 归一成本站协议:data:{"delta"} / data:{"error"} / data:[DONE]
+function sseFromUpstream(upstream) {
+  const encoder = new TextEncoder()
+  const reader = upstream.body.getReader()
+  return new ReadableStream({
+    async start(ctrl) {
+      const send = (obj) => ctrl.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let received = false
+      try {
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          // SSE 以空行分隔事件,末段可能不完整,留在缓冲里等下一个分片
+          const blocks = buffer.split(/\r?\n\r?\n/)
+          buffer = blocks.pop() ?? ''
+          for (const block of blocks) {
+            for (const line of block.split(/\r?\n/)) {
+              if (!line.startsWith('data:')) continue
+              const payload = line.slice(5).trim()
+              if (!payload || payload === '[DONE]') continue
+              let json = null
+              try { json = JSON.parse(payload) } catch { continue }
+              // 增量不能 trim,否则块间的换行与空格会被吞掉
+              const delta = llmContentText(json?.choices?.[0]?.delta?.content)
+              if (!delta) continue
+              received = true
+              send({ delta })
+            }
+          }
+        }
+        if (!received) send({ error: '接口未返回有效内容' })
+      } catch (e) {
+        send({ error: e.message || 'AI 优化中断' })
+      }
+      ctrl.enqueue(encoder.encode('data: [DONE]\n\n'))
+      ctrl.close()
+    },
+    cancel() {
+      // 前端中止或断开时同步掐断上游,避免请求悬挂
+      reader.cancel().catch(() => {})
+    },
+  })
 }
 
 // ---------- 图片文件与静态资源 ----------
