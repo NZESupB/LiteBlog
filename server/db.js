@@ -52,10 +52,19 @@ db.exec(`
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
     user_id    INTEGER NOT NULL REFERENCES users(id),
+    reply_to   INTEGER,
     content    TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id);
+  CREATE TABLE IF NOT EXISTS post_reactions (
+    post_id    INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    emoji      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (post_id, user_id, emoji)
+  );
+  CREATE INDEX IF NOT EXISTS idx_reactions_post ON post_reactions(post_id);
   -- 按用户存放个性化配置(目前仅 LLM),与全局 settings 分离
   CREATE TABLE IF NOT EXISTS user_settings (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -93,6 +102,13 @@ if (!postColumns.some((col) => col.name === 'public_text')) {
 if (!postColumns.some((col) => col.name === 'public_images')) {
   db.exec('ALTER TABLE posts ADD COLUMN public_images INTEGER NOT NULL DEFAULT 0')
 }
+
+// 旧库补列:评论回复使用同一动态内的扁平关联,根评论保持 NULL。
+const commentColumns = db.prepare('PRAGMA table_info(comments)').all()
+if (!commentColumns.some((col) => col.name === 'reply_to')) {
+  db.exec('ALTER TABLE comments ADD COLUMN reply_to INTEGER')
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_comments_reply_to ON comments(reply_to)')
 
 export function hashPassword(password) {
   const salt = randomBytes(16).toString('hex')
