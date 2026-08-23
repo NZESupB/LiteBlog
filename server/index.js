@@ -3,14 +3,17 @@ import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { sessionMiddleware, requireAuth, createSession, clearSession } from './auth.js'
 import { LOCAL, WEBDAV, activeBackend, putImage, getImage, deleteImage } from './storage.js'
+import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser } from './push.js'
 import * as webdav from './webdav.js'
 
 const PORT = Number(process.env.PORT) || 3000
+const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const IMAGE_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' }
@@ -412,18 +415,21 @@ app.post('/api/posts/:id/comments', requireAuth, async (c) => {
     return c.json({ error: '回复目标无效' }, 400)
   }
   let replyAuthor = null
+  let replyUserId = null
   if (replyToId !== null) {
     const reply = db
-      .prepare('SELECT c.id, u.name AS author FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ? AND c.post_id = ?')
+      .prepare('SELECT c.id, c.user_id, u.name AS author FROM comments c JOIN users u ON u.id = c.user_id WHERE c.id = ? AND c.post_id = ?')
       .get(replyToId, post.id)
     if (!reply) return c.json({ error: '回复的评论不存在' }, 400)
     replyAuthor = reply.author
+    replyUserId = reply.user_id
   }
 
   const me = c.get('user')
   const { lastInsertRowid } = db
     .prepare('INSERT INTO comments (post_id, user_id, reply_to, content) VALUES (?, ?, ?, ?)')
     .run(post.id, me.id, replyToId, content)
+  pushComment({ commentId: Number(lastInsertRowid), postId: post.id, author: me, content, replyUserId })
   return c.json({
     id: Number(lastInsertRowid), content, user_id: me.id, author: me.name,
     reply_to: replyToId, reply_author: replyAuthor,
@@ -475,6 +481,44 @@ app.post('/api/notifications/read', requireAuth, (c) => {
   setUserSetting(c.get('user').id, 'comments_seen_id', String(maxId))
   return c.json({ ok: true })
 })
+
+// ---------- 浏览器系统通知(Web Push) ----------
+// 铃铛轮询只在页面活着时有效,关掉网页就收不到,所以系统通知一律走 Web Push:
+// 浏览器把订阅交给服务端,评论落库后由服务端直接推给推送服务,与页面是否存在无关。
+
+app.get('/api/push/key', requireAuth, (c) => c.json({ key: vapidPublicKey() }))
+
+app.post('/api/push/subscribe', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const endpoint = String(body.endpoint ?? '')
+  const p256dh = String(body.keys?.p256dh ?? '')
+  const auth = String(body.keys?.auth ?? '')
+  if (!endpoint.startsWith('https://') || !p256dh || !auth) return c.json({ error: '订阅信息不完整' }, 400)
+  saveSubscription(c.get('user').id, { endpoint, p256dh, auth })
+  return c.json({ ok: true })
+})
+
+app.post('/api/push/unsubscribe', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  removeSubscription(c.get('user').id, String(body.endpoint ?? ''))
+  return c.json({ ok: true })
+})
+
+// 新评论推给除发表者外的所有人,与 /api/notifications 的未读口径一致。
+// 推送依赖外部服务,不能拖慢或拖垮评论接口,因此不 await、失败只在 push.js 里记日志。
+function pushComment({ commentId, postId, author, content, replyUserId }) {
+  const excerpt = content.length > 80 ? content.slice(0, 80) + '…' : content
+  const title = `${author.name} · ${siteConfig().title}`
+  for (const { id } of db.prepare('SELECT id FROM users WHERE id != ?').all(author.id)) {
+    pushToUser(id, {
+      title,
+      body: `${id === replyUserId ? '回复了你' : '评论了'}: ${excerpt}`,
+      tag: `comment-${commentId}`,
+      postId,
+      commentId,
+    })
+  }
+}
 
 // 表情点评:同一用户对同一动态的同一表情可切换开关。
 const REACTION_EMOJIS = new Set('👍 ❤️ 😂 😍 🎉 😢 😡 👏 🔥 💯 🙌 🥰 😮 🤔'.split(' '))
@@ -868,6 +912,17 @@ app.get('/uploads/:name', async (c) => {
     console.warn(`读取 WebDAV 图片 ${name} 失败: ${e.message}`)
     return c.text('Bad Gateway', 502)
   }
+})
+
+// PWA 的应用名取自 manifest 的 name(优先级高于 <title>),静态文件跟不上后台改的站点名称,
+// 所以按请求渲染:图标等字段仍只有 public/manifest.webmanifest 一份来源,这里只覆盖名称。
+const MANIFEST = JSON.parse(readFileSync(path.join(PUBLIC_DIR, 'manifest.webmanifest'), 'utf8'))
+app.get('/manifest.webmanifest', (c) => {
+  const { title } = siteConfig()
+  return c.body(JSON.stringify({ ...MANIFEST, name: title, short_name: title }), 200, {
+    'Content-Type': 'application/manifest+json',
+    'Cache-Control': 'no-cache',
+  })
 })
 
 app.use('*', serveStatic({ root: './public' }))

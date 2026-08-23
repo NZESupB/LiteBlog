@@ -1318,23 +1318,6 @@ async function renderStorageCard() {
 
 // 站内通知铃铛:轮询未读评论,点开即标记已读,点通知项跳到对应动态并高亮评论
 let notifyTimer = null
-let browserNotificationBaseline = null
-
-function browserNotificationKey() {
-  return site?.user ? `browser-notifications:${site.user.id}` : ''
-}
-
-function readBrowserNotificationId() {
-  try { return Number(localStorage.getItem(`${browserNotificationKey()}:last-id`)) || 0 } catch { return 0 }
-}
-
-function writeBrowserNotificationId(id) {
-  try { localStorage.setItem(`${browserNotificationKey()}:last-id`, String(id)) } catch {}
-}
-
-function browserNotificationsEnabled() {
-  try { return localStorage.getItem(browserNotificationKey()) === 'enabled' } catch { return false }
-}
 
 function notificationTarget(postId, commentId) {
   pendingCommentFocus = { postId, commentId }
@@ -1344,64 +1327,86 @@ function notificationTarget(postId, commentId) {
   window.focus?.()
 }
 
-async function showBrowserNotification(item) {
-  if (document.visibilityState !== 'hidden' || !browserNotificationsEnabled() || !('Notification' in window) || Notification.permission !== 'granted') return true
-  const excerpt = item.content.length > 80 ? item.content.slice(0, 80) + '…' : item.content
-  const options = {
-    body: `${item.reply_to_me ? '回复了你' : '评论了'}: ${excerpt}`,
-    tag: `comment-${item.id}`,
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
-    data: { postId: item.post_id, commentId: item.id },
-  }
-  try {
-    const registration = await serviceWorkerRegistration
-    if (registration?.showNotification) {
-      try {
-        await registration.showNotification(`${item.author} · ${site.title}`, options)
-        return true
-      } catch {}
-    }
-    const notice = new Notification(`${item.author} · ${site.title}`, options)
-    notice.onclick = () => notificationTarget(item.post_id, item.id)
-    return true
-  } catch {
-    return false
-  }
+// 浏览器系统通知走 Web Push:订阅交给服务端保存,新评论由服务端直接推给推送服务,
+// 页面切后台或整个关掉都能收到(轮询做不到这点),展示由 sw.js 的 push 事件负责。
+
+// applicationServerKey 只接受二进制,服务端给的是 base64url 公钥
+function base64UrlToBytes(value) {
+  const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
+  const raw = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
+  return Uint8Array.from(raw, (ch) => ch.charCodeAt(0))
 }
 
-async function toggleBrowserNotifications(button) {
-  if (!('Notification' in window)) return
-  if (browserNotificationsEnabled() && Notification.permission === 'granted') {
-    try { localStorage.removeItem(browserNotificationKey()) } catch {}
-    button.querySelector('span').textContent = '开启浏览器通知'
-    return
-  }
-  if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-    alert('浏览器通知需要 HTTPS 环境')
-    return
-  }
+async function currentPushSubscription() {
+  const registration = await serviceWorkerRegistration
+  return registration?.pushManager ? registration.pushManager.getSubscription() : null
+}
+
+async function enablePush() {
+  const registration = await serviceWorkerRegistration
+  if (!registration?.pushManager) throw new Error('浏览器不支持推送')
+  const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
+  if (permission !== 'granted') return false
+  const { key } = await api('/api/push/key')
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: base64UrlToBytes(key),
+  })
   try {
-    const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
-    if (permission !== 'granted') {
-      button.querySelector('span').textContent = permission === 'denied' ? '通知权限已被阻止' : '开启浏览器通知'
-      button.disabled = permission === 'denied'
-      return
-    }
-    localStorage.setItem(browserNotificationKey(), 'enabled')
-    button.querySelector('span').textContent = '关闭浏览器通知'
-  } catch {
-    alert('无法开启浏览器通知')
+    await api('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(subscription.toJSON()),
+    })
+  } catch (e) {
+    // 服务端没存下就等于没开,留着浏览器侧的订阅只会让开关显示成已开启
+    await subscription.unsubscribe()
+    throw e
   }
+  return true
+}
+
+async function disablePush() {
+  const subscription = await currentPushSubscription()
+  if (!subscription) return
+  await api('/api/push/unsubscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint: subscription.endpoint }),
+  })
+  await subscription.unsubscribe()
 }
 
 function browserNotificationAction() {
-  const supported = 'Notification' in window
-  const enabled = supported && Notification.permission === 'granted' && browserNotificationsEnabled()
-  const blocked = supported && Notification.permission === 'denied'
-  const label = !supported ? '浏览器不支持通知' : blocked ? '通知权限已被阻止' : enabled ? '关闭浏览器通知' : '开启浏览器通知'
-  const button = el(`<button class="dropdown-item browser-notify" type="button"${!supported || blocked ? ' disabled' : ''}>${icon('bell')}<span>${label}</span></button>`)
-  if (supported && !blocked) button.onclick = () => toggleBrowserNotifications(button)
+  // 先给出常见态的文案,等 sync() 拿到真实订阅状态再校正;Service Worker 迟迟不激活时也不会是个空白项
+  const button = el(`<button class="dropdown-item browser-notify" type="button" disabled>${icon('bell')}<span>开启浏览器通知</span></button>`)
+  const label = $('span', button)
+  // pushManager 只在安全上下文里存在,http 部署时直接告知原因,别让用户点了没反应
+  if (!('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator)) {
+    label.textContent = window.isSecureContext ? '浏览器不支持通知' : '通知需要 HTTPS'
+    return button
+  }
+  if (Notification.permission === 'denied') {
+    label.textContent = '通知权限已被阻止'
+    return button
+  }
+
+  const sync = async () => {
+    label.textContent = (await currentPushSubscription()) ? '关闭浏览器通知' : '开启浏览器通知'
+    button.disabled = false
+  }
+  button.onclick = async () => {
+    button.disabled = true
+    label.textContent = '处理中…'
+    try {
+      if (await currentPushSubscription()) await disablePush()
+      else if (!await enablePush()) alert('未获得通知权限')
+    } catch (e) {
+      alert(e.message || '无法开启浏览器通知')
+    }
+    await sync()
+  }
+  sync()
   return button
 }
 
@@ -1418,26 +1423,7 @@ function renderNotifyBell() {
 
   async function refresh() {
     try {
-      const nextItems = (await api('/api/notifications')).items
-      const maxId = nextItems.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0)
-      if (browserNotificationBaseline === null) {
-        browserNotificationBaseline = Math.max(maxId, readBrowserNotificationId())
-        writeBrowserNotificationId(browserNotificationBaseline)
-      } else {
-        const storedId = readBrowserNotificationId()
-        const currentBaseline = Math.max(browserNotificationBaseline, storedId)
-        const freshItems = nextItems
-          .filter((item) => Number(item.id) > currentBaseline)
-          .sort((a, b) => Number(a.id) - Number(b.id))
-        let handledId = currentBaseline
-        for (const item of freshItems) {
-          if (!await showBrowserNotification(item)) break
-          handledId = Number(item.id)
-        }
-        browserNotificationBaseline = handledId
-        writeBrowserNotificationId(browserNotificationBaseline)
-      }
-      items = nextItems
+      items = (await api('/api/notifications')).items
     } catch { return false } // 会话过期等,静默跳过本轮
     badge.textContent = items.length > 9 ? '9+' : String(items.length)
     badge.hidden = items.length === 0
@@ -1523,6 +1509,8 @@ function renderUserArea() {
   document.addEventListener('click', () => (drop.hidden = true))
   menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => (drop.hidden = true)))
   $('.logout', menu).onclick = async () => {
+    // 先退订再退出:退订接口需要登录态,且不能让已登出的账号继续往这台设备推通知
+    await disablePush().catch(() => {})
     await api('/api/logout', { method: 'POST' })
     location.reload()
   }
@@ -1554,6 +1542,7 @@ function route() {
 async function init() {
   site = await api('/api/site')
   document.title = site.title
+  $('meta[name="apple-mobile-web-app-title"]').content = site.title
   $('.site-title').textContent = site.title
   if (site.anniversary) {
     const days = Math.floor((Date.now() - new Date(site.anniversary + 'T00:00:00')) / 86400000) + 1
@@ -1564,7 +1553,11 @@ async function init() {
     }
   }
   if ('serviceWorker' in navigator) {
-    serviceWorkerRegistration = navigator.serviceWorker.register('/sw.js').catch(() => null)
+    // 推送订阅要求 registration 已激活,统一等到 ready 再交给通知开关使用
+    serviceWorkerRegistration = navigator.serviceWorker
+      .register('/sw.js')
+      .then(() => navigator.serviceWorker.ready)
+      .catch(() => null)
   }
   renderUserArea()
   route()

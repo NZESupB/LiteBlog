@@ -1,4 +1,4 @@
-const CACHE_NAME = 'couple-blog-shell-v2'
+const CACHE_NAME = 'couple-blog-shell-v3'
 const SHELL = [
   '/',
   '/index.html',
@@ -37,6 +37,19 @@ self.addEventListener('fetch', (event) => {
     if (response.ok) caches.open(CACHE_NAME).then((cache) => cache.put(event.request, response.clone()))
     return response
   }).catch(() => caches.match(event.request)))
+})
+
+// 服务端推来的新评论。userVisibleOnly 订阅必须弹通知,取不到载荷时也给个兜底文案。
+self.addEventListener('push', (event) => {
+  let data = {}
+  try { data = event.data?.json() ?? {} } catch {}
+  event.waitUntil(self.registration.showNotification(data.title || '新评论', {
+    body: data.body || '',
+    tag: data.tag,
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    data: { postId: data.postId, commentId: data.commentId },
+  }))
 })
 
 self.addEventListener('notificationclick', (event) => {

@@ -72,6 +72,15 @@ db.exec(`
     value   TEXT NOT NULL,
     PRIMARY KEY (user_id, key)
   );
+  -- Web Push 订阅:一个用户可能在多台设备上开启通知,endpoint 天然唯一
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint   TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 `)
 
 // 旧库迁移:早期 users.name 同时承担登录账号和显示名称,先复制为 username
