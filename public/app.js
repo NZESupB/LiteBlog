@@ -53,7 +53,9 @@ async function streamSse(path, body, onEvent, signal) {
   })
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => ({}))
-    throw new Error(data.error || data.message || `请求失败 (${res.status})`)
+    const error = new Error(data.error || data.message || `请求失败 (${res.status})`)
+    error.code = data.code || ''
+    throw error
   }
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
@@ -72,7 +74,11 @@ async function streamSse(path, body, onEvent, signal) {
         if (!payload || payload === '[DONE]') continue
         let evt = null
         try { evt = JSON.parse(payload) } catch { continue }
-        if (evt.error) throw new Error(evt.error)
+        if (evt.error) {
+          const error = new Error(evt.error)
+          error.code = evt.code || ''
+          throw error
+        }
         onEvent(evt)
       }
     }
@@ -370,6 +376,11 @@ function createComposer(post, onDone, onCancel) {
       statusEl.textContent = polishResult.trim() ? '已完成,可对照后决定是否采用' : 'AI 未返回有效结果'
     } catch (e) {
       if (e.name === 'AbortError') return // 取消由 closeCompare 收尾
+      if (e.code === 'LLM_NOT_CONFIGURED') {
+        compare.hidden = true
+        location.hash = '#/settings'
+        return
+      }
       statusEl.textContent = ''
       errorLine.textContent = e.message
       if (!polishResult) { compare.hidden = true }
@@ -875,11 +886,16 @@ function renderLogin() {
     error.textContent = ''
     submit.disabled = true
     try {
-      await api('/api/login', {
+      const loginResult = await api('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: $('[name=username]', form).value.trim(), password: $('[name=password]', form).value }),
       })
+      // 登录成功后再请求权限,避免错误账号也触发浏览器授权弹窗。
+      const permission = await requestPushPermissionFromGesture()
+      if (permission !== 'unsupported') {
+        try { sessionStorage.setItem(pushAttemptKey(loginResult.user?.id), '1') } catch {}
+      }
       location.hash = '#/'
       location.reload()
     } catch (e) {
@@ -1366,6 +1382,36 @@ async function enablePush() {
   return true
 }
 
+function requestPushPermissionFromGesture() {
+  if (!window.isSecureContext ||
+      !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator) ||
+      Notification.permission !== 'default') return Promise.resolve('unsupported')
+  return Notification.requestPermission().catch(() => 'default')
+}
+
+function pushAttemptKey(userId) {
+  return `push-auto-attempted:${userId || 'anonymous'}`
+}
+
+// 登录后自动尝试一次通知订阅。浏览器若要求用户手势或策略阻止,保留菜单中的手动开关。
+async function autoEnablePush() {
+  if (!site?.user || !window.isSecureContext ||
+      !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator) ||
+      Notification.permission === 'denied') return
+  try {
+    if (await currentPushSubscription()) return
+    if (Notification.permission === 'default') {
+      let attempted = false
+      try { attempted = sessionStorage.getItem(pushAttemptKey(site.user.id)) === '1' } catch {}
+      if (attempted) return
+      try { sessionStorage.setItem(pushAttemptKey(site.user.id), '1') } catch {}
+    }
+    await enablePush()
+  } catch {
+    // 自动请求失败时不弹出错误,用户仍可从头像菜单手动开启。
+  }
+}
+
 async function disablePush() {
   const subscription = await currentPushSubscription()
   if (!subscription) return
@@ -1561,6 +1607,7 @@ async function init() {
   }
   renderUserArea()
   route()
+  if (site.user) autoEnablePush()
 }
 
 window.addEventListener('hashchange', route)

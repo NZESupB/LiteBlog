@@ -688,7 +688,12 @@ app.post('/api/llm/polish', requireAuth, async (c) => {
   const content = String(text ?? '').trim()
   if (!content) return c.json({ error: '正文为空,无需优化' }, 400)
   const cfg = llmConfig(c.get('user').id)
-  if (!cfg.baseUrl) return c.json({ error: '尚未配置 AI 优化接口,请到站点设置填写' }, 400)
+  if (!cfg.baseUrl) {
+    return c.json({
+      code: 'LLM_NOT_CONFIGURED',
+      error: '尚未配置 AI 优化接口,请到站点设置填写',
+    }, 400)
+  }
   let upstream
   try {
     upstream = await llmChatStream(cfg, polishPrompt(content))
@@ -765,9 +770,9 @@ function draftLlmConfig(userId, body) {
   return { mode, baseUrl, model, apiKey }
 }
 
-// 共享模式读取共享凭据和个人模型;独立模式完全读取当前用户自己的配置。
-function llmConfig(userId) {
-  if (userId && llmMode(userId) === 'custom') {
+// 读取单一用户当前选择的配置, 不包含跨用户回退。
+function directLlmConfig(userId) {
+  if (llmMode(userId) === 'custom') {
     return {
       baseUrl: getUserSetting(userId, 'llm_base_url', ''),
       model: getUserSetting(userId, 'llm_model', ''),
@@ -775,7 +780,18 @@ function llmConfig(userId) {
     }
   }
   const shared = sharedLlmConfig()
-  return { ...shared, model: userId ? getUserSetting(userId, 'llm_shared_model', shared.model) : shared.model }
+  return { ...shared, model: getUserSetting(userId, 'llm_shared_model', shared.model) }
+}
+
+// 当前用户未配置接口时, 回退到双人站点中另一方的当前生效配置。
+function llmConfig(userId) {
+  if (!userId) return sharedLlmConfig()
+  const current = directLlmConfig(userId)
+  if (current.baseUrl) return current
+  const other = db.prepare('SELECT id FROM users WHERE id != ? ORDER BY id LIMIT 1').get(userId)
+  if (!other) return current
+  const fallback = directLlmConfig(other.id)
+  return fallback.baseUrl ? fallback : current
 }
 
 function llmContentText(content) {
