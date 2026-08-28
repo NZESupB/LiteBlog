@@ -1,14 +1,21 @@
 // 前端逻辑:hash 路由 + 时间轴 / 相册 / 登录 / 账号 / 设置视图
 import { attachMdToolbar, attachEmojiButton } from '/vendor/md-toolbar.js'
 import { icon } from '/vendor/icons.js'
+import { api, streamSse, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
-let site = null // { title, anniversary, privateMode, user }
+let site = null // { title, anniversary, privateMode, user, reactionEmojis }
 const PAGE_SIZE = 20
-const AVATAR_COLORS = ['#e8747c', '#7ca9e8', '#8ec9a0', '#c99be0', '#e8b06e']
-const REACTION_EMOJIS = '👍 ❤️ 😂 😍 🎉 😢 😡 👏 🔥 💯 🙌 🥰 😮 🤔'.split(' ')
+// 表情列表由 /api/site 统一下发,本地这份仅是接口异常时的兜底
+const FALLBACK_REACTION_EMOJIS = '👍 ❤️ 😂 😍 🎉 😢 😡 👏 🔥 💯 🙌 🥰 😮 🤔'.split(' ')
+const reactionEmojis = () => (Array.isArray(site?.reactionEmojis) && site.reactionEmojis.length ? site.reactionEmojis : FALLBACK_REACTION_EMOJIS)
+// 评论删除按钮的显隐仅是界面提示,服务端仍按 24h 窗口强校验;动态编辑则用服务端下发的 canEdit
 const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000
+function withinEditWindow(createdAt) {
+  const time = parseTime(createdAt).getTime()
+  return Number.isFinite(time) && Date.now() - time <= EDIT_WINDOW_MS
+}
 let activePostMenu = null
 let serviceWorkerRegistration = null
 
@@ -33,101 +40,11 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closePostMenu()
 })
 
-// ---------- 基础工具 ----------
-
-async function api(path, opts = {}) {
-  const res = await fetch(path, opts)
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || data.message || `请求失败 (${res.status})`)
-  return data
-}
-
-// SSE 流式请求:服务端协议为 data:{"delta"} / data:{"error"} / data:[DONE]
-// 上游失败时服务端仍回普通 JSON 错误,所以这里按 res.ok 分流,错误语义与 api() 一致
-async function streamSse(path, body, onEvent, signal) {
-  const res = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  })
-  if (!res.ok || !res.body) {
-    const data = await res.json().catch(() => ({}))
-    throw new Error(data.error || data.message || `请求失败 (${res.status})`)
-  }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  for (;;) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    // 事件以空行分隔,末段可能不完整,留在缓冲里等下一个分片
-    const blocks = buffer.split(/\r?\n\r?\n/)
-    buffer = blocks.pop() ?? ''
-    for (const block of blocks) {
-      for (const line of block.split(/\r?\n/)) {
-        if (!line.startsWith('data:')) continue
-        const payload = line.slice(5).trim()
-        if (!payload || payload === '[DONE]') continue
-        let evt = null
-        try { evt = JSON.parse(payload) } catch { continue }
-        if (evt.error) throw new Error(evt.error)
-        onEvent(evt)
-      }
-    }
-  }
-}
-
-function el(html) {
-  const t = document.createElement('template')
-  t.innerHTML = html.trim()
-  return t.content.firstElementChild
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
-}
-
-function setFormMessage(element, message, state = 'error') {
-  element.textContent = message
-  element.dataset.state = message ? state : ''
-}
-
-function avatarColor(name) {
-  let h = 0
-  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0
-  return AVATAR_COLORS[h % AVATAR_COLORS.length]
-}
-
-// SQLite 存的是 UTC,转本地时间展示
-function parseTime(s) {
-  return new Date(s.replace(' ', 'T') + 'Z')
-}
-
-function withinEditWindow(createdAt) {
-  const time = parseTime(createdAt).getTime()
-  return Number.isFinite(time) && Date.now() - time <= EDIT_WINDOW_MS
-}
-
-function formatTime(s) {
-  const d = parseTime(s)
-  const now = new Date()
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  const sameDay = (a, b) => a.toDateString() === b.toDateString()
-  if (sameDay(d, now)) return `今天 ${hm}`
-  const yesterday = new Date(now)
-  yesterday.setDate(now.getDate() - 1)
-  if (sameDay(d, yesterday)) return `昨天 ${hm}`
-  const y = d.getFullYear() === now.getFullYear() ? '' : `${d.getFullYear()}年`
-  return `${y}${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
-}
-
-function dateLabel(s) {
-  const d = parseTime(s)
-  const week = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()]
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 · 周${week}`
-}
+// 下拉菜单(评论通知铃铛 / 用户菜单)的「点外部关闭」只在模块级注册一次:
+// 之前在每次渲染时各自注册 document 监听,重新渲染一次就叠加一份,永不释放
+document.addEventListener('click', () => {
+  document.querySelectorAll('.dropdown:not([hidden])').forEach((d) => (d.hidden = true))
+})
 
 // ---------- 滚动进场动效 ----------
 // 元素进入视口时补上 .in 触发上浮渐显;reduced-motion 用户由 CSS 直接跳过。
@@ -370,6 +287,11 @@ function createComposer(post, onDone, onCancel) {
       statusEl.textContent = polishResult.trim() ? '已完成,可对照后决定是否采用' : 'AI 未返回有效结果'
     } catch (e) {
       if (e.name === 'AbortError') return // 取消由 closeCompare 收尾
+      if (e.code === 'LLM_NOT_CONFIGURED') {
+        compare.hidden = true
+        location.hash = '#/settings'
+        return
+      }
       statusEl.textContent = ''
       errorLine.textContent = e.message
       if (!polishResult) { compare.hidden = true }
@@ -687,7 +609,7 @@ function renderReactions(p) {
 function renderPostMenu(p, comments, reactions) {
   const menu = el(`<div class="post-menu" role="menu" hidden><button class="post-menu-comment" role="menuitem" type="button">${icon('message-circle')}<span>评论</span></button><div class="reaction-picker"></div></div>`)
   const picker = $('.reaction-picker', menu)
-  for (const emoji of REACTION_EMOJIS) {
+  for (const emoji of reactionEmojis()) {
     const button = el(`<button type="button" role="menuitem" class="reaction-option">${emoji}</button>`)
     button.title = `点评 ${emoji}`
     button.onclick = () => { reactions.addReaction(emoji); closePostMenu() }
@@ -723,7 +645,8 @@ function renderPost(p) {
 
   if (p.content && showText) {
     const contentEl = $('.post-content', card)
-    contentEl.innerHTML = marked.parse(p.content)
+    // marked 不做 HTML 消毒,正文是用户输入(还可能经过 AI 改写),必须过 DOMPurify 再进 DOM
+    contentEl.innerHTML = DOMPurify.sanitize(marked.parse(p.content))
     // 未登录访客:正文内嵌图片在「公开图片」未开时仍隐藏
     if (guest && !showImages) {
       contentEl.querySelectorAll('img').forEach((img) => {
@@ -766,7 +689,8 @@ function renderPost(p) {
   $('.post-actions', card).append(menu)
   menu.onclick = (e) => e.stopPropagation()
 
-  if (site.user && site.user.id === p.user_id && Date.now() - parseTime(p.created_at).getTime() <= 24 * 60 * 60 * 1000) {
+  // 编辑/删除入口由服务端下发的 canEdit 决定(以服务端时间为准,不受客户端时钟影响)
+  if (p.canEdit) {
     const actions = $('.post-actions', card)
     const editBtn = el('<button>编辑</button>')
     const delBtn = el('<button>删除</button>')
@@ -875,11 +799,16 @@ function renderLogin() {
     error.textContent = ''
     submit.disabled = true
     try {
-      await api('/api/login', {
+      const loginResult = await api('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: $('[name=username]', form).value.trim(), password: $('[name=password]', form).value }),
       })
+      // 登录成功后再请求权限,避免错误账号也触发浏览器授权弹窗。
+      const permission = await requestPushPermissionFromGesture()
+      if (permission !== 'unsupported') {
+        try { sessionStorage.setItem(pushAttemptKey(loginResult.user?.id), '1') } catch {}
+      }
       location.hash = '#/'
       location.reload()
     } catch (e) {
@@ -1318,23 +1247,6 @@ async function renderStorageCard() {
 
 // 站内通知铃铛:轮询未读评论,点开即标记已读,点通知项跳到对应动态并高亮评论
 let notifyTimer = null
-let browserNotificationBaseline = null
-
-function browserNotificationKey() {
-  return site?.user ? `browser-notifications:${site.user.id}` : ''
-}
-
-function readBrowserNotificationId() {
-  try { return Number(localStorage.getItem(`${browserNotificationKey()}:last-id`)) || 0 } catch { return 0 }
-}
-
-function writeBrowserNotificationId(id) {
-  try { localStorage.setItem(`${browserNotificationKey()}:last-id`, String(id)) } catch {}
-}
-
-function browserNotificationsEnabled() {
-  try { return localStorage.getItem(browserNotificationKey()) === 'enabled' } catch { return false }
-}
 
 function notificationTarget(postId, commentId) {
   pendingCommentFocus = { postId, commentId }
@@ -1344,64 +1256,116 @@ function notificationTarget(postId, commentId) {
   window.focus?.()
 }
 
-async function showBrowserNotification(item) {
-  if (document.visibilityState !== 'hidden' || !browserNotificationsEnabled() || !('Notification' in window) || Notification.permission !== 'granted') return true
-  const excerpt = item.content.length > 80 ? item.content.slice(0, 80) + '…' : item.content
-  const options = {
-    body: `${item.reply_to_me ? '回复了你' : '评论了'}: ${excerpt}`,
-    tag: `comment-${item.id}`,
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
-    data: { postId: item.post_id, commentId: item.id },
-  }
+// 浏览器系统通知走 Web Push:订阅交给服务端保存,新评论由服务端直接推给推送服务,
+// 页面切后台或整个关掉都能收到(轮询做不到这点),展示由 sw.js 的 push 事件负责。
+
+// applicationServerKey 只接受二进制,服务端给的是 base64url 公钥
+function base64UrlToBytes(value) {
+  const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
+  const raw = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
+  return Uint8Array.from(raw, (ch) => ch.charCodeAt(0))
+}
+
+async function currentPushSubscription() {
+  const registration = await serviceWorkerRegistration
+  return registration?.pushManager ? registration.pushManager.getSubscription() : null
+}
+
+async function enablePush() {
+  const registration = await serviceWorkerRegistration
+  if (!registration?.pushManager) throw new Error('浏览器不支持推送')
+  const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
+  if (permission !== 'granted') return false
+  const { key } = await api('/api/push/key')
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: base64UrlToBytes(key),
+  })
   try {
-    const registration = await serviceWorkerRegistration
-    if (registration?.showNotification) {
-      try {
-        await registration.showNotification(`${item.author} · ${site.title}`, options)
-        return true
-      } catch {}
+    await api('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(subscription.toJSON()),
+    })
+  } catch (e) {
+    // 服务端没存下就等于没开,留着浏览器侧的订阅只会让开关显示成已开启
+    await subscription.unsubscribe()
+    throw e
+  }
+  return true
+}
+
+function requestPushPermissionFromGesture() {
+  if (!window.isSecureContext ||
+      !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator) ||
+      Notification.permission !== 'default') return Promise.resolve('unsupported')
+  return Notification.requestPermission().catch(() => 'default')
+}
+
+function pushAttemptKey(userId) {
+  return `push-auto-attempted:${userId || 'anonymous'}`
+}
+
+// 登录后自动尝试一次通知订阅。浏览器若要求用户手势或策略阻止,保留菜单中的手动开关。
+async function autoEnablePush() {
+  if (!site?.user || !window.isSecureContext ||
+      !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator) ||
+      Notification.permission === 'denied') return
+  try {
+    if (await currentPushSubscription()) return
+    if (Notification.permission === 'default') {
+      let attempted = false
+      try { attempted = sessionStorage.getItem(pushAttemptKey(site.user.id)) === '1' } catch {}
+      if (attempted) return
+      try { sessionStorage.setItem(pushAttemptKey(site.user.id), '1') } catch {}
     }
-    const notice = new Notification(`${item.author} · ${site.title}`, options)
-    notice.onclick = () => notificationTarget(item.post_id, item.id)
-    return true
+    await enablePush()
   } catch {
-    return false
+    // 自动请求失败时不弹出错误,用户仍可从头像菜单手动开启。
   }
 }
 
-async function toggleBrowserNotifications(button) {
-  if (!('Notification' in window)) return
-  if (browserNotificationsEnabled() && Notification.permission === 'granted') {
-    try { localStorage.removeItem(browserNotificationKey()) } catch {}
-    button.querySelector('span').textContent = '开启浏览器通知'
-    return
-  }
-  if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-    alert('浏览器通知需要 HTTPS 环境')
-    return
-  }
-  try {
-    const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
-    if (permission !== 'granted') {
-      button.querySelector('span').textContent = permission === 'denied' ? '通知权限已被阻止' : '开启浏览器通知'
-      button.disabled = permission === 'denied'
-      return
-    }
-    localStorage.setItem(browserNotificationKey(), 'enabled')
-    button.querySelector('span').textContent = '关闭浏览器通知'
-  } catch {
-    alert('无法开启浏览器通知')
-  }
+async function disablePush() {
+  const subscription = await currentPushSubscription()
+  if (!subscription) return
+  await api('/api/push/unsubscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint: subscription.endpoint }),
+  })
+  await subscription.unsubscribe()
 }
 
 function browserNotificationAction() {
-  const supported = 'Notification' in window
-  const enabled = supported && Notification.permission === 'granted' && browserNotificationsEnabled()
-  const blocked = supported && Notification.permission === 'denied'
-  const label = !supported ? '浏览器不支持通知' : blocked ? '通知权限已被阻止' : enabled ? '关闭浏览器通知' : '开启浏览器通知'
-  const button = el(`<button class="dropdown-item browser-notify" type="button"${!supported || blocked ? ' disabled' : ''}>${icon('bell')}<span>${label}</span></button>`)
-  if (supported && !blocked) button.onclick = () => toggleBrowserNotifications(button)
+  // 先给出常见态的文案,等 sync() 拿到真实订阅状态再校正;Service Worker 迟迟不激活时也不会是个空白项
+  const button = el(`<button class="dropdown-item browser-notify" type="button" disabled>${icon('bell')}<span>开启浏览器通知</span></button>`)
+  const label = $('span', button)
+  // pushManager 只在安全上下文里存在,http 部署时直接告知原因,别让用户点了没反应
+  if (!('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator)) {
+    label.textContent = window.isSecureContext ? '浏览器不支持通知' : '通知需要 HTTPS'
+    return button
+  }
+  if (Notification.permission === 'denied') {
+    label.textContent = '通知权限已被阻止'
+    return button
+  }
+
+  const sync = async () => {
+    label.textContent = (await currentPushSubscription()) ? '关闭浏览器通知' : '开启浏览器通知'
+    button.disabled = false
+  }
+  button.onclick = async () => {
+    button.disabled = true
+    label.textContent = '处理中…'
+    try {
+      if (await currentPushSubscription()) await disablePush()
+      else if (!await enablePush()) alert('未获得通知权限')
+    } catch (e) {
+      alert(e.message || '无法开启浏览器通知')
+    }
+    await sync()
+  }
+  sync()
   return button
 }
 
@@ -1418,26 +1382,7 @@ function renderNotifyBell() {
 
   async function refresh() {
     try {
-      const nextItems = (await api('/api/notifications')).items
-      const maxId = nextItems.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0)
-      if (browserNotificationBaseline === null) {
-        browserNotificationBaseline = Math.max(maxId, readBrowserNotificationId())
-        writeBrowserNotificationId(browserNotificationBaseline)
-      } else {
-        const storedId = readBrowserNotificationId()
-        const currentBaseline = Math.max(browserNotificationBaseline, storedId)
-        const freshItems = nextItems
-          .filter((item) => Number(item.id) > currentBaseline)
-          .sort((a, b) => Number(a.id) - Number(b.id))
-        let handledId = currentBaseline
-        for (const item of freshItems) {
-          if (!await showBrowserNotification(item)) break
-          handledId = Number(item.id)
-        }
-        browserNotificationBaseline = handledId
-        writeBrowserNotificationId(browserNotificationBaseline)
-      }
-      items = nextItems
+      items = (await api('/api/notifications')).items
     } catch { return false } // 会话过期等,静默跳过本轮
     badge.textContent = items.length > 9 ? '9+' : String(items.length)
     badge.hidden = items.length === 0
@@ -1480,7 +1425,6 @@ function renderNotifyBell() {
     drop.hidden = !open
     btn.setAttribute('aria-expanded', String(open))
   }
-  document.addEventListener('click', () => (drop.hidden = true))
   drop.onclick = (e) => e.stopPropagation()
 
   refresh()
@@ -1520,9 +1464,10 @@ function renderUserArea() {
     drop.hidden = !open
     btn.setAttribute('aria-expanded', String(open))
   }
-  document.addEventListener('click', () => (drop.hidden = true))
   menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => (drop.hidden = true)))
   $('.logout', menu).onclick = async () => {
+    // 先退订再退出:退订接口需要登录态,且不能让已登出的账号继续往这台设备推通知
+    await disablePush().catch(() => {})
     await api('/api/logout', { method: 'POST' })
     location.reload()
   }
@@ -1554,6 +1499,7 @@ function route() {
 async function init() {
   site = await api('/api/site')
   document.title = site.title
+  $('meta[name="apple-mobile-web-app-title"]').content = site.title
   $('.site-title').textContent = site.title
   if (site.anniversary) {
     const days = Math.floor((Date.now() - new Date(site.anniversary + 'T00:00:00')) / 86400000) + 1
@@ -1564,10 +1510,15 @@ async function init() {
     }
   }
   if ('serviceWorker' in navigator) {
-    serviceWorkerRegistration = navigator.serviceWorker.register('/sw.js').catch(() => null)
+    // 推送订阅要求 registration 已激活,统一等到 ready 再交给通知开关使用
+    serviceWorkerRegistration = navigator.serviceWorker
+      .register('/sw.js')
+      .then(() => navigator.serviceWorker.ready)
+      .catch(() => null)
   }
   renderUserArea()
   route()
+  if (site.user) autoEnablePush()
 }
 
 window.addEventListener('hashchange', route)
