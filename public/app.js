@@ -1,14 +1,21 @@
 // 前端逻辑:hash 路由 + 时间轴 / 相册 / 登录 / 账号 / 设置视图
 import { attachMdToolbar, attachEmojiButton } from '/vendor/md-toolbar.js'
 import { icon } from '/vendor/icons.js'
+import { api, streamSse, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
-let site = null // { title, anniversary, privateMode, user }
+let site = null // { title, anniversary, privateMode, user, reactionEmojis }
 const PAGE_SIZE = 20
-const AVATAR_COLORS = ['#e8747c', '#7ca9e8', '#8ec9a0', '#c99be0', '#e8b06e']
-const REACTION_EMOJIS = '👍 ❤️ 😂 😍 🎉 😢 😡 👏 🔥 💯 🙌 🥰 😮 🤔'.split(' ')
+// 表情列表由 /api/site 统一下发,本地这份仅是接口异常时的兜底
+const FALLBACK_REACTION_EMOJIS = '👍 ❤️ 😂 😍 🎉 😢 😡 👏 🔥 💯 🙌 🥰 😮 🤔'.split(' ')
+const reactionEmojis = () => (Array.isArray(site?.reactionEmojis) && site.reactionEmojis.length ? site.reactionEmojis : FALLBACK_REACTION_EMOJIS)
+// 评论删除按钮的显隐仅是界面提示,服务端仍按 24h 窗口强校验;动态编辑则用服务端下发的 canEdit
 const EDIT_WINDOW_MS = 24 * 60 * 60 * 1000
+function withinEditWindow(createdAt) {
+  const time = parseTime(createdAt).getTime()
+  return Number.isFinite(time) && Date.now() - time <= EDIT_WINDOW_MS
+}
 let activePostMenu = null
 let serviceWorkerRegistration = null
 
@@ -33,107 +40,11 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closePostMenu()
 })
 
-// ---------- 基础工具 ----------
-
-async function api(path, opts = {}) {
-  const res = await fetch(path, opts)
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || data.message || `请求失败 (${res.status})`)
-  return data
-}
-
-// SSE 流式请求:服务端协议为 data:{"delta"} / data:{"error"} / data:[DONE]
-// 上游失败时服务端仍回普通 JSON 错误,所以这里按 res.ok 分流,错误语义与 api() 一致
-async function streamSse(path, body, onEvent, signal) {
-  const res = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  })
-  if (!res.ok || !res.body) {
-    const data = await res.json().catch(() => ({}))
-    const error = new Error(data.error || data.message || `请求失败 (${res.status})`)
-    error.code = data.code || ''
-    throw error
-  }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  for (;;) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    // 事件以空行分隔,末段可能不完整,留在缓冲里等下一个分片
-    const blocks = buffer.split(/\r?\n\r?\n/)
-    buffer = blocks.pop() ?? ''
-    for (const block of blocks) {
-      for (const line of block.split(/\r?\n/)) {
-        if (!line.startsWith('data:')) continue
-        const payload = line.slice(5).trim()
-        if (!payload || payload === '[DONE]') continue
-        let evt = null
-        try { evt = JSON.parse(payload) } catch { continue }
-        if (evt.error) {
-          const error = new Error(evt.error)
-          error.code = evt.code || ''
-          throw error
-        }
-        onEvent(evt)
-      }
-    }
-  }
-}
-
-function el(html) {
-  const t = document.createElement('template')
-  t.innerHTML = html.trim()
-  return t.content.firstElementChild
-}
-
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
-}
-
-function setFormMessage(element, message, state = 'error') {
-  element.textContent = message
-  element.dataset.state = message ? state : ''
-}
-
-function avatarColor(name) {
-  let h = 0
-  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0
-  return AVATAR_COLORS[h % AVATAR_COLORS.length]
-}
-
-// SQLite 存的是 UTC,转本地时间展示
-function parseTime(s) {
-  return new Date(s.replace(' ', 'T') + 'Z')
-}
-
-function withinEditWindow(createdAt) {
-  const time = parseTime(createdAt).getTime()
-  return Number.isFinite(time) && Date.now() - time <= EDIT_WINDOW_MS
-}
-
-function formatTime(s) {
-  const d = parseTime(s)
-  const now = new Date()
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  const sameDay = (a, b) => a.toDateString() === b.toDateString()
-  if (sameDay(d, now)) return `今天 ${hm}`
-  const yesterday = new Date(now)
-  yesterday.setDate(now.getDate() - 1)
-  if (sameDay(d, yesterday)) return `昨天 ${hm}`
-  const y = d.getFullYear() === now.getFullYear() ? '' : `${d.getFullYear()}年`
-  return `${y}${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
-}
-
-function dateLabel(s) {
-  const d = parseTime(s)
-  const week = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()]
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 · 周${week}`
-}
+// 下拉菜单(评论通知铃铛 / 用户菜单)的「点外部关闭」只在模块级注册一次:
+// 之前在每次渲染时各自注册 document 监听,重新渲染一次就叠加一份,永不释放
+document.addEventListener('click', () => {
+  document.querySelectorAll('.dropdown:not([hidden])').forEach((d) => (d.hidden = true))
+})
 
 // ---------- 滚动进场动效 ----------
 // 元素进入视口时补上 .in 触发上浮渐显;reduced-motion 用户由 CSS 直接跳过。
@@ -698,7 +609,7 @@ function renderReactions(p) {
 function renderPostMenu(p, comments, reactions) {
   const menu = el(`<div class="post-menu" role="menu" hidden><button class="post-menu-comment" role="menuitem" type="button">${icon('message-circle')}<span>评论</span></button><div class="reaction-picker"></div></div>`)
   const picker = $('.reaction-picker', menu)
-  for (const emoji of REACTION_EMOJIS) {
+  for (const emoji of reactionEmojis()) {
     const button = el(`<button type="button" role="menuitem" class="reaction-option">${emoji}</button>`)
     button.title = `点评 ${emoji}`
     button.onclick = () => { reactions.addReaction(emoji); closePostMenu() }
@@ -734,7 +645,8 @@ function renderPost(p) {
 
   if (p.content && showText) {
     const contentEl = $('.post-content', card)
-    contentEl.innerHTML = marked.parse(p.content)
+    // marked 不做 HTML 消毒,正文是用户输入(还可能经过 AI 改写),必须过 DOMPurify 再进 DOM
+    contentEl.innerHTML = DOMPurify.sanitize(marked.parse(p.content))
     // 未登录访客:正文内嵌图片在「公开图片」未开时仍隐藏
     if (guest && !showImages) {
       contentEl.querySelectorAll('img').forEach((img) => {
@@ -777,7 +689,8 @@ function renderPost(p) {
   $('.post-actions', card).append(menu)
   menu.onclick = (e) => e.stopPropagation()
 
-  if (site.user && site.user.id === p.user_id && Date.now() - parseTime(p.created_at).getTime() <= 24 * 60 * 60 * 1000) {
+  // 编辑/删除入口由服务端下发的 canEdit 决定(以服务端时间为准,不受客户端时钟影响)
+  if (p.canEdit) {
     const actions = $('.post-actions', card)
     const editBtn = el('<button>编辑</button>')
     const delBtn = el('<button>删除</button>')
@@ -1512,7 +1425,6 @@ function renderNotifyBell() {
     drop.hidden = !open
     btn.setAttribute('aria-expanded', String(open))
   }
-  document.addEventListener('click', () => (drop.hidden = true))
   drop.onclick = (e) => e.stopPropagation()
 
   refresh()
@@ -1552,7 +1464,6 @@ function renderUserArea() {
     drop.hidden = !open
     btn.setAttribute('aria-expanded', String(open))
   }
-  document.addEventListener('click', () => (drop.hidden = true))
   menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => (drop.hidden = true)))
   $('.logout', menu).onclick = async () => {
     // 先退订再退出:退订接口需要登录态,且不能让已登出的账号继续往这台设备推通知

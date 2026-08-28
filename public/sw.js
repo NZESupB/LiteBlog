@@ -1,4 +1,4 @@
-const CACHE_NAME = 'couple-blog-shell-v3'
+const CACHE_NAME = 'couple-blog-shell-v4'
 const SHELL = [
   '/',
   '/index.html',
@@ -6,8 +6,10 @@ const SHELL = [
   '/app.js',
   '/manifest.webmanifest',
   '/vendor/marked.min.js',
+  '/vendor/purify.min.js',
   '/vendor/md-toolbar.js',
   '/vendor/icons.js',
+  '/js/utils.js',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
 ]

@@ -12,6 +12,8 @@ export const db = new DatabaseSync(path.join(DATA_DIR, 'blog.db'))
 
 db.exec(`
   PRAGMA journal_mode = WAL;
+  -- SQLite 默认不启用外键,不开则 ON DELETE CASCADE 全部失效(孤儿数据只能手动清)
+  PRAGMA foreign_keys = ON;
   CREATE TABLE IF NOT EXISTS users (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     username   TEXT NOT NULL,
