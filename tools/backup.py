@@ -6,17 +6,20 @@
 仅用 Python 标准库(sqlite3 / urllib / xml),要求 Python 3.11+。
 
 用法:
-  python3 tools/backup.py                       # 备份到 WebDAV,只保留最新一份 db
-  python3 tools/backup.py list                  # 列出 WebDAV 上的备份
-  python3 tools/backup.py restore [备份名]      # 从 WebDAV 拉回 db 恢复(默认最新;先停服务)
+  /usr/bin/python3 tools/backup.py                       # 备份到 WebDAV,只保留最新一份 db
+  /usr/bin/python3 tools/backup.py list                  # 列出 WebDAV 上的备份
+  /usr/bin/python3 tools/backup.py restore [备份名]      # 从 WebDAV 拉回 db 恢复(默认最新;先停服务)
+  /usr/bin/python3 tools/backup.py restore <本地db路径>   # 直接用本地 db 文件恢复(先停服务)
 
 环境变量(与 server 一致,作为 settings 未落库时的回退):
-  DATA_DIR 数据目录(默认 ./data)
+  DATA_DIR 数据目录(默认项目根目录下的 data/)
   WEBDAV_URL / WEBDAV_USERNAME / WEBDAV_PASSWORD / WEBDAV_FOLDER
 
 定时备份(crontab -e,每天凌晨 3:30):
-  30 3 * * * cd /path/to/couple-blog && python3 tools/backup.py >> backups/cron.log 2>&1
+  30 3 * * * cd /path/to/couple-blog && /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
 """
+
+from __future__ import annotations
 
 import base64
 import os
@@ -29,7 +32,10 @@ import urllib.request
 from datetime import datetime
 from xml.etree import ElementTree
 
-DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR", "data"))
+# 默认数据目录定位到「项目根/data」,与脚本所在位置无关(不依赖启动时的 cwd),
+# 否则从 tools/ 等子目录运行会把 data 误解析到 tools/data
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR", os.path.join(_PROJECT_ROOT, "data")))
 DB_PATH = os.path.join(DATA_DIR, "blog.db")
 # 与图片命名(YYYYMMDD-HHMMSS-hash.jpg / 16位hash.jpg)不冲突,便于识别与清理
 BACKUP_RE = re.compile(r"^blog-backup-\d{8}-\d{6}\.db$")
@@ -196,7 +202,29 @@ def list_cmd() -> None:
     print("\n".join(files) if files else "(WebDAV 上暂无备份)")
 
 
+def _restore_to_data(data: bytes, source_desc: str) -> None:
+    """把 db 字节写入 DATA_DIR:先停服提示、现有数据改名留底,再写回。"""
+    print("请确认服务已停止(Docker: docker compose stop;裸机: 停掉 node server/index.js)")
+    if os.path.isdir(DATA_DIR) and os.listdir(DATA_DIR):
+        safety = f"{DATA_DIR}.before-restore-{stamp()}"
+        os.rename(DATA_DIR, safety)
+        print(f"现有数据已另存为: {safety}")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(DB_PATH, "wb") as f:
+        f.write(data)
+    print(
+        f"恢复完成 ← {source_desc}。图片文件不含在 db 内:"
+        "WebDAV 存储时图片在远端不受影响;本地存储时需另行备份 data/uploads。现在可以重新启动服务"
+    )
+
+
 def restore(name: str | None) -> None:
+    # 传入的是本地存在的文件,直接用它恢复,不走 WebDAV(此时无需任何 WebDAV 配置)
+    if name and os.path.isfile(name):
+        with open(name, "rb") as f:
+            _restore_to_data(f.read(), name)
+        return
+
     cfg = load_config()
     if not configured(cfg):
         print("未配置 WebDAV(若原数据目录已删除,请用环境变量 WEBDAV_* 提供连接信息)", file=sys.stderr)
@@ -209,18 +237,7 @@ def restore(name: str | None) -> None:
             print("WebDAV 上没有可用备份", file=sys.stderr)
             sys.exit(1)
         target = files[-1]
-    print("请确认服务已停止(Docker: docker compose stop;裸机: 停掉 node server/index.js)")
-
-    data = get(cfg, target)
-    # 现有数据整体改名留底,不直接删;确认恢复无误后可手动删除
-    if os.path.isdir(DATA_DIR) and os.listdir(DATA_DIR):
-        safety = f"{DATA_DIR}.before-restore-{stamp()}"
-        os.rename(DATA_DIR, safety)
-        print(f"现有数据已另存为: {safety}")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(DB_PATH, "wb") as f:
-        f.write(data)
-    print(f"恢复完成 ← {target}(图片本就在 WebDAV 同一目录,无需恢复),现在可以重新启动服务")
+    _restore_to_data(get(cfg, target), f"{target}(WebDAV)")
 
 
 def main() -> None:
