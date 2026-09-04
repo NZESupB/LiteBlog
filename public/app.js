@@ -63,10 +63,24 @@ function reveal(node) {
   return node
 }
 
+// 时间轴的两个视口观察器:哨兵进入视口即自动续页、列表顶部离开视口即显示回到顶部。
+// 与 revealObserver 分开:那个观察到一次就 unobserve,不能复用于需要反复触发的场景。
+let timelineObservers = []
+
+function observeViewport(target, onChange, options) {
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) onChange(entry.isIntersecting)
+  }, options)
+  observer.observe(target)
+  timelineObservers.push(observer)
+}
+
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
   closePostMenu()
   revealObserver.disconnect()
+  for (const observer of timelineObservers) observer.disconnect()
+  timelineObservers = []
   main.innerHTML = ''
 }
 
@@ -439,6 +453,109 @@ function createComposer(post, onDone, onCancel) {
   return card
 }
 
+// ---------- 归档时间导航 ----------
+
+// 服务端按本地时区分月,这里的口径必须与之一致,否则高亮会和跳转错位
+const tzOffset = () => -new Date().getTimezoneOffset()
+const monthKey = (createdAt) => {
+  const d = parseTime(createdAt)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+const monthTitle = (month) => `${month.slice(0, 4)}年${Number(month.slice(5))}月`
+
+// 两种形态,同一份数据同一个 onPick,由媒体查询各显其一:
+//   宽屏 → 阅读列左侧的纯文字大纲(像文档大纲,跟随滚动高亮当前月份)
+//   窄屏 → 右边缘的刻度索引(通讯录 A-Z / 照片 App 日期滑块的做法,可点可拖)
+// 两者都是 fixed,不占阅读列、不打断正文流 —— 内联面板横在发布框与时间轴之间太重。
+// display: none 会同时把另一份从无障碍树摘掉,不必再补 aria-hidden。
+function renderArchive(months, onPick) {
+  const wrap = el('<div class="archive"></div>')
+  const outline = el('<nav class="archive-outline" aria-label="按月份浏览"><button class="archive-latest" type="button">最新</button></nav>')
+  const rail = el('<nav class="archive-rail" aria-label="按月份浏览"><div class="archive-ticks"></div><span class="archive-bubble" hidden></span></nav>')
+  const ticksBox = $('.archive-ticks', rail)
+  const bubble = $('.archive-bubble', rail)
+  const rows = new Map() // month → 大纲行
+  const ticks = new Map() // month → 刻度
+  const counts = new Map(months.map((m) => [m.month, m.count]))
+
+  let year = null
+  for (const { month, count } of months) {
+    const y = month.slice(0, 4)
+    const newYear = y !== year
+    if (newYear) {
+      year = y
+      outline.appendChild(el(`<div class="archive-year">${y}</div>`))
+    }
+    const row = el(`<button class="archive-row" type="button"><span>${Number(month.slice(5))}月</span><small>${count}</small></button>`)
+    row.title = `跳转到 ${monthTitle(month)}(${count} 条)`
+    row.onclick = () => onPick(month)
+    outline.appendChild(row)
+    rows.set(month, row)
+
+    // 年份交界处以年份数字代替刻度线,和照片 App 一样用最少的字交代位置
+    const tick = el(`<button class="archive-tick" type="button" aria-label="${monthTitle(month)},${count} 条">${newYear ? `<em>${y.slice(2)}</em>` : '<i></i>'}</button>`)
+    tick.dataset.month = month
+    tick.onclick = () => onPick(month)
+    ticksBox.appendChild(tick)
+    ticks.set(month, tick)
+  }
+  $('.archive-latest', outline).onclick = () => onPick(null)
+
+  // 拖动刻度条时只用气泡预览月份,松手才真正跳转:边拖边加载会连打十几个请求
+  const tickAt = (clientY) => {
+    const box = ticksBox.getBoundingClientRect()
+    return document.elementFromPoint(box.left + box.width / 2, clientY)?.closest('.archive-tick')
+  }
+  const preview = (tick) => {
+    const month = tick.dataset.month
+    bubble.textContent = `${monthTitle(month)} · ${counts.get(month)} 条`
+    bubble.style.top = `${tick.getBoundingClientRect().top + tick.getBoundingClientRect().height / 2 - rail.getBoundingClientRect().top}px`
+    bubble.hidden = false
+    for (const t of ticks.values()) t.classList.toggle('hot', t === tick)
+  }
+  const endDrag = (commit) => {
+    bubble.hidden = true
+    for (const t of ticks.values()) t.classList.remove('hot')
+    // 只有真的拖到了别的月份才在这里提交;原地点按交给刻度自身的 click,免得跳两次
+    if (commit && dragTo && dragTo !== dragFrom) onPick(dragTo.dataset.month)
+    dragFrom = dragTo = null
+  }
+  let dragFrom = null
+  let dragTo = null
+  ticksBox.addEventListener('pointerdown', (e) => {
+    const tick = tickAt(e.clientY)
+    if (!tick) return
+    // 指针已抬起或来自合成事件时 setPointerCapture 会抛错。抓不到只是手指横向移出刻度条后
+    // 跟手性变差,不该让整个 pointerdown 处理中断
+    try { ticksBox.setPointerCapture(e.pointerId) } catch {}
+    dragFrom = dragTo = tick
+    preview(tick)
+  })
+  ticksBox.addEventListener('pointermove', (e) => {
+    if (!dragFrom) return
+    const tick = tickAt(e.clientY)
+    if (tick && tick !== dragTo) preview((dragTo = tick))
+  })
+  ticksBox.addEventListener('pointerup', () => endDrag(true))
+  ticksBox.addEventListener('pointercancel', () => endDrag(false))
+
+  // 当前所在月份由时间轴按滚动位置回灌,这是「大纲」区别于「菜单」的地方
+  wrap.setHere = (month) => {
+    for (const [key, row] of rows) row.classList.toggle('here', key === month)
+    for (const [key, tick] of ticks) tick.classList.toggle('here', key === month)
+    // 月份多到大纲要滚动时,把当前项带进视野。只动大纲自己的 scrollTop,
+    // 不用 scrollIntoView —— 它会连带滚动窗口,和用户的滚动打架
+    const row = rows.get(month)
+    if (!row || outline.scrollHeight <= outline.clientHeight) return
+    const top = row.offsetTop
+    const bottom = top + row.offsetHeight
+    if (top < outline.scrollTop) outline.scrollTop = top - 24
+    else if (bottom > outline.scrollTop + outline.clientHeight) outline.scrollTop = bottom - outline.clientHeight + 24
+  }
+  wrap.append(outline, rail)
+  return wrap
+}
+
 // ---------- 时间轴视图 ----------
 
 // 通知跳转后待高亮的评论:{ postId, commentId },评论列表加载完成时消费
@@ -712,35 +829,99 @@ function renderPost(p) {
   return card
 }
 
-async function renderTimeline() {
+async function renderTimeline(month = null) {
   clearMain()
   if (site.user) main.appendChild(createComposer(null, renderTimeline))
 
-  const list = el('<div class="post-list"></div>')
-  main.appendChild(list)
-  let offset = 0
-  let lastDate = ''
+  // 归档导航只在跨月时才有意义,单月站点不渲染
+  const { months } = await api(`/api/posts/archive?tz=${tzOffset()}`).catch(() => ({ months: [] }))
+  const archive = months.length > 1 ? renderArchive(months, (pick) => renderTimeline(pick)) : null
+  if (archive) main.appendChild(archive)
 
-  async function loadMore(btn) {
-    const { posts, total } = await api(`/api/posts?limit=${PAGE_SIZE}&offset=${offset}`)
-    offset += posts.length
-    for (const p of posts) {
-      const label = dateLabel(p.created_at)
-      if (label !== lastDate) {
-        lastDate = label
-        list.appendChild(reveal(el(`<div class="date-divider">${label}</div>`)))
+  const list = el('<div class="post-list"></div>')
+  const footer = el('<div class="load-footer"></div>')
+  // 顶部哨兵:滚过它就说明已经离开首屏,此时才需要回到顶部按钮
+  const topSentinel = el('<div class="top-sentinel" aria-hidden="true"></div>')
+  main.append(topSentinel, list, footer)
+  // 锚点落在某月时就从该月月末往前取,之后一律用服务端下发的游标续页
+  let query = month ? `month=${month}&tz=${tzOffset()}` : ''
+  let hasMore = true
+  let loading = false
+  let lastDate = ''
+  let group = null // 当前日期分组;跨页仍指向同一组,同一天的动态不会被分页切成两组
+  let empty = true
+
+  // 大纲跟随滚动高亮当前月份:只认可见分组里 DOM 顺序最靠前的那个(即屏幕最上方的),
+  // 用序号比较而非读 getBoundingClientRect,避免每次相交回调都触发布局
+  const visibleGroups = new Set()
+  const groupOrder = new Map()
+  const groupObserver = archive && new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) visibleGroups.add(entry.target)
+      else visibleGroups.delete(entry.target)
+    }
+    let top = null
+    for (const g of visibleGroups) if (!top || groupOrder.get(g) < groupOrder.get(top)) top = g
+    if (top) archive.setHere(top.dataset.month)
+  })
+  if (groupObserver) timelineObservers.push(groupObserver)
+
+  async function loadPage() {
+    if (loading || !hasMore) return
+    loading = true
+    footer.innerHTML = ''
+    footer.appendChild(el('<div class="load-more-tip">加载中…</div>'))
+    try {
+      const data = await api(`/api/posts?limit=${PAGE_SIZE}&${query}`)
+      for (const p of data.posts) {
+        const label = dateLabel(p.created_at)
+        if (label !== lastDate) {
+          lastDate = label
+          // 每天独立成组:日期分隔条吸顶时只在本组范围内停留,滚过即被顶出,
+          // 扁平结构会让所有分隔条堆在同一位置、叠出一摞 backdrop-filter 合成层
+          group = el('<section class="day-group"></section>')
+          group.dataset.month = monthKey(p.created_at)
+          // 分隔条不带 reveal:translateY 会和 sticky 叠加导致吸顶位置抖动
+          group.appendChild(el(`<div class="date-divider">${label}</div>`))
+          list.appendChild(group)
+          groupOrder.set(group, groupOrder.size)
+          groupObserver?.observe(group)
+        }
+        group.appendChild(reveal(renderPost(p)))
       }
-      list.appendChild(reveal(renderPost(p)))
+      empty = empty && data.posts.length === 0
+      hasMore = data.hasMore
+      query = data.nextCursor ? `cursor=${encodeURIComponent(data.nextCursor)}` : ''
+      footer.innerHTML = ''
+      if (empty) {
+        footer.appendChild(el(`<div class="empty-tip">${month ? '这段时间还没有记录' : '还没有动态,写下第一条吧'}</div>`))
+      }
+    } catch (e) {
+      // 自动加载失败时回落成手动重试,不把用户卡在转圈里
+      footer.innerHTML = ''
+      const retry = el(`<button class="btn-ghost load-more">重新加载</button>`)
+      retry.onclick = loadPage
+      footer.append(el(`<div class="form-error">${esc(e.message)}</div>`), retry)
+    } finally {
+      loading = false
     }
-    if (btn) btn.remove()
-    if (offset < total) {
-      const more = el('<button class="btn-ghost load-more">加载更多</button>')
-      more.onclick = () => loadMore(more)
-      main.appendChild(more)
-    }
-    if (total === 0) list.appendChild(el('<div class="empty-tip">还没有动态,写下第一条吧</div>'))
   }
-  await loadMore(null).catch((e) => list.appendChild(el(`<div class="empty-tip">${esc(e.message)}</div>`)))
+
+  await loadPage()
+  // 哨兵进入视口(提前 400px)即自动续页;并发由 loading 守卫,终止由 hasMore 决定,
+  // 因此首屏不满一屏时会自动连续补页直到填满或到底
+  const sentinel = el('<div class="load-sentinel" aria-hidden="true"></div>')
+  main.appendChild(sentinel)
+  observeViewport(sentinel, (visible) => { if (visible) loadPage() }, { rootMargin: '0px 0px 400px 0px' })
+
+  // 列表顶部离开视口就露出「回到顶部」,省掉 scroll 监听与节流
+  const toTop = el(`<button class="to-top" type="button" title="回到顶部" aria-label="回到顶部" hidden>${icon('arrow-up')}</button>`)
+  // 不显式传 behavior,继承 CSS 的 scroll-behavior,从而自动跟随 reduced-motion 降级
+  toTop.onclick = () => window.scrollTo({ top: 0 })
+  main.appendChild(toTop)
+  observeViewport(topSentinel, (visible) => (toTop.hidden = visible))
+
+  if (month) window.scrollTo({ top: 0 })
 }
 
 // ---------- 单条动态视图(通知跳转的落地页) ----------
@@ -1496,11 +1677,22 @@ function route() {
   renderTimeline()
 }
 
+// 日期分隔条要吸顶在顶栏下沿,需要顶栏的实测高度:窄屏 .header-inner 会 flex-wrap 换行变高,
+// 站名随设置变化也会影响高度,写死不可靠。.site-header 自带 padding-top: env(safe-area-inset-top),
+// 所以实测高度已覆盖安全区,CSS 侧不必再叠 env()。
+function trackHeaderHeight() {
+  const header = $('.site-header')
+  const sync = () => document.documentElement.style.setProperty('--header-h', `${Math.round(header.getBoundingClientRect().height)}px`)
+  sync()
+  new ResizeObserver(sync).observe(header)
+}
+
 async function init() {
   site = await api('/api/site')
   document.title = site.title
   $('meta[name="apple-mobile-web-app-title"]').content = site.title
   $('.site-title').textContent = site.title
+  trackHeaderHeight()
   if (site.anniversary) {
     const days = Math.floor((Date.now() - new Date(site.anniversary + 'T00:00:00')) / 86400000) + 1
     if (days > 0) {
