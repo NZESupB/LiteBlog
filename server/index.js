@@ -169,16 +169,59 @@ function withCanEdit(posts, user) {
   return posts
 }
 
+// 分页游标:与列表排序键 (created_at, id) 同构,格式 `<created_at>|<id>`。
+// 格式只在服务端产出与消费,前端拿到 nextCursor 原样回传,不自己拼装。
+function parseCursor(raw) {
+  if (!raw) return null
+  const sep = raw.lastIndexOf('|')
+  if (sep < 0) return null
+  const at = raw.slice(0, sep)
+  const id = Number(raw.slice(sep + 1))
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(at) || !Number.isSafeInteger(id) || id < 0) return null
+  return { at, id }
+}
+
+// 时区偏移(分钟,东八区为 480)。created_at 存 UTC,而月份归属要按用户本地时区算,
+// 否则东八区每月最后 8 小时的动态会被归到上个月,与前端 dateLabel 的显示错位。
+// 取的是前端当前时刻的偏移:有夏令时的时区下,历史月份的边界记录可能差一天;Asia/Shanghai 无夏令时,本项目场景精确。
+function tzMinutes(raw) {
+  const value = Number(raw)
+  return Number.isFinite(value) && Math.abs(value) <= 840 ? Math.trunc(value) : 0
+}
+
+// 跳到某月 = 从该月本地时间的月末边界往前取。边界本身(下月 1 日 00:00:00)属于下个月,
+// 用 id = 0 把恰好等于边界的记录排除掉,跳月与翻页因此共用同一个「严格早于游标」的查询。
+function monthCursor(month, tz) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(month ?? ''))) return null
+  const [year, m] = month.split('-').map(Number)
+  // Date.UTC 的月份是 0-based,直接传 m 即为下个月
+  const at = new Date(Date.UTC(year, m, 1) - tz * 60000).toISOString().slice(0, 19).replace('T', ' ')
+  return { at, id: 0 }
+}
+
 app.get('/api/posts', (c) => {
   const limit = Math.min(Number(c.req.query('limit')) || 20, 50)
-  const offset = Math.max(Number(c.req.query('offset')) || 0, 0)
+  const tz = tzMinutes(c.req.query('tz'))
+  const rawCursor = c.req.query('cursor')
+  const rawMonth = c.req.query('month')
+  const cursor = parseCursor(rawCursor) ?? monthCursor(rawMonth, tz)
+  // 给了定位参数却解析不出游标,静默当第一页会表现成「跳月失败却显示最新」,极难排查
+  if (!cursor && (rawCursor || rawMonth)) return c.json({ error: '分页参数不合法' }, 400)
+
   const total = db.prepare('SELECT COUNT(*) AS c FROM posts').get().c
-  const posts = db
+  // 多取一条探边界:比 posts.length === limit 准,末页刚好整页时不会多出一次空加载
+  const rows = db
     .prepare(`
       SELECT p.id, p.content, p.created_at, p.updated_at, p.user_id, p.public_text, p.public_images, u.name AS author
       FROM posts p JOIN users u ON u.id = p.user_id
-      ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?`)
-    .all(limit, offset)
+      ${cursor ? 'WHERE (p.created_at, p.id) < (?, ?)' : ''}
+      ORDER BY p.created_at DESC, p.id DESC LIMIT ?`)
+    .all(...(cursor ? [cursor.at, cursor.id] : []), limit + 1)
+  const hasMore = rows.length > limit
+  const posts = hasMore ? rows.slice(0, limit) : rows
+  const last = posts[posts.length - 1]
+  const nextCursor = hasMore && last ? `${last.created_at}|${last.id}` : null
+
   const withImages = withCanEdit(attachReactions(attachImages(posts), c.get('user')?.id), c.get('user'))
   // 私密模式下未登录访客:按文章开关决定可见性,默认全隐
   if (siteConfig().privateMode && !c.get('user')) {
@@ -187,7 +230,19 @@ app.get('/api/posts', (c) => {
       if (!p.public_images) p.images = []
     }
   }
-  return c.json({ total, posts: withImages })
+  return c.json({ total, hasMore, nextCursor, posts: withImages })
+})
+
+// 归档:按本地时区分月聚合条数,供时间轴的年月跳转用。只暴露「哪个月有几条」,
+// 与 /api/posts 对未登录访客也返回 total 的口径一致,因此不加登录守卫。
+app.get('/api/posts/archive', (c) => {
+  const tz = tzMinutes(c.req.query('tz'))
+  const months = db
+    .prepare(`
+      SELECT strftime('%Y-%m', created_at, ?) AS month, COUNT(*) AS count
+      FROM posts GROUP BY month ORDER BY month DESC`)
+    .all(`${tz} minutes`)
+  return c.json({ months, total: months.reduce((sum, row) => sum + row.count, 0) })
 })
 
 // 单条动态(站内通知跳转的落地页),访客可见性规则与列表一致

@@ -352,6 +352,8 @@ article.card.post:hover { transform: translateY(-2px); box-shadow: var(--shadow-
 .btn-ghost:hover { color: var(--accent-deep); border-color: var(--accent-wash); background: var(--accent-soft); }
 .btn-ghost:active { transform: scale(0.97); }
 .btn-ghost:disabled { opacity: 0.45; cursor: default; transform: none; color: var(--muted); border-color: var(--border); background: none; }
+/* inline-flex 会压过 UA 的 [hidden],凡靠 hidden 收起的 .btn-ghost 都要靠这条兜住(踩过五次) */
+.btn-ghost[hidden] { display: none; }
 
 /* 公开开关:并入操作行的紧凑 chip,不再单独占一整行 */
 .public-opts { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
@@ -503,15 +505,146 @@ article.card.post:hover { transform: translateY(-2px); box-shadow: var(--shadow-
 .img-grid img:hover { transform: scale(1.015); filter: brightness(1.04); }
 
 .load-more { display: flex; margin: 10px auto; }
+.load-footer { display: flex; flex-direction: column; align-items: center; }
+.load-sentinel, .top-sentinel { height: 1px; }
+.load-more-tip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 0; color: var(--muted); font-size: 13px;
+}
+.load-more-tip::before {
+  content: ''; width: 13px; height: 13px;
+  border: 2px solid var(--accent-wash); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
 .empty-tip { text-align: center; color: var(--muted); padding: 48px 0; font-family: var(--font-display); font-size: 15px; letter-spacing: 0.04em; }
 
+/* 每天一个分组:分隔条的定位包含块就是本组,滚过本组即被顶出,同一时刻只有一条吸在顶部。
+   间距挂在分组上,分隔条自身不留 margin —— sticky 元素按 margin box 停靠,留了 margin 反而被吃掉。 */
+.day-group { margin-top: 30px; }
+/* 吸顶在顶栏下沿:--header-h 由 app.js 用 ResizeObserver 实测写入(窄屏顶栏会换行变高)。
+   z-index 4:压过普通流的 .card,但低于 .post-menu(5),动态菜单展开后滚动不会被分隔条盖住。 */
 .date-divider {
+  position: sticky; top: var(--header-h, 66px); z-index: 4;
   font-family: var(--font-display);
   font-size: 13px; letter-spacing: 0.12em; color: var(--muted);
-  margin: 30px 0 12px;
+  margin: 0; padding: 6px 0 12px;
+  background: rgba(250, 246, 241, 0.9);
+  -webkit-backdrop-filter: blur(10px) saturate(1.4);
+  backdrop-filter: blur(10px) saturate(1.4);
   display: flex; align-items: center; gap: 12px;
 }
 .date-divider::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--border), transparent); }
+
+/* ---------- 归档时间导航 ---------- */
+/* 两种形态,由媒体查询各显其一。都走 fixed:不占阅读列、不打断正文流。
+   宽屏是文档式大纲(纯文字,无边框无底色),窄屏是右边缘刻度索引(通讯录 A-Z / 照片 App 的做法)。 */
+.archive-outline, .archive-rail { display: none; }
+
+@media (min-width: 1080px) {
+  .archive-outline {
+    position: fixed;
+    top: calc(var(--header-h, 66px) + 32px);
+    left: calc(50% - 500px); /* 阅读列左沿在 50% - 320px,这里再左移出 148px 的沟槽与 32px 间距 */
+    display: flex; flex-direction: column;
+    width: 160px; padding-left: 12px;
+    max-height: calc(100vh - var(--header-h, 66px) - 72px);
+    overflow-y: auto; overscroll-behavior: contain;
+  }
+  .archive-outline::-webkit-scrollbar { width: 7px; }
+  .archive-outline::-webkit-scrollbar-track { background: transparent; }
+  .archive-outline::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: var(--radius-pill); }
+}
+@supports not selector(::-webkit-scrollbar) {
+  .archive-outline { scrollbar-width: thin; scrollbar-color: var(--hairline) transparent; }
+}
+.archive-latest {
+  padding: 0 0 4px; background: none; border: none; text-align: left;
+  font-size: 13px; color: var(--muted);
+  transition: color 0.2s ease;
+}
+.archive-latest:hover { color: var(--accent-deep); }
+.archive-year {
+  margin: 16px 0 5px;
+  font-family: var(--font-display); font-size: 15px; letter-spacing: 0.06em;
+  color: var(--ink);
+}
+.archive-row {
+  position: relative;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 3px 0; background: none; border: none; text-align: left;
+  font-size: 13px; color: var(--muted);
+  transition: color 0.2s ease, transform 0.25s var(--spring);
+}
+.archive-row small { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* 当前月份的指示点落在 12px 沟槽里,不挤文字 */
+.archive-row::before {
+  content: ''; position: absolute; left: -12px; top: 0.72em;
+  width: 4px; height: 4px; border-radius: 50%; background: var(--accent);
+  opacity: 0; transform: scale(0.5);
+  transition: opacity 0.25s ease, transform 0.3s var(--spring);
+}
+.archive-row:hover { color: var(--accent-deep); transform: translateX(3px); }
+.archive-row.here { color: var(--accent-deep); font-weight: 600; }
+.archive-row.here small { color: var(--accent); }
+.archive-row.here::before { opacity: 1; transform: none; }
+
+/* 刻度索引:每月一道短线,年份交界处换成年份数字。可点按也可拖动,
+   拖动中只用气泡预览月份、松手才跳转 —— 边拖边加载会连打十几个请求。 */
+@media (max-width: 1079px) {
+  .archive-rail {
+    position: fixed; z-index: 6; right: 0;
+    top: calc(var(--header-h, 66px) + 14px);
+    bottom: calc(26px + env(safe-area-inset-bottom));
+    display: flex; align-items: stretch;
+    width: 30px;
+  }
+}
+.archive-ticks {
+  display: flex; flex-direction: column; flex: 1;
+  touch-action: none; /* 竖向拖动交给刻度条,不要被识别成翻页 */
+}
+.archive-tick {
+  display: flex; align-items: center; justify-content: flex-end;
+  flex: 1 1 0; min-height: 0; padding: 0 6px 0 0;
+  background: none; border: none;
+}
+.archive-tick i {
+  width: 7px; height: 2px; border-radius: 1px; background: var(--faint);
+  transition: width 0.25s var(--spring), background 0.2s ease;
+}
+.archive-tick em {
+  font-style: normal; font-size: 9px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+  transition: color 0.2s ease;
+}
+.archive-tick.here i, .archive-tick.hot i { width: 14px; background: var(--accent); }
+.archive-tick.here em, .archive-tick.hot em { color: var(--accent-deep); }
+.archive-bubble {
+  position: absolute; right: 34px; transform: translateY(-50%);
+  padding: 5px 12px; white-space: nowrap;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-pop);
+  color: var(--accent-deep); font-size: 13px; font-weight: 600;
+  animation: pop 0.2s var(--spring);
+}
+.archive-bubble[hidden] { display: none; }
+
+/* ---------- 回到顶部 ---------- */
+.to-top {
+  position: fixed; right: 16px; bottom: calc(20px + env(safe-area-inset-bottom)); z-index: 8;
+  display: flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; padding: 0;
+  background: var(--card); border: 1px solid var(--border); border-radius: 50%;
+  color: var(--muted); box-shadow: var(--shadow);
+  animation: pop 0.25s var(--spring);
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, transform 0.3s var(--spring);
+}
+.to-top[hidden] { display: none; }
+.to-top .icon { width: 17px; height: 17px; }
+.to-top:hover { color: var(--accent-deep); border-color: var(--accent-wash); background: var(--accent-soft); transform: translateY(-2px); }
+.to-top:active { transform: scale(0.94); }
+/* 刻度索引占住了右边缘,按钮往里让 30px,免得压在刻度上。必须写在基础规则之后才盖得住 right: 16px */
+@media (max-width: 1079px) { .to-top { right: 46px; } }
 
 /* ---------- 相册 ---------- */
 .gallery-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
@@ -758,6 +891,7 @@ main:has(.login-card) {
   .bell-btn { width: 40px; height: 40px; }
   .comment-form .emoji-toggle { width: 38px; height: 38px; }
   .post-actions .reaction-option { height: 38px; }
+  .to-top { width: 44px; height: 44px; }
 }
 
 /* ---------- 动效降级 ---------- */
