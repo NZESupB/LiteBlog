@@ -1,8 +1,9 @@
-const CACHE_NAME = 'couple-blog-shell-v4'
+const CACHE_NAME = 'couple-blog-shell-v5'
 const SHELL = [
   '/',
   '/index.html',
   '/style.css',
+  '/images/journal-cover.jpg',
   '/app.js',
   '/manifest.webmanifest',
   '/vendor/marked.min.js',

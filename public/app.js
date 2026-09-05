@@ -83,6 +83,28 @@ function clearMain() {
   for (const observer of timelineObservers) observer.disconnect()
   timelineObservers = []
   main.innerHTML = ''
+  main.className = 'container'
+}
+
+function journalCover() {
+  return el(`<section class="journal-cover" aria-label="${esc(site.title)}">
+    <img src="/images/journal-cover.jpg" alt="晨光中的樱花湖畔、远山与平静的水面" width="1536" height="512" fetchpriority="high" />
+    <div class="cover-inner">
+      <span class="cover-mark">${icon('heart')} <span>两个人的小小世界</span></span>
+      <h1>${esc(site.title)}</h1>
+      <p>把平凡的日子，慢慢写成我们的故事。</p>
+    </div>
+  </section>`)
+}
+
+function emptyJournal(title, description, image = false) {
+  const empty = el(`<div class="journal-empty">
+    <span class="empty-symbol">${icon(image ? 'image' : 'heart')}</span>
+    <h3>${esc(title)}</h3><p>${esc(description)}</p>
+  </div>`)
+  if (!site.user) empty.appendChild(el('<a class="btn" href="#/login">登录，写下第一篇</a>'))
+  else if (image) empty.appendChild(el('<a class="btn-ghost" href="#/">去记录今天</a>'))
+  return empty
 }
 
 // ---------- 图片压缩(canvas,最长边 1600px) ----------
@@ -187,6 +209,7 @@ function attachEditorResize(handle, textarea) {
 function createComposer(post, onDone, onCancel) {
   const card = el(`
     <div class="card compose">
+      <div class="compose-heading"><span>${post ? '编辑这段日常' : '今天，有什么想记住的？'}</span>${icon('heart')}</div>
       <div class="md-toolbar" role="toolbar" aria-label="Markdown 格式">
         <button data-md="bold" title="加粗 (⌘B)">${icon('bold')}</button>
         <button data-md="italic" title="斜体 (⌘I)">${icon('italic')}</button>
@@ -206,7 +229,7 @@ function createComposer(post, onDone, onCancel) {
         <button class="md-polish" title="AI 优化正文" type="button">${icon('sparkles')}<span>AI 优化</span></button>
       </div>
       <div class="editor-box">
-        <textarea placeholder="记录一下今天的小事…"></textarea>
+        <textarea aria-label="动态正文" placeholder="一顿晚餐、一场散步，或是突然想说的话…"></textarea>
         <div class="editor-resize" title="拖动调整编辑框高度" role="separator" aria-label="拖动调整编辑框高度"></div>
       </div>
       <div class="ai-compare" hidden>
@@ -755,7 +778,7 @@ function renderPost(p) {
           <div class="post-author">${esc(p.author)}</div>
           <div class="post-time">${formatTime(p.created_at)}${p.updated_at !== p.created_at ? ' · 已编辑' : ''}</div>
         </div>
-        <div class="post-actions"><button class="more-btn" type="button" title="更多操作" aria-haspopup="menu" aria-expanded="false">更多</button></div>
+        <div class="post-actions"><button class="more-btn" type="button" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false">${icon('ellipsis')}</button></div>
       </div>
       <div class="post-content"></div>
       <div class="img-grid n${p.images.length}" ${p.images.length ? '' : 'hidden'}></div>
@@ -832,10 +855,15 @@ function renderPost(p) {
 
 async function renderTimeline(month = null) {
   clearMain()
+  main.classList.add('timeline-page')
+  main.appendChild(journalCover())
+  const heading = el('<div class="journal-heading"><h2>日常手记</h2><span class="journal-count"></span></div>')
+  main.appendChild(heading)
   if (site.user) main.appendChild(createComposer(null, renderTimeline))
 
   // 归档导航只在跨月时才有意义,单月站点不渲染
-  const { months } = await api(`/api/posts/archive?tz=${tzOffset()}`).catch(() => ({ months: [] }))
+  const { months, total } = await api(`/api/posts/archive?tz=${tzOffset()}`).catch(() => ({ months: [] }))
+  $('.journal-count', heading).textContent = Number.isFinite(total) ? `${total} 篇日常` : ''
   const archive = months.length > 1 ? renderArchive(months, (pick) => renderTimeline(pick)) : null
   if (archive) main.appendChild(archive)
 
@@ -895,7 +923,7 @@ async function renderTimeline(month = null) {
       query = data.nextCursor ? `cursor=${encodeURIComponent(data.nextCursor)}` : ''
       footer.innerHTML = ''
       if (empty) {
-        footer.appendChild(el(`<div class="empty-tip">${month ? '这段时间还没有记录' : '还没有动态,写下第一条吧'}</div>`))
+        footer.appendChild(emptyJournal(month ? '这段时光，还是空白' : '故事，从今天开始', '那些微小却珍贵的瞬间，都值得被记住。'))
       }
     } catch (e) {
       // 自动加载失败时回落成手动重试,不把用户卡在转圈里
@@ -942,18 +970,27 @@ async function renderSinglePost(id) {
 
 async function renderGallery() {
   clearMain()
+  main.classList.add('gallery-page')
+  const heading = el('<div class="page-heading"><div><p>我们的日常</p><h1>影像集</h1></div><span class="gallery-count"></span></div>')
+  $('p', heading).textContent = site.title
+  main.appendChild(heading)
   try {
     const { images } = await api('/api/gallery')
+    $('.gallery-count', heading).textContent = `${images.length} 张照片`
     if (images.length === 0) {
-      main.appendChild(el('<div class="empty-tip">相册还是空的,发条带图的动态吧</div>'))
+      main.appendChild(emptyJournal('等待第一张，一起的照片', '留住眼前的风景，也留住那一刻的心情。', true))
       return
     }
     const grid = el('<div class="gallery-grid"></div>')
     const urls = images.map((img) => img.url)
     images.forEach((img, i) => {
-      const image = el(`<img src="${img.url}" alt="" loading="lazy" title="${esc(img.author)} · ${formatTime(img.created_at)}" />`)
-      image.onclick = () => openLightbox(urls, i)
-      grid.appendChild(image)
+      const caption = `${img.author} · ${formatTime(img.created_at)}`
+      const photo = el(`<button class="gallery-photo" type="button" aria-label="查看照片：${esc(caption)}">
+        <img src="${esc(img.url)}" alt="${esc(caption)}" loading="lazy" />
+        <span>${esc(caption)}</span>
+      </button>`)
+      photo.onclick = () => openLightbox(urls, i)
+      grid.appendChild(photo)
     })
     main.appendChild(grid)
   } catch (e) {
@@ -965,13 +1002,17 @@ async function renderGallery() {
 
 function renderLogin() {
   clearMain()
+  main.classList.add('login-page')
+  main.appendChild(journalCover())
   const form = el(`
-    <form class="card login-card">
-      <h2>${esc(site.title)}</h2>
-      <div class="sub">${site.privateMode ? '登录后可查看图片、相册与发布动态' : '登录后可以发布动态'}</div>
-      <input name="username" placeholder="登录账号" autocomplete="username" autocapitalize="none" spellcheck="false" />
-      <input name="password" type="password" placeholder="密码" autocomplete="current-password" />
-      <div class="form-error"></div>
+    <form class="login-card">
+      <h2>欢迎回家</h2>
+      <div class="sub">今天的故事，想从哪里说起？</div>
+      <label for="login-username">登录账号</label>
+      <input id="login-username" name="username" placeholder="输入你的账号" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+      <label for="login-password">密码</label>
+      <input id="login-password" name="password" type="password" placeholder="输入密码" autocomplete="current-password" required />
+      <div class="form-error" role="alert"></div>
       <button class="btn" type="submit">登录</button>
     </form>`)
   form.onsubmit = async (event) => {
