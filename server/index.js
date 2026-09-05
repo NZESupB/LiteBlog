@@ -9,7 +9,7 @@ import path from 'node:path'
 import { db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { sessionMiddleware, requireAuth, createSession, clearSession } from './auth.js'
 import { LOCAL, WEBDAV, activeBackend, putImage, getImage, deleteImage } from './storage.js'
-import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser } from './push.js'
+import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
 import * as webdav from './webdav.js'
 import { llmApp } from './llm.js'
 
@@ -200,7 +200,11 @@ function monthCursor(month, tz) {
 }
 
 app.get('/api/posts', (c) => {
-  const limit = Math.min(Number(c.req.query('limit')) || 20, 50)
+  const rawLimit = c.req.query('limit')
+  const limit = rawLimit == null ? 20 : Number(rawLimit)
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+    return c.json({ error: '分页参数不合法' }, 400)
+  }
   const tz = tzMinutes(c.req.query('tz'))
   const rawCursor = c.req.query('cursor')
   const rawMonth = c.req.query('month')
@@ -580,17 +584,17 @@ app.post('/api/notifications/read', requireAuth, (c) => {
 app.get('/api/push/key', requireAuth, (c) => c.json({ key: vapidPublicKey() }))
 
 app.post('/api/push/subscribe', requireAuth, async (c) => {
-  const body = await c.req.json().catch(() => ({}))
+  const body = (await c.req.json().catch(() => ({}))) || {}
   const endpoint = String(body.endpoint ?? '')
   const p256dh = String(body.keys?.p256dh ?? '')
   const auth = String(body.keys?.auth ?? '')
-  if (!endpoint.startsWith('https://') || !p256dh || !auth) return c.json({ error: '订阅信息不完整' }, 400)
+  if (!isValidSubscription({ endpoint, p256dh, auth })) return c.json({ error: '订阅信息无效' }, 400)
   saveSubscription(c.get('user').id, { endpoint, p256dh, auth })
   return c.json({ ok: true })
 })
 
 app.post('/api/push/unsubscribe', requireAuth, async (c) => {
-  const body = await c.req.json().catch(() => ({}))
+  const body = (await c.req.json().catch(() => ({}))) || {}
   removeSubscription(c.get('user').id, String(body.endpoint ?? ''))
   return c.json({ ok: true })
 })

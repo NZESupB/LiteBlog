@@ -3,8 +3,8 @@
 `tools/backup.py` 把 SQLite 数据库（`blog.db`）备份到与图片存储一致的 **WebDAV** 目录，远端只保留最新一份；也支持从 WebDAV 或本地文件恢复。
 
 - 仅用 Python 标准库（`sqlite3` / `urllib` / `xml`），**无第三方依赖**
-- 要求 **Python 3.11+**
-- 备份前先做 `PRAGMA wal_checkpoint(TRUNCATE)`，保证拷出的是完整一致的快照
+- 要求 **Python 3.9+**
+- 备份使用 SQLite backup API 获取在线一致快照，不依赖手动 checkpoint
 
 ## 一、命令用法
 
@@ -44,7 +44,7 @@
 
 ## 三、定时任务
 
-用 `crontab` 每天定时备份。先确认 Python 路径与版本（部署机为 `/usr/bin/python3`，要求 ≥3.11）：
+用 `crontab` 每天定时备份。先确认 Python 路径与版本（部署机为 `/usr/bin/python3`，要求 ≥3.9）：
 
 ```bash
 /usr/bin/python3 --version
@@ -56,10 +56,10 @@
 crontab -e
 ```
 
-加入一行（每天凌晨 3:30，日志追加到 `backups/cron.log`）：
+加入一行（每天凌晨 3:30，日志追加到 `backups/cron.log`；首次运行会自动创建日志目录）：
 
 ```cron
-30 3 * * * cd /data/LiteBlog && /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
+30 3 * * * cd /data/LiteBlog && mkdir -p backups && /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
 ```
 
 > 把 `/data/LiteBlog` 换成实际部署路径。cron 环境变量精简，若配置未落库，建议在 crontab 顶部显式导出 WebDAV 凭据：
@@ -69,13 +69,13 @@ crontab -e
 > WEBDAV_USERNAME=你的账号
 > WEBDAV_PASSWORD=你的密码
 > WEBDAV_FOLDER=images
-> 30 3 * * * cd /data/LiteBlog && /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
+> 30 3 * * * cd /data/LiteBlog && mkdir -p backups && /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
 > ```
 
 **Docker 部署**：在宿主机跑 cron，`DATA_DIR` 指向挂载卷路径即可：
 
 ```cron
-30 3 * * * cd /data/LiteBlog && DATA_DIR=/data/LiteBlog/data /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
+30 3 * * * cd /data/LiteBlog && mkdir -p backups && DATA_DIR=/data/LiteBlog/data /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
 ```
 
 **systemd timer 替代方案**（可选，日志更规范）：
@@ -89,7 +89,9 @@ Description=Couple blog database backup
 Type=oneshot
 WorkingDirectory=/data/LiteBlog
 ExecStart=/usr/bin/python3 tools/backup.py
+```
 
+```ini
 # /etc/systemd/system/blog-backup.timer
 [Unit]
 Description=Run blog backup daily

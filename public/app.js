@@ -18,6 +18,7 @@ function withinEditWindow(createdAt) {
 }
 let activePostMenu = null
 let serviceWorkerRegistration = null
+const SERVICE_WORKER_READY_TIMEOUT_MS = 5000
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (event) => {
@@ -1447,14 +1448,36 @@ function base64UrlToBytes(value) {
   return Uint8Array.from(raw, (ch) => ch.charCodeAt(0))
 }
 
+async function readyServiceWorker() {
+  let timer = null
+  let registration
+  try {
+    registration = await Promise.race([
+      Promise.resolve(serviceWorkerRegistration),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), SERVICE_WORKER_READY_TIMEOUT_MS) }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+  return registration
+}
+
 async function currentPushSubscription() {
-  const registration = await serviceWorkerRegistration
+  const registration = await readyServiceWorker()
   return registration?.pushManager ? registration.pushManager.getSubscription() : null
 }
 
+async function savePushSubscription(subscription) {
+  await api('/api/push/subscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(subscription.toJSON()),
+  })
+}
+
 async function enablePush() {
-  const registration = await serviceWorkerRegistration
-  if (!registration?.pushManager) throw new Error('浏览器不支持推送')
+  const registration = await readyServiceWorker()
+  if (!registration?.pushManager) throw new Error('通知服务尚未就绪')
   const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
   if (permission !== 'granted') return false
   const { key } = await api('/api/push/key')
@@ -1463,11 +1486,7 @@ async function enablePush() {
     applicationServerKey: base64UrlToBytes(key),
   })
   try {
-    await api('/api/push/subscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(subscription.toJSON()),
-    })
+    await savePushSubscription(subscription)
   } catch (e) {
     // 服务端没存下就等于没开,留着浏览器侧的订阅只会让开关显示成已开启
     await subscription.unsubscribe()
@@ -1493,7 +1512,12 @@ async function autoEnablePush() {
       !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator) ||
       Notification.permission === 'denied') return
   try {
-    if (await currentPushSubscription()) return
+    const existing = await currentPushSubscription()
+    if (existing) {
+      // 浏览器订阅是设备级的,换账号后不能只看见已有订阅就返回,必须重新绑定当前用户。
+      await savePushSubscription(existing)
+      return
+    }
     if (Notification.permission === 'default') {
       let attempted = false
       try { attempted = sessionStorage.getItem(pushAttemptKey(site.user.id)) === '1' } catch {}
@@ -1509,12 +1533,20 @@ async function autoEnablePush() {
 async function disablePush() {
   const subscription = await currentPushSubscription()
   if (!subscription) return
-  await api('/api/push/unsubscribe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ endpoint: subscription.endpoint }),
-  })
-  await subscription.unsubscribe()
+  let failure = null
+  try {
+    await api('/api/push/unsubscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: subscription.endpoint }),
+    })
+  } catch (e) {
+    failure = e
+  } finally {
+    // 服务端失败也必须清掉本地订阅,否则下一个登录账号会复用旧账号的 endpoint。
+    try { await subscription.unsubscribe() } catch (e) { if (!failure) failure = e }
+  }
+  if (failure) throw failure
 }
 
 function browserNotificationAction() {
@@ -1532,8 +1564,13 @@ function browserNotificationAction() {
   }
 
   const sync = async () => {
-    label.textContent = (await currentPushSubscription()) ? '关闭浏览器通知' : '开启浏览器通知'
-    button.disabled = false
+    try {
+      label.textContent = (await currentPushSubscription()) ? '关闭浏览器通知' : '开启浏览器通知'
+    } catch {
+      label.textContent = '通知暂时不可用'
+    } finally {
+      button.disabled = false
+    }
   }
   button.onclick = async () => {
     button.disabled = true

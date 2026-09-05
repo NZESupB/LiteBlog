@@ -8,11 +8,52 @@ const CURVE = 'prime256v1'
 const SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com'
 // aes128gcm 的记录大小,单条通知远小于此值,固定成一条记录即可
 const RECORD_SIZE = 4096
+const PUSH_TIMEOUT_MS = 15_000
+
+// 订阅 endpoint 后续会被服务端 fetch,只接受浏览器常用的官方推送服务域名。
+// 仅检查 https 不够,否则登录用户可以把服务器当成任意 HTTPS SSRF 代理。
+const PUSH_SERVICE_DOMAINS = [
+  'fcm.googleapis.com',
+  'android.googleapis.com',
+  'push.services.mozilla.com',
+  'push.apple.com',
+  'notify.windows.com',
+]
 
 const b64u = (buf) => Buffer.from(buf).toString('base64url')
 const fromB64u = (value) => Buffer.from(String(value), 'base64url')
 // EC 私钥标量必须补齐到 32 字节,createECDH 在高位为 0 时会返回更短的 buffer
 const pad32 = (buf) => (buf.length >= 32 ? buf.subarray(buf.length - 32) : Buffer.concat([Buffer.alloc(32 - buf.length), buf]))
+
+function hostInPushService(hostname) {
+  return PUSH_SERVICE_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))
+}
+
+export function isAllowedPushEndpoint(endpoint) {
+  try {
+    const url = new URL(endpoint)
+    return url.protocol === 'https:' &&
+      !url.username && !url.password &&
+      (!url.port || url.port === '443') &&
+      hostInPushService(url.hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+function decodeSubscriptionKey(value, length) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value)) return null
+  const decoded = fromB64u(value)
+  // Buffer.from() 会静默接受部分非法输入,用重新编码确保值确实是规范 base64url。
+  if (b64u(decoded) !== value || decoded.length !== length) return null
+  return decoded
+}
+
+export function isValidSubscription({ endpoint, p256dh, auth }) {
+  const publicKey = decodeSubscriptionKey(p256dh, 65)
+  const authSecret = decodeSubscriptionKey(auth, 16)
+  return isAllowedPushEndpoint(endpoint) && publicKey?.[0] === 4 && Boolean(authSecret)
+}
 
 // VAPID 密钥对只生成一次:换掉公钥会让所有已有订阅立即失效,必须落库长期保存
 function vapidKeys() {
@@ -81,6 +122,7 @@ function encryptPayload(plaintext, p256dh, authSecret) {
 }
 
 export function saveSubscription(userId, { endpoint, p256dh, auth }) {
+  if (!isValidSubscription({ endpoint, p256dh, auth })) throw new Error('无效的 Web Push 订阅')
   db.prepare(`
     INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth) VALUES (?, ?, ?, ?)
     ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth
@@ -97,8 +139,16 @@ export async function pushToUser(userId, payload) {
   const body = JSON.stringify(payload)
   await Promise.all(rows.map(async (row) => {
     try {
+      // 防御性复核,兼容历史上未经严格校验写入的订阅记录。
+      if (!isValidSubscription(row)) {
+        console.warn(`已忽略无效的 Web Push 订阅: ${row.endpoint}`)
+        db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(row.endpoint)
+        return
+      }
       const res = await fetch(row.endpoint, {
         method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
         headers: {
           Authorization: vapidAuthorization(row.endpoint),
           'Content-Encoding': 'aes128gcm',
