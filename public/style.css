@@ -65,19 +65,20 @@ img { max-width: 100%; }
 /* ---------- 顶栏 ---------- */
 .site-header {
   position: sticky; top: 0; z-index: 10;
+  isolation: isolate;
   padding-top: env(safe-area-inset-top);
-  background: rgba(255, 255, 255, 0.96);
-  -webkit-backdrop-filter: blur(14px) saturate(1.4);
-  backdrop-filter: blur(14px) saturate(1.4);
+  background: #f9e6ed url('/images/journal-cover.jpg') center 30% / cover;
   border-bottom: 1px solid var(--hairline);
 }
+.site-header::before { content: ''; position: absolute; inset: 0; z-index: -1; background: rgba(255, 249, 252, 0.55); pointer-events: none; }
 .header-inner {
-  max-width: 1040px; margin: 0 auto; padding: 16px 24px;
+  max-width: 1040px; margin: 0 auto; padding: 30px 24px;
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
 }
 .site-title {
+  display: inline-flex; align-items: center; gap: 10px;
   font-family: var(--font-display);
-  font-size: 21px; font-weight: 700; overflow-wrap: anywhere; min-width: 0;
+  font-size: 26px; font-weight: 700; overflow-wrap: anywhere; min-width: 0;
   color: var(--ink);
   background-image: linear-gradient(var(--accent), var(--accent));
   background-repeat: no-repeat;
@@ -93,7 +94,14 @@ img { max-width: 100%; }
   color: var(--rose);
   padding: 3px 0;
 }
-.days .icon { width: 12px; height: 12px; fill: currentColor; stroke-width: 0; }
+.site-heart { display: inline-flex; flex-shrink: 0; color: var(--rose); }
+.site-heart .icon { width: 20px; height: 20px; fill: currentColor; stroke-width: 0; animation: heartbeat 2.6s ease-in-out infinite; }
+@keyframes heartbeat {
+  0%, 40%, 100% { transform: scale(1); }
+  12% { transform: scale(1.22); }
+  24% { transform: scale(1); }
+  32% { transform: scale(1.14); }
+}
 .days[hidden] { display: none; } /* 没设纪念日时靠 hidden 收起,不补这条会留下一个空胶囊 */
 .site-nav {
   margin-left: auto;
@@ -206,6 +214,16 @@ article.card.post:hover { border-color: #dfbdcc; }
   transition: background 0.18s ease, color 0.18s ease, transform 0.25s var(--spring);
 }
 .md-toolbar button .icon { width: 15px; height: 15px; }
+[data-tooltip] { position: relative; }
+[data-tooltip]::after {
+  content: attr(data-tooltip); position: absolute; bottom: calc(100% + 8px); left: 50%;
+  transform: translateX(-50%); z-index: 21; width: max-content; max-width: 220px;
+  padding: 5px 9px; border-radius: 6px; background: var(--ink); color: #fff;
+  font-size: 12px; font-weight: 400; line-height: 1.5; pointer-events: none;
+  visibility: hidden;
+}
+[data-tooltip]:hover::after, [data-tooltip]:focus-visible::after { visibility: visible; }
+.md-toolbar button:first-child::after, .compose-actions .pick::after { left: 0; transform: none; }
 .md-toolbar button:hover { background: var(--accent-soft); color: var(--accent-deep); transform: translateY(-1px); }
 .md-sep { width: 1px; height: 16px; background: var(--border); margin: 0 5px; }
 
@@ -853,20 +871,8 @@ article.card.post:hover { border-color: #dfbdcc; }
 /* ---------- 单条动态页 ---------- */
 .single-back { display: inline-flex; margin-bottom: 14px; }
 
-/* 封面跨出阅读列,仍保留时间轴 640px 的居中位置。层级遮住首屏外围归档,滚动后归档自然露出。 */
+/* 站名、爱心和导航已合并到统一的图片顶栏。 */
 .timeline-page, .login-page { padding-top: 0; }
-.journal-cover {
-  position: relative; z-index: 7;
-  width: 100vw; margin-left: calc(50% - 50vw);
-  min-height: 248px; isolation: isolate;
-  background: #f6e8ee; overflow: hidden;
-}
-.journal-cover > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 53%; z-index: -1; }
-.cover-inner { max-width: 640px; margin: 0 auto; padding: 44px 16px 40px; }
-.cover-mark { display: flex; align-items: center; gap: 8px; color: #754756; font-size: 12px; }
-.cover-mark .icon { width: 15px; height: 15px; color: var(--rose); }
-.cover-inner h1 { font: 600 36px/1.45 var(--font-display); margin: 12px 0 8px; color: #55313f; overflow-wrap: anywhere; }
-.cover-inner p { margin: 0; font-size: 14px; color: #55313f; font-weight: 500; }
 .journal-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 26px 0 18px; }
 .journal-heading h2 { margin: 0; font: 600 22px/1.5 var(--font-display); color: var(--ink); }
 .journal-count, .gallery-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
@@ -905,17 +911,13 @@ article.card.post:hover { border-color: #dfbdcc; }
   .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 }
 @media (max-width: 559px) {
-  .header-inner { padding: 12px 18px; gap: 8px 12px; }
+  .header-inner { padding: 20px 18px; gap: 8px 12px; }
   .site-title { font-size: 19px; max-width: 100%; }
   .site-nav { gap: 16px; font-size: 13px; }
   #userArea { gap: 8px; }
   .days { order: 3; width: 100%; font-size: 11px; }
   .container { padding-left: 20px; padding-right: 20px; }
-  .journal-cover { width: 100vw; margin-left: calc(50% - 50vw); min-height: 216px; }
-  .journal-cover > img { object-position: left center; }
-  .cover-inner { padding: 32px 24px; }
-  .cover-inner h1 { font-size: 30px; }
-  .cover-inner p { font-size: 13px; max-width: 250px; }
+  .site-header { background-position: left top; }
   .journal-heading { padding: 22px 0 16px; }
   .journal-heading h2 { font-size: 20px; }
   .compose, .post.card { padding: 16px; }

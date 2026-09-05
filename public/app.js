@@ -86,17 +86,6 @@ function clearMain() {
   main.className = 'container'
 }
 
-function journalCover() {
-  return el(`<section class="journal-cover" aria-label="${esc(site.title)}">
-    <img src="/images/journal-cover.jpg" alt="晨光中的樱花湖畔、远山与平静的水面" width="1536" height="512" fetchpriority="high" />
-    <div class="cover-inner">
-      <span class="cover-mark">${icon('heart')} <span>两个人的小小世界</span></span>
-      <h1>${esc(site.title)}</h1>
-      <p>把平凡的日子，慢慢写成我们的故事。</p>
-    </div>
-  </section>`)
-}
-
 function emptyJournal(title, description, image = false) {
   const empty = el(`<div class="journal-empty">
     <span class="empty-symbol">${icon(image ? 'image' : 'heart')}</span>
@@ -267,6 +256,12 @@ function createComposer(post, onDone, onCancel) {
       <input class="camera-input" type="file" accept="image/*" capture="environment" hidden />
     </div>`)
   const textarea = $('textarea', card)
+  // 使用即时提示替代浏览器不可配置延迟的 title,同时保留无障碍名称。
+  card.querySelectorAll('button[title]').forEach((button) => {
+    button.dataset.tooltip = button.title
+    if (!button.hasAttribute('aria-label')) button.setAttribute('aria-label', button.title)
+    button.removeAttribute('title')
+  })
   attachMdToolbar($('.md-toolbar', card), textarea)
   attachEditorResize($('.editor-resize', card), textarea)
   const previews = $('.preview-grid', card)
@@ -856,7 +851,6 @@ function renderPost(p) {
 async function renderTimeline(month = null) {
   clearMain()
   main.classList.add('timeline-page')
-  main.appendChild(journalCover())
   const heading = el('<div class="journal-heading"><h2>日常手记</h2><span class="journal-count"></span></div>')
   main.appendChild(heading)
   if (site.user) main.appendChild(createComposer(null, renderTimeline))
@@ -1003,7 +997,6 @@ async function renderGallery() {
 function renderLogin() {
   clearMain()
   main.classList.add('login-page')
-  main.appendChild(journalCover())
   const form = el(`
     <form class="login-card">
       <h2>欢迎回家</h2>
@@ -1769,13 +1762,14 @@ async function init() {
   site = await api('/api/site')
   document.title = site.title
   $('meta[name="apple-mobile-web-app-title"]').content = site.title
-  $('.site-title').textContent = site.title
+  $('.site-name').textContent = site.title
+  $('.site-heart').innerHTML = icon('heart')
   trackHeaderHeight()
   if (site.anniversary) {
     const days = Math.floor((Date.now() - new Date(site.anniversary + 'T00:00:00')) / 86400000) + 1
     if (days > 0) {
       const el2 = $('#days')
-      el2.innerHTML = `${icon('heart')}<span>第 ${days} 天</span>`
+      el2.innerHTML = `<span>第 ${days} 天</span>`
       el2.hidden = false
     }
   }
