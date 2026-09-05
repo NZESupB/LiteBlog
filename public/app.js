@@ -490,6 +490,7 @@ const monthTitle = (month) => `${month.slice(0, 4)}年${Number(month.slice(5))}�
 function renderArchive(months, onPick) {
   const wrap = el('<div class="archive"></div>')
   const outline = el('<nav class="archive-outline" aria-label="按月份浏览"><button class="archive-latest" type="button">最新</button></nav>')
+  const mobileTrigger = el(`<button class="archive-mobile-trigger" type="button" aria-expanded="false"><span>${monthTitle(months[0].month)}</span><span class="archive-trigger-count">${months[0].count} 条</span></button>`)
   const rail = el('<nav class="archive-rail" aria-label="按月份浏览"><div class="archive-ticks"></div><span class="archive-bubble" hidden></span></nav>')
   const ticksBox = $('.archive-ticks', rail)
   const bubble = $('.archive-bubble', rail)
@@ -519,6 +520,10 @@ function renderArchive(months, onPick) {
     ticks.set(month, tick)
   }
   $('.archive-latest', outline).onclick = () => onPick(null)
+  mobileTrigger.onclick = () => {
+    const open = wrap.classList.toggle('open')
+    mobileTrigger.setAttribute('aria-expanded', String(open))
+  }
 
   // 拖动刻度条时只用气泡预览月份,松手才真正跳转:边拖边加载会连打十几个请求
   const tickAt = (clientY) => {
@@ -571,7 +576,7 @@ function renderArchive(months, onPick) {
     if (top < outline.scrollTop) outline.scrollTop = top - 24
     else if (bottom > outline.scrollTop + outline.clientHeight) outline.scrollTop = bottom - outline.clientHeight + 24
   }
-  wrap.append(outline, rail)
+  wrap.append(mobileTrigger, outline, rail)
   return wrap
 }
 
@@ -795,7 +800,7 @@ function renderPost(p) {
   } else if (guest && !showText) {
     const contentEl = $('.post-content', card)
     contentEl.innerHTML = ''
-    contentEl.appendChild(el(`<div class="img-hidden-note">${icon('lock')}<span>该内容仅登录后可见</span></div>`))
+    contentEl.appendChild(el(`<div class="img-hidden-note">${icon('lock')}<span>仅两位成员可见</span></div>`))
   } else $('.post-content', card).remove()
 
   const grid = $('.img-grid', card)
@@ -1781,6 +1786,7 @@ async function init() {
       .catch(() => null)
   }
   renderUserArea()
+  document.querySelectorAll('.mobile-nav [data-icon]').forEach((node) => { node.innerHTML = icon(node.dataset.icon) })
   route()
   if (site.user) autoEnablePush()
 }
