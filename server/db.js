@@ -6,7 +6,9 @@ import path from 'node:path'
 
 export const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data')
 export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads')
+export const AVATAR_DIR = path.join(DATA_DIR, 'avatars')
 mkdirSync(UPLOAD_DIR, { recursive: true })
+mkdirSync(AVATAR_DIR, { recursive: true })
 
 export const db = new DatabaseSync(path.join(DATA_DIR, 'blog.db'))
 
@@ -18,6 +20,7 @@ db.exec(`
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     username   TEXT NOT NULL,
     name       TEXT NOT NULL UNIQUE,
+    avatar_filename TEXT,
     pass_hash  TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -92,6 +95,11 @@ if (!userColumns.some((col) => col.name === 'username')) {
 }
 db.exec("UPDATE users SET username = name WHERE username IS NULL OR trim(username) = ''")
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username)')
+
+// 头像独立存储,旧账号默认继续使用文字头像
+if (!userColumns.some((col) => col.name === 'avatar_filename')) {
+  db.exec('ALTER TABLE users ADD COLUMN avatar_filename TEXT')
+}
 
 // 旧库补列:早期 images 表没有 storage,历史图片一律视为本地存储
 if (!db.prepare('PRAGMA table_info(images)').all().some((col) => col.name === 'storage')) {

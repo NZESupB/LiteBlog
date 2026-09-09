@@ -4,9 +4,10 @@ import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
+import { AVATAR_DIR, db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { sessionMiddleware, requireAuth, createSession, clearSession } from './auth.js'
 import { LOCAL, WEBDAV, activeBackend, putImage, getImage, deleteImage } from './storage.js'
 import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
@@ -17,10 +18,13 @@ const PORT = Number(process.env.PORT) || 3000
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+const MAX_AVATAR_BYTES = 10 * 1024 * 1024
 const IMAGE_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' }
 // 新格式 YYYYMMDD-HHMMSS-<hash8>,旧格式为 16 位内容哈希,两者都要能读
 const UPLOAD_NAME_RE = /^(?:[a-f0-9]{16}|\d{8}-\d{6}-[a-f0-9]{8})\.(jpg|png|webp|gif)$/
 const MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' }
+const AVATAR_MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }
+const AVATAR_NAME_RE = /^avatar-\d+-\d+-[a-f0-9]{12}\.(jpg|png|webp)$/
 // 网盘里按时间查找方便:文件名带日期。用 Intl 取东八区,不依赖容器 tzdata
 const FILE_TZ_FORMAT = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Shanghai', hourCycle: 'h23',
@@ -37,6 +41,22 @@ function siteConfig() {
     anniversary: getSetting('anniversary', process.env.ANNIVERSARY || ''),
     privateMode: getSetting('private_mode', process.env.PRIVATE_MODE || 'false') === 'true',
   }
+}
+
+function avatarUrl(filename) {
+  return filename ? `/avatars/${filename}` : null
+}
+
+function attachAvatars(rows) {
+  for (const row of rows) {
+    row.avatarUrl = avatarUrl(row.avatar_filename)
+    delete row.avatar_filename
+    if (Object.prototype.hasOwnProperty.call(row, 'reply_avatar_filename')) {
+      row.replyAvatarUrl = avatarUrl(row.reply_avatar_filename)
+      delete row.reply_avatar_filename
+    }
+  }
+  return rows
 }
 
 // 私密模式下,相册聚合等纯图资源仍需登录;/uploads 已按文章「公开图片」开关自管鉴权
@@ -78,7 +98,7 @@ app.post('/api/login', async (c) => {
     return c.json({ error: '登录账号或密码错误' }, 401)
   }
   await createSession(c, user)
-  return c.json({ user: { id: user.id, username: user.username, name: user.name, displayName: user.name } })
+  return c.json({ user: { id: user.id, username: user.username, name: user.name, displayName: user.name, avatarUrl: avatarUrl(user.avatar_filename) } })
 })
 
 app.post('/api/logout', (c) => {
@@ -119,7 +139,51 @@ app.post('/api/profile', requireAuth, async (c) => {
   }
   // 重新签发会话,JWT 中同步保存登录账号和显示名称
   await createSession(c, { id: me.id, username: newUsername, name: newName })
-  return c.json({ ok: true, username: newUsername, name: newName, displayName: newName })
+  const avatar = db.prepare('SELECT avatar_filename FROM users WHERE id = ?').get(me.id)
+  return c.json({ ok: true, username: newUsername, name: newName, displayName: newName, avatarUrl: avatarUrl(avatar?.avatar_filename) })
+})
+
+function detectAvatarType(buf) {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg'
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return '.png'
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') return '.webp'
+  return null
+}
+
+app.post('/api/profile/avatar', requireAuth, async (c) => {
+  const form = await c.req.formData().catch(() => null)
+  const file = form?.get('avatar')
+  if (!file || typeof file !== 'object' || file.size === 0) return c.json({ error: '没有收到头像图片' }, 400)
+  if (file.size > MAX_AVATAR_BYTES) return c.json({ error: '头像不能超过 10MB' }, 400)
+  const buf = Buffer.from(await file.arrayBuffer())
+  const ext = detectAvatarType(buf)
+  if (!ext) return c.json({ error: '头像仅支持 JPEG、PNG 或 WebP' }, 400)
+  const me = c.get('user')
+  const hash = createHash('sha256').update(buf).digest('hex')
+  const filename = `avatar-${me.id}-${Date.now()}-${hash.slice(0, 12)}${ext}`
+  const target = path.join(AVATAR_DIR, filename)
+  await writeFile(target, buf)
+  const current = db.prepare('SELECT avatar_filename FROM users WHERE id = ?').get(me.id)
+  try {
+    db.prepare('UPDATE users SET avatar_filename = ? WHERE id = ?').run(filename, me.id)
+  } catch (error) {
+    await unlink(target).catch(() => {})
+    throw error
+  }
+  if (current?.avatar_filename && AVATAR_NAME_RE.test(current.avatar_filename)) {
+    await unlink(path.join(AVATAR_DIR, current.avatar_filename)).catch(() => {})
+  }
+  return c.json({ ok: true, avatarUrl: avatarUrl(filename) })
+})
+
+app.delete('/api/profile/avatar', requireAuth, async (c) => {
+  const me = c.get('user')
+  const current = db.prepare('SELECT avatar_filename FROM users WHERE id = ?').get(me.id)
+  db.prepare('UPDATE users SET avatar_filename = NULL WHERE id = ?').run(me.id)
+  if (current?.avatar_filename && AVATAR_NAME_RE.test(current.avatar_filename)) {
+    await unlink(path.join(AVATAR_DIR, current.avatar_filename)).catch(() => {})
+  }
+  return c.json({ ok: true, avatarUrl: null })
 })
 
 app.post('/api/password', requireAuth, async (c) => {
@@ -216,7 +280,7 @@ app.get('/api/posts', (c) => {
   // 多取一条探边界:比 posts.length === limit 准,末页刚好整页时不会多出一次空加载
   const rows = db
     .prepare(`
-      SELECT p.id, p.content, p.created_at, p.updated_at, p.user_id, p.public_text, p.public_images, u.name AS author
+      SELECT p.id, p.content, p.created_at, p.updated_at, p.user_id, p.public_text, p.public_images, u.name AS author, u.avatar_filename
       FROM posts p JOIN users u ON u.id = p.user_id
       ${cursor ? 'WHERE (p.created_at, p.id) < (?, ?)' : ''}
       ORDER BY p.created_at DESC, p.id DESC LIMIT ?`)
@@ -226,7 +290,7 @@ app.get('/api/posts', (c) => {
   const last = posts[posts.length - 1]
   const nextCursor = hasMore && last ? `${last.created_at}|${last.id}` : null
 
-  const withImages = withCanEdit(attachReactions(attachImages(posts), c.get('user')?.id), c.get('user'))
+  const withImages = withCanEdit(attachAvatars(attachReactions(attachImages(posts), c.get('user')?.id)), c.get('user'))
   // 私密模式下未登录访客:按文章开关决定可见性,默认全隐
   if (siteConfig().privateMode && !c.get('user')) {
     for (const p of withImages) {
@@ -253,11 +317,11 @@ app.get('/api/posts/archive', (c) => {
 app.get('/api/posts/:id', (c) => {
   const post = db
     .prepare(`
-      SELECT p.id, p.content, p.created_at, p.updated_at, p.user_id, p.public_text, p.public_images, u.name AS author
+      SELECT p.id, p.content, p.created_at, p.updated_at, p.user_id, p.public_text, p.public_images, u.name AS author, u.avatar_filename
       FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?`)
     .get(Number(c.req.param('id')))
   if (!post) return c.json({ error: '动态不存在' }, 404)
-  attachReactions(attachImages([post]), c.get('user')?.id)
+  attachAvatars(attachReactions(attachImages([post]), c.get('user')?.id))
   withCanEdit([post], c.get('user'))
   if (siteConfig().privateMode && !c.get('user')) {
     if (!post.public_text) post.content = ''
@@ -487,14 +551,14 @@ app.get('/api/posts/:id/comments', (c) => {
   }
   const rows = db
     .prepare(`
-      SELECT c.id, c.content, c.created_at, c.user_id, c.reply_to, u.name AS author,
-             reply_user.name AS reply_author, reply.content AS reply_content
+      SELECT c.id, c.content, c.created_at, c.user_id, c.reply_to, u.name AS author, u.avatar_filename,
+             reply_user.name AS reply_author, reply_user.avatar_filename AS reply_avatar_filename, reply.content AS reply_content
       FROM comments c JOIN users u ON u.id = c.user_id
       LEFT JOIN comments reply ON reply.id = c.reply_to AND reply.post_id = c.post_id
       LEFT JOIN users reply_user ON reply_user.id = reply.user_id
       WHERE c.post_id = ? ORDER BY c.id ASC`)
     .all(post.id)
-  return c.json({ comments: rows })
+  return c.json({ comments: attachAvatars(rows) })
 })
 
 app.post('/api/posts/:id/comments', requireAuth, async (c) => {
@@ -527,7 +591,7 @@ app.post('/api/posts/:id/comments', requireAuth, async (c) => {
   pushComment({ commentId: Number(lastInsertRowid), postId: post.id, author: me, content, replyUserId })
   return c.json({
     id: Number(lastInsertRowid), content, user_id: me.id, author: me.name,
-    reply_to: replyToId, reply_author: replyAuthor,
+    reply_to: replyToId, reply_author: replyAuthor, avatarUrl: me.avatarUrl,
     created_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
   })
 })
@@ -698,6 +762,22 @@ app.post('/api/storage/webdav/test', requireAuth, async (c) => {
 app.route('/api/llm', llmApp)
 
 // ---------- 图片文件与静态资源 ----------
+
+app.get('/avatars/:name', async (c) => {
+  const name = c.req.param('name')
+  if (!AVATAR_NAME_RE.test(name)) return c.text('Not Found', 404)
+  const owner = db.prepare('SELECT 1 FROM users WHERE avatar_filename = ? LIMIT 1').get(name)
+  if (!owner) return c.text('Not Found', 404)
+  try {
+    const buf = await readFile(path.join(AVATAR_DIR, name))
+    return c.body(buf, 200, {
+      'Content-Type': AVATAR_MIME_BY_EXT[path.extname(name)],
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    })
+  } catch {
+    return c.text('Not Found', 404)
+  }
+})
 
 app.get('/uploads/:name', async (c) => {
   const name = c.req.param('name')

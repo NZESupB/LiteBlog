@@ -38,7 +38,7 @@ export async function sessionMiddleware(c, next) {
   if (token) {
     try {
       const payload = await verify(token, JWT_SECRET, 'HS256')
-      const current = db.prepare('SELECT username, name FROM users WHERE id = ?').get(payload.uid)
+      const current = db.prepare('SELECT username, name, avatar_filename FROM users WHERE id = ?').get(payload.uid)
       if (!current) throw new Error('会话用户不存在')
       const legacyName = payload.displayName || payload.name || payload.username
       user = {
@@ -46,6 +46,7 @@ export async function sessionMiddleware(c, next) {
         username: current.username || payload.username || legacyName,
         name: current.name || legacyName,
         displayName: current.name || payload.displayName || legacyName,
+        avatarUrl: current.avatar_filename ? `/avatars/${current.avatar_filename}` : null,
       }
     } catch {
       // 过期或无效的会话按未登录处理
