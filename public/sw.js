@@ -1,4 +1,4 @@
-const CACHE_NAME = 'couple-blog-shell-v7'
+const CACHE_NAME = 'couple-blog-shell-v9'
 const SHELL = [
   '/',
   '/index.html',
@@ -11,6 +11,9 @@ const SHELL = [
   '/vendor/md-toolbar.js',
   '/vendor/icons.js',
   '/js/utils.js',
+  '/js/theme.js',
+  '/js/sheet-motion.js',
+  '/js/composer-viewport.js',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
 ]

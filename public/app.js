@@ -1,6 +1,8 @@
 // 前端逻辑:hash 路由 + 时间轴 / 相册 / 登录 / 账号 / 设置视图
 import { attachMdToolbar, attachEmojiButton } from '/vendor/md-toolbar.js'
 import { icon } from '/vendor/icons.js'
+import { attachSheetMotion } from '/js/sheet-motion.js'
+import { attachComposerViewport } from '/js/composer-viewport.js'
 import { api, streamSse, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
@@ -19,6 +21,7 @@ function withinEditWindow(createdAt) {
 let activePostMenu = null
 let serviceWorkerRegistration = null
 const SERVICE_WORKER_READY_TIMEOUT_MS = 5000
+let dayProgressTimer = null
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (event) => {
@@ -43,9 +46,15 @@ document.addEventListener('keydown', (event) => {
 
 // 下拉菜单(评论通知铃铛 / 用户菜单)的「点外部关闭」只在模块级注册一次:
 // 之前在每次渲染时各自注册 document 监听,重新渲染一次就叠加一份,永不释放
-document.addEventListener('click', () => {
-  document.querySelectorAll('.dropdown:not([hidden])').forEach((d) => (d.hidden = true))
-})
+// 铃铛与头像按钮各自 stopPropagation,不会走到这里,所以打开前还要显式收起另一个(见 closeDropdowns)
+function closeDropdowns(except = null) {
+  document.querySelectorAll('.dropdown:not([hidden])').forEach((drop) => {
+    if (drop === except) return
+    drop.hidden = true
+    drop.parentElement?.querySelector(':scope > button')?.setAttribute('aria-expanded', 'false')
+  })
+}
+document.addEventListener('click', () => closeDropdowns())
 
 // ---------- 滚动进场动效 ----------
 // 元素进入视口时补上 .in 触发上浮渐显;reduced-motion 用户由 CSS 直接跳过。
@@ -79,6 +88,51 @@ function avatarNode(name, url, className = '') {
     node.appendChild(image)
   } else fallback()
   return node
+}
+
+function updateDayProgress() {
+  const daysEl = $('#days')
+  if (!daysEl) return
+  const anniversary = site?.anniversary ? new Date(`${site.anniversary}T00:00:00`) : null
+  const anniversaryTime = anniversary?.getTime()
+  if (!Number.isFinite(anniversaryTime)) {
+    daysEl.hidden = true
+    return
+  }
+  const now = new Date()
+  const days = Math.floor((now.getTime() - anniversaryTime) / 86400000) + 1
+  if (days <= 0) {
+    daysEl.hidden = true
+    return
+  }
+  if (!daysEl.querySelector('.days-count')) {
+    daysEl.innerHTML = '<span class="days-count"><strong></strong></span><span class="day-progress" role="progressbar" aria-label="到下一天的进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="day-progress-fill"></span></span>'
+  }
+  $('.days-count strong', daysEl).textContent = `${days}天`
+
+  const today = new Date(now)
+  today.setHours(0, 0, 0, 0)
+  const tomorrow = new Date(today)
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  const duration = tomorrow.getTime() - today.getTime()
+  const progress = duration > 0 ? Math.min(1, Math.max(0, (now.getTime() - today.getTime()) / duration)) : 0
+  const percent = Math.round(progress * 100)
+  const remainingMinutes = Math.max(0, Math.ceil((tomorrow.getTime() - now.getTime()) / 60000))
+  const hours = Math.floor(remainingMinutes / 60)
+  const minutes = remainingMinutes % 60
+  const remaining = hours ? `${hours}小时${minutes}分钟` : `${minutes}分钟`
+  const progressBar = $('.day-progress', daysEl)
+  $('.day-progress-fill', daysEl).style.width = `${(progress * 100).toFixed(2)}%`
+  progressBar.setAttribute('aria-valuenow', String(percent))
+  progressBar.setAttribute('aria-valuetext', `距离下一天还有${remaining}`)
+  daysEl.hidden = false
+}
+
+function startDayProgress() {
+  clearInterval(dayProgressTimer)
+  dayProgressTimer = null
+  updateDayProgress()
+  if (site?.anniversary) dayProgressTimer = setInterval(updateDayProgress, 1000)
 }
 
 let toastTimer = null
@@ -192,10 +246,10 @@ async function removeDraftFile(draftId, fileId) {
 }
 
 let activeComposerModal = null
-function openComposerModal(post = null) {
+function openComposerModal(post = null, source = null) {
   if (!site?.user) { location.hash = '#/login'; return }
   if (activeComposerModal) return
-  const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  const trigger = source instanceof HTMLElement ? source : document.activeElement instanceof HTMLElement ? document.activeElement : null
   const scrollY = window.scrollY
   const draftId = post ? `post-${post.id}` : (() => {
     const key = `compose-draft-id:${location.origin}:${site.user.id}`
@@ -207,11 +261,11 @@ function openComposerModal(post = null) {
   })()
   let closeModal = () => {}
   const overlay = el(`<div class="composer-overlay" role="dialog" aria-modal="true" aria-label="${post ? '编辑日常' : '写日常'}">
-    <div class="composer-dialog"><button class="composer-close" type="button" aria-label="关闭">×</button><div class="composer-body"></div></div>
+    <div class="composer-dialog"><button class="composer-grab" type="button" aria-label="收起写作面板，也可向下拖动"></button><button class="composer-close" type="button" aria-label="关闭">×</button><div class="composer-body"></div></div>
   </div>`)
   const body = $('.composer-body', overlay)
   const card = createComposer(post, draftId, async (result = {}) => {
-    closeModal()
+    closeModal(true)
     if (post) {
       clearComposeState(draftId)
       await clearDraftFiles(draftId)
@@ -221,38 +275,58 @@ function openComposerModal(post = null) {
       clearComposeState(draftId)
       await clearDraftFiles(draftId)
       try { localStorage.removeItem(`compose-draft-id:${location.origin}:${site.user.id}`) } catch {}
+      if (!location.hash || location.hash === '#/') renderTimeline()
       showToast('发布成功', () => { location.hash = `#/post/${result.id}` })
     }
   }, () => closeModal())
   body.appendChild(card)
   const closeButton = $('.composer-close', overlay)
+  const grabHandle = $('.composer-grab', overlay)
   const onKeydown = (event) => {
     if (event.key === 'Escape') { event.preventDefault(); closeModal(); return }
     if (event.key !== 'Tab') return
-    const focusable = [...overlay.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])')].filter((node) => !node.disabled)
+    const focusable = [...overlay.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])')].filter((node) => !node.disabled && node.getClientRects().length > 0)
     if (!focusable.length) return
     const first = focusable[0]
     const last = focusable[focusable.length - 1]
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
   }
-  closeModal = () => {
-    if (!activeComposerModal) return
+  let motion = null
+  let disposeViewport = null
+  const background = [main, $('.site-header'), $('.mobile-nav')].map((node) => ({ node, inert: node.inert }))
+  const finishClose = () => {
+    if (!overlay.isConnected) return
+    motion?.dispose()
+    disposeViewport?.()
     card.dispose?.()
     document.removeEventListener('keydown', onKeydown)
+    for (const { node, inert } of background) node.inert = inert
     document.body.classList.remove('modal-open')
     overlay.remove()
     activeComposerModal = null
-    window.scrollTo({ top: scrollY, behavior: 'auto' })
-    trigger?.focus?.()
+    window.scrollTo({ top: scrollY, behavior: 'instant' })
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true })
   }
-  closeButton.onclick = closeModal
+  closeModal = (immediate = false) => immediate === true ? finishClose() : motion?.close()
+  closeButton.onclick = () => closeModal()
   overlay.onclick = (event) => { if (event.target === overlay) closeModal() }
   document.body.appendChild(overlay)
+  const dialog = $('.composer-dialog', overlay)
+  if (trigger) {
+    const triggerRect = trigger.getBoundingClientRect()
+    const dialogRect = dialog.getBoundingClientRect()
+    if (dialogRect.width && dialogRect.height) {
+      dialog.style.transformOrigin = `${triggerRect.left + triggerRect.width / 2 - dialogRect.left}px ${triggerRect.top + triggerRect.height / 2 - dialogRect.top}px`
+    }
+  }
   document.body.classList.add('modal-open')
+  for (const { node } of background) node.inert = true
   activeComposerModal = { close: closeModal, overlay }
+  disposeViewport = attachComposerViewport(overlay)
+  motion = attachSheetMotion(dialog, overlay, grabHandle, finishClose)
   document.addEventListener('keydown', onKeydown)
-  requestAnimationFrame(() => $('textarea', card)?.focus())
+  requestAnimationFrame(() => { if (overlay.isConnected) $('textarea', card)?.focus({ preventScroll: true }) })
 }
 
 function installToTop() {
@@ -279,7 +353,7 @@ function observeViewport(target, onChange, options) {
 
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
-  activeComposerModal?.close?.()
+  activeComposerModal?.close?.(true)
   closePostMenu()
   revealObserver.disconnect()
   for (const observer of timelineObservers) observer.disconnect()
@@ -296,7 +370,7 @@ function emptyJournal(title, description, image = false) {
   if (!site.user) empty.appendChild(el('<a class="btn" href="#/login">登录，写下第一篇</a>'))
   else if (image) {
     const write = el('<button class="btn-ghost" type="button">去记录今天</button>')
-    write.onclick = () => openComposerModal()
+    write.onclick = (event) => openComposerModal(null, event.currentTarget)
     empty.appendChild(write)
   }
   return empty
@@ -404,7 +478,7 @@ function attachEditorResize(handle, textarea) {
 function createComposer(post, draftId, onDone, onCancel) {
   const card = el(`
     <div class="card compose">
-      <div class="compose-heading"><span>${post ? '编辑这段日常' : '今天，有什么想记住的？'}</span><span class="draft-save-state" aria-live="polite">草稿未发布</span>${icon('heart')}</div>
+      <div class="compose-heading"><span>${post ? '编辑这段日常' : '今天，有什么想记住的？'}</span><span class="draft-save-state" aria-live="polite">草稿未发布</span></div>
       <div class="md-toolbar" role="toolbar" aria-label="Markdown 格式">
         <button data-md="bold" title="加粗 (⌘B)">${icon('bold')}</button>
         <button data-md="italic" title="斜体 (⌘I)">${icon('italic')}</button>
@@ -421,9 +495,11 @@ function createComposer(post, draftId, onDone, onCancel) {
         <button data-md="link" title="链接 (⌘K)">${icon('link')}</button>
         <span class="md-sep"></span>
         <button data-md="emoji" title="表情" type="button">${icon('smile')}</button>
-        <span class="ai-tools-label">AI 工具</span>
-        <button class="md-polish" title="AI 优化正文" type="button">${icon('sparkles')}<span>AI 优化</span></button>
-        <button class="md-image" title="根据正文生成配图" type="button">${icon('image')}<span>AI 配图</span></button>
+        <span class="ai-tools" role="group" aria-label="AI 工具">
+          <span class="ai-tools-label">AI 工具</span>
+          <button class="md-polish" title="AI 优化正文" type="button">${icon('sparkles')}<span>AI 优化</span></button>
+          <button class="md-image" title="根据正文生成配图" type="button">${icon('image')}<span>AI 配图</span></button>
+        </span>
       </div>
       <div class="editor-box">
         <textarea aria-label="动态正文" placeholder="一顿晚餐、一场散步，或是突然想说的话…"></textarea>
@@ -897,7 +973,6 @@ const monthTitle = (month) => `${month.slice(0, 4)}年${Number(month.slice(5))}�
 function renderArchive(months, onPick) {
   const wrap = el('<div class="archive"></div>')
   const outline = el('<nav class="archive-outline" aria-label="按月份浏览"><button class="archive-latest" type="button">最新</button></nav>')
-  const mobileTrigger = el(`<button class="archive-mobile-trigger" type="button" aria-expanded="false"><span>${monthTitle(months[0].month)}</span><span class="archive-trigger-count">${months[0].count} 条</span></button>`)
   const rail = el('<nav class="archive-rail" aria-label="按月份浏览"><div class="archive-ticks"></div><span class="archive-bubble" hidden></span></nav>')
   const ticksBox = $('.archive-ticks', rail)
   const bubble = $('.archive-bubble', rail)
@@ -927,10 +1002,6 @@ function renderArchive(months, onPick) {
     ticks.set(month, tick)
   }
   $('.archive-latest', outline).onclick = () => onPick(null)
-  mobileTrigger.onclick = () => {
-    const open = wrap.classList.toggle('open')
-    mobileTrigger.setAttribute('aria-expanded', String(open))
-  }
 
   // 拖动刻度条时只用气泡预览月份,松手才真正跳转:边拖边加载会连打十几个请求
   const tickAt = (clientY) => {
@@ -983,7 +1054,7 @@ function renderArchive(months, onPick) {
     if (top < outline.scrollTop) outline.scrollTop = top - 24
     else if (bottom > outline.scrollTop + outline.clientHeight) outline.scrollTop = bottom - outline.clientHeight + 24
   }
-  wrap.append(mobileTrigger, outline, rail)
+  wrap.append(outline, rail)
   return wrap
 }
 
@@ -1004,7 +1075,7 @@ function renderComments(p) {
   function flashComment(id) {
     const target = listEl.querySelector(`[data-cid="${id}"]`)
     if (!target) return
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    target.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' })
     target.classList.remove('flash')
     void target.offsetWidth // 强制回流,同一目标可重复触发动画
     target.classList.add('flash')
@@ -1245,7 +1316,7 @@ function renderPost(p) {
     const actions = $('.post-actions', card)
     const editBtn = el('<button>编辑</button>')
     const delBtn = el('<button>删除</button>')
-    editBtn.onclick = () => openComposerModal(p)
+    editBtn.onclick = (event) => openComposerModal(p, event.currentTarget)
     delBtn.onclick = async () => {
       if (!confirm('确定删除这条动态吗?')) return
       await api(`/api/posts/${p.id}`, { method: 'DELETE' }).catch((e) => alert(e.message))
@@ -1262,9 +1333,9 @@ function renderPost(p) {
 async function renderTimeline(month = null) {
   clearMain()
   main.classList.add('timeline-page')
-  const heading = el(`<div class="journal-heading"><h2>日常手记</h2><div class="journal-heading-actions"><span class="journal-count"></span>${site.user ? `<button class="write-trigger" type="button">${icon('pen-line')}<span>写日常</span></button>` : ''}</div></div>`)
+  const heading = el(`<div class="journal-heading"><div><h1>日常手记</h1><p class="journal-subtitle">把普通的一天，留给以后再看。<span class="journal-count"></span></p></div><div class="journal-heading-actions">${site.user ? `<button class="write-trigger" type="button">${icon('pen-line')}<span>写日常</span></button>` : ''}</div></div>`)
   main.appendChild(heading)
-  $('.write-trigger', heading)?.addEventListener('click', () => openComposerModal())
+  $('.write-trigger', heading)?.addEventListener('click', (event) => openComposerModal(null, event.currentTarget))
 
   // 归档导航只在跨月时才有意义,单月站点不渲染
   const { months, total } = await api(`/api/posts/archive?tz=${tzOffset()}`).catch(() => ({ months: [] }))
@@ -1412,7 +1483,7 @@ function renderLogin() {
   main.classList.add('login-page')
   const form = el(`
     <form class="login-card">
-      <h2>欢迎回家</h2>
+      <span class="empty-symbol" aria-hidden="true">${icon('heart')}</span><h1>欢迎回家</h1>
       <div class="sub">今天的故事，想从哪里说起？</div>
       <label for="login-username">登录账号</label>
       <input id="login-username" name="username" placeholder="输入你的账号" autocomplete="username" autocapitalize="none" spellcheck="false" required />
@@ -1759,7 +1830,7 @@ function renderSiteSettingsCard() {
     <section class="settings-card">
       <h2>站点设置</h2>
       <label>站点名称<input name="title" value="${esc(site.title)}" /></label>
-      <label>起始日期(顶栏显示「第 N 天」)<input name="anniversary" type="date" value="${esc(site.anniversary)}" /></label>
+      <label>起始日期(顶栏显示天数)<input name="anniversary" type="date" value="${esc(site.anniversary)}" /></label>
       <label class="row">
         <input name="privateMode" type="checkbox" ${site.privateMode ? 'checked' : ''} />
         <span>私密模式(未登录访客只能看到每条动态中公开的正文和图片)</span>
@@ -1798,19 +1869,44 @@ function renderSettingsSection(kind) {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
-  const titles = { site: '站点设置', ai: 'AI 优化', storage: '图片存储' }
+  const titles = { site: '站点设置', ai: 'AI 设置', storage: '图片存储' }
   const header = el(`<header class="account-page-header settings-subpage-header"><a class="account-back" href="#/settings" aria-label="返回设置" title="返回设置">${icon('arrow-left')}</a><h1 tabindex="-1">${titles[kind]}</h1></header>`)
   main.appendChild(header)
   if (kind === 'site') renderSiteSettingsCard()
-  else if (kind === 'ai') renderLlmCard()
+  else if (kind === 'ai') renderAiCards()
   else renderStorageCard()
   $('h1', header).focus()
 }
+
+function renderThemeCard() {
+  const card = el(`<section class="settings-card theme-card">
+    <div class="settings-card-heading"><div><h2>外观</h2><p>选一个喜欢的颜色，让这里更像你。</p></div></div>
+    <fieldset class="theme-options"><legend class="sr-only">选择主题</legend></fieldset>
+    <p class="theme-help" aria-live="polite">仅用于当前浏览器，刷新后保留。</p>
+  </section>`)
+  for (const choice of window.JournalTheme.choices) {
+    const option = el(`<label class="theme-option" data-palette="${choice.id}">
+      <input type="radio" name="theme" value="${choice.id}" ${window.JournalTheme.current === choice.id ? 'checked' : ''} />
+      <span class="theme-swatch" aria-hidden="true"></span><span>${choice.name}</span>
+    </label>`)
+    $('input', option).onchange = () => {
+      const saved = window.JournalTheme.set(choice.id)
+      $('.theme-help', card).textContent = saved ? `已切换为${choice.name}，刷新后保留。` : '主题已切换；当前浏览器无法保存偏好，刷新后可能恢复原来的主题。'
+    }
+    $('.theme-options', card).appendChild(option)
+  }
+  return card
+}
+window.addEventListener('journal-theme-change', () => {
+  document.querySelectorAll('.theme-option input').forEach((input) => { input.checked = input.value === window.JournalTheme.current })
+})
 
 function renderSettings() {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
+  main.appendChild(el('<header class="page-heading settings-heading"><div><p>让日常，更合心意</p><h1>设置</h1></div></header>'))
+  main.appendChild(renderThemeCard())
   const profileCard = el(`<section class="settings-card settings-profile">
     <div class="settings-card-heading"><div><h2>个人资料</h2><p>头像和显示名称会展示给另一位成员及访客。</p></div><a class="btn-ghost" href="#/account">${icon('user')}<span>编辑资料</span></a></div>
     <div class="settings-profile-summary"><span class="settings-profile-avatar"></span><div><strong class="settings-profile-name"></strong><span class="settings-profile-username"></span></div></div>
@@ -1831,7 +1927,7 @@ function renderSettings() {
 
   const sections = [
     ['#/settings/site', 'settings', '站点设置', '站名、纪念日和访客可见范围'],
-    ['#/settings/ai', 'sparkles', 'AI 优化', '配置接口、模型和连接测试'],
+    ['#/settings/ai', 'sparkles', 'AI 设置', '配置 AI 优化与 AI 配图的接口、模型和连接测试'],
     ['#/settings/storage', 'image', '图片存储', '选择本地磁盘或 WebDAV'],
   ]
   for (const [href, iconName, title, description] of sections) {
@@ -1853,187 +1949,156 @@ function appendSettingsItem(node) {
   main.appendChild(node)
 }
 
-// AI 优化配置(兼容 OpenAI Chat Completions 接口):共享 API 可各自选模型,也可使用独立 API。
-async function renderLlmCard() {
+// AI 优化与 AI 配图共用一张接口配置卡:共享 API 可各自选模型,也可使用独立 API。
+// 两个模块的接口同形(GET/PUT 配置、POST /models、POST /test),文案与额外状态行由调用方给出。
+async function createApiConfigCard({ key, title, intro, path, modelHint, extraStatus = '', testMessage }) {
   let s
   try {
-    s = await api('/api/llm')
+    s = await api(path)
   } catch (e) {
-    appendSettingsItem(el(`<div class="empty-tip">${esc(e.message)}</div>`))
-    return
+    return el(`<div class="empty-tip">${esc(title)}配置读取失败：${esc(e.message)}</div>`)
   }
   const custom = s.mode === 'custom'
+  const listId = `${key}-model-list`
   const card = el(`
     <div class="card settings-card">
-      <h2>AI 优化</h2>
-      <div class="storage-status">在发布框点「AI 优化」即可调用,凭据只存本服务器</div>
-      <label class="row">
-        <input name="mode" type="radio" value="shared" ${custom ? '' : 'checked'} />
-        <span>使用已配置的共享 API</span>
-      </label>
-      <label class="row">
-        <input name="mode" type="radio" value="custom" ${custom ? 'checked' : ''} />
-        <span>配置独立 API</span>
-      </label>
+      <h2>${esc(title)}</h2>
+      <div class="storage-status">${intro}</div>
+      <div role="radiogroup" aria-label="${esc(title)}配置来源">
+        <label class="row"><input name="mode" type="radio" value="shared" ${custom ? '' : 'checked'} /><span>使用已配置的共享 API</span></label>
+        <label class="row"><input name="mode" type="radio" value="custom" ${custom ? 'checked' : ''} /><span>配置独立 API</span></label>
+      </div>
       <div class="llm-shared" ${custom ? 'hidden' : ''}>
-        <div class="llm-global-hint">${s.shared.baseUrl ? `共享接口:${esc(s.shared.baseUrl)} · 默认模型:${esc(s.shared.model || '未设模型')}` : '尚未配置共享接口,可由任一账号首次填写'}</div>
-        <label>共享接口地址(OpenAI 兼容)<input name="sharedBaseUrl" value="${esc(s.shared.baseUrl)}" placeholder="https://api.openai.com/v1" /></label>
-        <label>共享 API Key<input name="sharedApiKey" type="password" placeholder="${s.shared.hasApiKey ? '已保存,留空表示不修改' : 'sk-…'}" /></label>
+        <div class="llm-global-hint">${s.shared.baseUrl ? `共享接口：${esc(s.shared.baseUrl)} · 默认模型：${esc(s.shared.model || '未设模型')}` : '尚未配置共享接口，可由任一账号首次填写'}</div>
+        <label>共享接口地址（OpenAI 兼容）<input name="sharedBaseUrl" value="${esc(s.shared.baseUrl)}" placeholder="https://api.openai.com/v1" /></label>
+        <label>共享 API Key<input name="sharedApiKey" type="password" autocomplete="new-password" placeholder="${s.shared.hasApiKey ? '已保存，留空表示不修改' : 'sk-…'}" /></label>
         <label>本次使用模型
           <span class="llm-model-row">
-            <input name="sharedModel" list="llm-model-list" value="${esc(s.sharedModel)}" placeholder="gpt-4o-mini" />
+            <input name="sharedModel" list="${listId}" value="${esc(s.sharedModel || '')}" placeholder="${esc(modelHint)}" />
             <button type="button" class="btn-ghost fetch-models">自动获取</button>
           </span>
           <select class="llm-model-picker" name="sharedModelPicker" aria-label="选择共享模型" hidden></select>
         </label>
       </div>
       <div class="llm-custom" ${custom ? '' : 'hidden'}>
-        <label>接口地址(OpenAI 兼容)<input name="baseUrl" value="${esc(s.custom.baseUrl)}" placeholder="https://api.openai.com/v1" /></label>
+        <label>接口地址（OpenAI 兼容）<input name="baseUrl" value="${esc(s.custom.baseUrl)}" placeholder="https://api.openai.com/v1" /></label>
         <label>模型
           <span class="llm-model-row">
-            <input name="customModel" list="llm-model-list" value="${esc(s.custom.model)}" placeholder="gpt-4o-mini" />
+            <input name="customModel" list="${listId}" value="${esc(s.custom.model || '')}" placeholder="${esc(modelHint)}" />
             <button type="button" class="btn-ghost fetch-models">自动获取</button>
           </span>
           <select class="llm-model-picker" name="customModelPicker" aria-label="选择独立模型" hidden></select>
         </label>
-        <label>API Key<input name="apiKey" type="password" placeholder="${s.custom.hasApiKey ? '已保存,留空表示不修改' : 'sk-…'}" /></label>
+        <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="${s.custom.hasApiKey ? '已保存，留空表示不修改' : 'sk-…'}" /></label>
       </div>
-      <datalist id="llm-model-list"></datalist>
+      <datalist id="${listId}"></datalist>
+      ${typeof extraStatus === 'function' ? extraStatus(s) : extraStatus}
       <div class="settings-actions">
         <span class="save-tip" hidden>已保存</span>
         <span class="spacer"></span>
         <button class="btn-ghost test">测试连接</button>
         <button class="btn save">保存</button>
       </div>
-      <div class="form-error"></div>
+      <div class="form-error" role="status" aria-live="polite"></div>
     </div>`)
   const err = $('.form-error', card)
-  const modeBoxes = card.querySelectorAll('[name=mode]')
   const sharedWrap = $('.llm-shared', card)
   const customWrap = $('.llm-custom', card)
   const selectedMode = () => $('[name=mode]:checked', card).value
   const modelInput = (mode = selectedMode()) => $(`[name=${mode === 'shared' ? 'sharedModel' : 'customModel'}]`, card)
   const modelPicker = (mode = selectedMode()) => $(`[name=${mode === 'shared' ? 'sharedModelPicker' : 'customModelPicker'}]`, card)
+  const message = (text, ok) => { err.textContent = text; err.style.color = ok === undefined ? '' : ok ? 'var(--success)' : '#a56a25' }
   const updateMode = () => {
     const shared = selectedMode() === 'shared'
     sharedWrap.hidden = !shared
     customWrap.hidden = shared
   }
-  for (const modeBox of modeBoxes) modeBox.onchange = updateMode
+  for (const modeBox of card.querySelectorAll('[name=mode]')) modeBox.onchange = updateMode
   for (const picker of card.querySelectorAll('.llm-model-picker')) picker.onchange = () => {
     if (picker.value) modelInput(picker.name === 'sharedModelPicker' ? 'shared' : 'custom').value = picker.value
   }
 
   const currentPayload = () => {
     const mode = selectedMode()
+    const model = modelInput(mode).value
     return mode === 'shared'
-      ? {
-          mode,
-          sharedBaseUrl: $('[name=sharedBaseUrl]', card).value,
-          sharedApiKey: $('[name=sharedApiKey]', card).value,
-          model: $('[name=sharedModel]', card).value,
-        }
-      : {
-          mode,
-          baseUrl: $('[name=baseUrl]', card).value,
-          apiKey: $('[name=apiKey]', card).value,
-          model: $('[name=customModel]', card).value,
-        }
+      ? { mode, model, sharedBaseUrl: $('[name=sharedBaseUrl]', card).value, sharedApiKey: $('[name=sharedApiKey]', card).value }
+      : { mode, model, baseUrl: $('[name=baseUrl]', card).value, apiKey: $('[name=apiKey]', card).value }
   }
 
   for (const fetchButton of card.querySelectorAll('.fetch-models')) fetchButton.onclick = async () => {
-    err.textContent = ''
-    err.style.color = ''
-    const btn = fetchButton
-    btn.disabled = true
-    btn.textContent = '获取中…'
+    message('')
+    const mode = selectedMode()
+    fetchButton.disabled = true
+    fetchButton.textContent = '获取中…'
     try {
-      const mode = selectedMode()
-      const r = await api('/api/llm/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(currentPayload()),
-      })
-      const list = $('#llm-model-list', card)
+      const { models } = await api(`${path}/models`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentPayload()) })
+      const list = $(`#${listId}`, card)
       list.innerHTML = ''
-      for (const m of r.models) list.appendChild(el(`<option value="${esc(m)}"></option>`))
+      for (const name of models) list.appendChild(el(`<option value="${esc(name)}"></option>`))
       const input = modelInput(mode)
       const picker = modelPicker(mode)
-      const models = [...new Set(r.models.filter((m) => typeof m === 'string' && m.trim()))]
-      const options = input.value && !models.includes(input.value) ? [input.value, ...models] : models
-      picker.innerHTML = options.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join('')
+      const names = [...new Set(models.filter((name) => typeof name === 'string' && name.trim()))]
+      const options = input.value && !names.includes(input.value) ? [input.value, ...names] : names
+      picker.innerHTML = options.map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join('')
       picker.value = input.value
       picker.hidden = options.length === 0
-      err.textContent = r.models.length ? `已获取 ${r.models.length} 个模型` : '接口未返回模型列表'
-      err.style.color = '#2a9d4a'
+      message(models.length ? `已获取 ${models.length} 个模型` : '接口未返回模型列表', true)
     } catch (e) {
-      err.textContent = e.message
+      message(e.message)
     } finally {
-      btn.disabled = false
-      btn.textContent = '自动获取'
+      fetchButton.disabled = false
+      fetchButton.textContent = '自动获取'
     }
   }
 
   $('.save', card).onclick = async () => {
-    err.textContent = ''
-    err.style.color = ''
+    message('')
     try {
-      await api('/api/llm', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentPayload()) })
+      await api(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentPayload()) })
+      // 已保存的密钥不再回显,输入框留空即表示沿用
+      for (const input of card.querySelectorAll('input[type=password]')) {
+        if (input.value.trim()) { input.value = ''; input.placeholder = '已保存，留空表示不修改' }
+      }
       $('.save-tip', card).hidden = false
-      setTimeout(renderSettings, 600)
     } catch (e) {
-      err.textContent = e.message
+      message(e.message)
     }
   }
   $('.test', card).onclick = async () => {
-    err.textContent = ''
-    err.style.color = ''
+    message('')
     try {
-      await api('/api/llm/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentPayload()) })
-      err.textContent = '连接成功'
-      err.style.color = '#2a9d4a'
+      const result = await api(`${path}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(currentPayload()) })
+      const { text, ok = true } = testMessage(result)
+      message(text, ok)
     } catch (e) {
-      err.textContent = e.message
+      message(e.message)
     }
   }
-  appendSettingsItem(card)
+  return card
+}
 
-  let imageConfig
-  try {
-    imageConfig = await api('/api/image-jobs/config')
-  } catch (e) {
-    appendSettingsItem(el(`<div class="empty-tip">AI 配图配置读取失败：${esc(e.message)}</div>`))
-    return
-  }
-  const imageCard = el(`
-    <div class="card settings-card image-settings-card">
-      <h2>AI 配图</h2>
-      <div class="storage-status">根据正文生成一张氛围配图，结果先预览，图片会保存到 WebDAV 的 <code>ai-generated/</code> 子目录。</div>
-      <label>图片接口地址(OpenAI 兼容)<input name="imageBaseUrl" value="${esc(imageConfig.baseUrl)}" placeholder="https://api.example.com/v1" /></label>
-      <label>图片 API Key<input name="imageApiKey" type="password" placeholder="${imageConfig.hasApiKey ? '已保存，留空表示不修改' : 'sk-…'}" /></label>
-      <div class="storage-status">模型：<b>gpt-image-2</b> · WebDAV：<b>${imageConfig.webdavConnected ? '已连接' : '未连接'}</b></div>
-      <div class="settings-actions"><span class="save-tip" hidden>已保存</span><span class="spacer"></span><button class="btn-ghost image-test" type="button">测试模型</button><button class="btn image-save" type="button">保存</button></div>
-      <div class="form-error"></div>
-    </div>`)
-  const imageErr = $('.form-error', imageCard)
-  const imagePayload = () => ({ baseUrl: $('[name=imageBaseUrl]', imageCard).value, apiKey: $('[name=imageApiKey]', imageCard).value })
-  $('.image-test', imageCard).onclick = async () => {
-    imageErr.textContent = '正在查询模型…'
-    imageErr.style.color = ''
-    try {
-      const result = await api('/api/image-jobs/config/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(imagePayload()) })
-      imageErr.textContent = result.supportsGptImage2 ? '连接成功，已找到 gpt-image-2' : '连接成功，但接口未返回 gpt-image-2'
-      imageErr.style.color = result.supportsGptImage2 ? '#2e8b4f' : '#a56a25'
-    } catch (e) { imageErr.textContent = e.message }
-  }
-  $('.image-save', imageCard).onclick = async () => {
-    imageErr.textContent = ''
-    try {
-      await api('/api/image-jobs/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(imagePayload()) })
-      $('.save-tip', imageCard).hidden = false
-    } catch (e) { imageErr.textContent = e.message }
-  }
-  appendSettingsItem(imageCard)
+async function renderAiCards() {
+  appendSettingsItem(await createApiConfigCard({
+    key: 'llm',
+    title: 'AI 优化',
+    intro: '在发布框点「AI 优化」即可调用，凭据只存本服务器。',
+    path: '/api/llm',
+    modelHint: 'gpt-4o-mini',
+    testMessage: () => ({ text: '连接成功' }),
+  }))
+
+  appendSettingsItem(await createApiConfigCard({
+    key: 'image',
+    title: 'AI 配图',
+    intro: '根据正文生成一张配图，结果先预览再决定是否使用；图片保存到 WebDAV 的 <code>ai-generated/</code> 子目录。',
+    path: '/api/image-jobs/config',
+    modelHint: 'gpt-image-2',
+    extraStatus: (s) => `<div class="storage-status">WebDAV：<b>${s.webdavConnected ? '已连接' : '未连接，AI 配图暂不可用'}</b></div>`,
+    testMessage: ({ supportsModel }) => supportsModel
+      ? { text: '连接成功，已找到所选模型' }
+      : { text: '连接成功，但接口未返回所选模型', ok: false },
+  }))
 }
 
 // 图片存储配置(本地磁盘 / WebDAV)
@@ -2338,6 +2403,7 @@ function renderNotifyBell() {
     e.stopPropagation()
     const open = drop.hidden
     if (open) {
+      closeDropdowns(drop)
       const refreshed = await refresh()
       renderList()
       // 打开即视为已读:清角标并推进服务端水位线,列表本次仍保留供点击
@@ -2388,10 +2454,11 @@ function renderUserArea() {
   btn.onclick = (e) => {
     e.stopPropagation()
     const open = drop.hidden
+    if (open) closeDropdowns(drop)
     drop.hidden = !open
     btn.setAttribute('aria-expanded', String(open))
   }
-  menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => (drop.hidden = true)))
+  menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => closeDropdowns()))
   $('.logout', menu).onclick = async () => {
     // 先退订再退出:退订接口需要登录态,且不能让已登出的账号继续往这台设备推通知
     await disablePush().catch(() => {})
@@ -2405,11 +2472,17 @@ function route() {
   if (!site) return
   const hash = location.hash || '#/'
   document.querySelectorAll('[data-nav]').forEach((a) => {
-    a.classList.toggle('active', a.getAttribute('href') === hash)
+    const active = a.getAttribute('href') === hash || (a.dataset.nav === 'timeline' && hash.startsWith('#/post/'))
+    a.classList.toggle('active', active)
+    if (active) a.setAttribute('aria-current', 'page')
+    else a.removeAttribute('aria-current')
   })
   document.querySelectorAll('[data-mobile-nav]').forEach((a) => {
     const target = a.dataset.mobileNav === 'timeline' ? '#/' : a.dataset.mobileNav === 'gallery' ? '#/gallery' : '#/settings'
-    a.classList.toggle('active', hash === target || (a.dataset.mobileNav === 'settings' && (hash === '#/account' || hash.startsWith('#/settings/'))) || (a.dataset.mobileNav === 'timeline' && hash.startsWith('#/post/')))
+    const active = hash === target || (a.dataset.mobileNav === 'settings' && (hash === '#/account' || hash.startsWith('#/settings/'))) || (a.dataset.mobileNav === 'timeline' && hash.startsWith('#/post/'))
+    a.classList.toggle('active', active)
+    if (active) a.setAttribute('aria-current', 'page')
+    else a.removeAttribute('aria-current')
   })
   if (hash === '#/login') return site.user ? (location.hash = '#/') : renderLogin()
   if (hash === '#/account') return renderAccount()
@@ -2446,14 +2519,7 @@ async function init() {
   $('.site-name').textContent = site.title
   $('.site-heart').innerHTML = icon('heart')
   trackHeaderHeight()
-  if (site.anniversary) {
-    const days = Math.floor((Date.now() - new Date(site.anniversary + 'T00:00:00')) / 86400000) + 1
-    if (days > 0) {
-      const el2 = $('#days')
-      el2.innerHTML = `<span>第 ${days} 天</span>`
-      el2.hidden = false
-    }
-  }
+  startDayProgress()
   if ('serviceWorker' in navigator) {
     // 推送订阅要求 registration 已激活,统一等到 ready 再交给通知开关使用
     serviceWorkerRegistration = navigator.serviceWorker
@@ -2469,7 +2535,7 @@ async function init() {
       location.hash = '#/login'
       return
     }
-    openComposerModal()
+    openComposerModal(null, event.currentTarget)
   }
   route()
   if (site.user) autoEnablePush()

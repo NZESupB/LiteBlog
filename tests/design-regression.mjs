@@ -132,7 +132,7 @@ try {
   assert.equal((await request(avatar.avatarUrl, { authenticated: false })).status, 200)
   assert.equal((await request('/api/profile/avatar', { method: 'DELETE' })).status, 200)
   assert.equal((await (await request('/api/site')).json()).user.avatarUrl, null)
-  for (const resource of ['/', '/style.css', '/app.js', '/images/journal-cover.jpg', '/vendor/icons.js']) {
+  for (const resource of ['/', '/style.css', '/app.js', '/js/theme.js', '/js/sheet-motion.js', '/js/composer-viewport.js', '/images/journal-cover.jpg', '/vendor/icons.js']) {
     assert.equal((await request(resource, { authenticated: false })).status, 200, resource)
   }
   const manifest = await (await request('/manifest.webmanifest')).json()

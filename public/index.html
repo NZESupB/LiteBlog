@@ -2,11 +2,12 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
   <meta name="theme-color" content="#a54363" />
   <title>我们的日常</title>
   <!-- iOS 添加到主屏幕优先取这个名字,和 manifest 的 name 一样要跟随站点设置(由 app.js 更新) -->
   <meta name="apple-mobile-web-app-title" content="我们的日常" />
+  <script src="/js/theme.js"></script>
   <link rel="stylesheet" href="/style.css" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
@@ -15,11 +16,15 @@
 <body>
   <header class="site-header">
     <div class="header-inner">
-      <a class="site-title" href="#/"><span class="site-heart" aria-hidden="true"></span><span class="site-name">我们的日常</span></a>
-      <div class="days" id="days" hidden></div>
-      <nav class="site-nav">
-        <a href="#/" data-nav="timeline">时间轴</a>
-        <a href="#/gallery" data-nav="gallery">相册</a>
+      <div class="site-brand">
+        <a class="site-title" href="#/"><span class="site-heart" aria-hidden="true"></span><span class="site-name">我们的日常</span></a>
+        <div class="days" id="days" hidden></div>
+      </div>
+      <nav class="site-nav" aria-label="主要导航">
+        <div class="nav-segments">
+          <a href="#/" data-nav="timeline">时间轴</a>
+          <a href="#/gallery" data-nav="gallery">相册</a>
+        </div>
         <span id="userArea"></span>
       </nav>
     </div>

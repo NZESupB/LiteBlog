@@ -1,8 +1,8 @@
 // AI 配图任务:持久化状态,后台执行,结果写入 WebDAV 的 ai-generated 子目录。
-// 上游地址和 Key 保存在服务端 settings；config.json 或 Docker Compose environment 只提供默认值。
+// 共享凭据保存在 settings，个人凭据与模式保存在 user_settings；配置文件只提供共享默认值。
 import { Hono } from 'hono'
 import { createHash, randomUUID } from 'node:crypto'
-import { db, getSetting, setSetting } from './db.js'
+import { db, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { requireAuth } from './auth.js'
 import { WEBDAV, deleteImage, getImage, putImage } from './storage.js'
 import * as webdav from './webdav.js'
@@ -11,25 +11,55 @@ import { configValue } from './config.js'
 export const imageJobsApp = new Hono()
 
 const DEFAULT_BASE_URL = ''
-const IMAGE_MODEL = 'gpt-image-2'
+const DEFAULT_IMAGE_MODEL = 'gpt-image-2'
 const AI_FOLDER = 'ai-generated'
 const MAX_GENERATED_BYTES = 20 * 1024 * 1024
 const JOB_TIMEOUT_MS = 10 * 60 * 1000
 const controllers = new Map()
 
-function imageRuntimeConfig() {
+function imageMode(userId) {
+  return getUserSetting(userId, 'image_mode', 'shared') === 'custom' ? 'custom' : 'shared'
+}
+
+function sharedImageConfig() {
   return {
     baseUrl: getSetting('image_base_url', String(configValue('ai.image.baseUrl', DEFAULT_BASE_URL))),
     apiKey: getSetting('image_api_key', String(configValue('ai.image.apiKey', ''))),
+    model: getSetting('image_model', String(configValue('ai.image.model', DEFAULT_IMAGE_MODEL))),
   }
 }
 
-function imageApiKey() {
-  return imageRuntimeConfig().apiKey
+// 共享来源的模型是各人自己的选择,站点级设置只作默认值;独立来源整体按用户保存。
+function imageRuntimeConfig(userId, mode = imageMode(userId)) {
+  if (mode === 'custom') {
+    return {
+      baseUrl: getUserSetting(userId, 'image_base_url', ''),
+      apiKey: getUserSetting(userId, 'image_api_key', ''),
+      model: getUserSetting(userId, 'image_model', ''),
+    }
+  }
+  const shared = sharedImageConfig()
+  return { ...shared, model: getUserSetting(userId, 'image_shared_model', shared.model) }
 }
 
-function imageBaseUrl() {
-  return String(imageRuntimeConfig().baseUrl || '').trim().replace(/\/+$/, '')
+// 留空只沿用所选来源的值，独立模式绝不借用共享 Key。
+function draftImageConfig(userId, body) {
+  const mode = body.mode === 'custom' ? 'custom' : 'shared'
+  const saved = imageRuntimeConfig(userId, mode)
+  const sharedBaseUrl = String(body.sharedBaseUrl ?? body.baseUrl ?? '').trim()
+  const customBaseUrl = String(body.baseUrl ?? '').trim()
+  return {
+    mode,
+    baseUrl: ((mode === 'custom' ? customBaseUrl : sharedBaseUrl) || saved.baseUrl).replace(/\/+$/, ''),
+    apiKey: String((mode === 'custom' ? body.apiKey : body.sharedApiKey ?? body.apiKey) ?? '').trim() || saved.apiKey,
+    model: String(body.model ?? '').trim() || saved.model,
+  }
+}
+
+function imageConfigError(cfg) {
+  if (!cfg.apiKey) return '尚未配置当前模式的 AI 配图 API Key，请到设置 → AI 设置 → AI 配图中填写'
+  if (!requireHttpUrl(cfg.baseUrl)) return '尚未配置合法的图片接口地址，请到设置 → AI 设置 → AI 配图中填写'
+  return ''
 }
 
 function requireHttpUrl(value) {
@@ -90,11 +120,27 @@ function promptHash(text) {
   return createHash('sha256').update(text).digest('hex')
 }
 
+// 提示词先逼模型从正文里选出一个具体场景当主体,再限制不要补画正文没有的东西;
+// 否则模型会退化成画一张泛泛的「温馨氛围图」,与正文对不上。
 function makePrompt(text) {
-  return `请根据下面这篇情侣日记生成一张温柔、自然、有生活气息的氛围配图。
-要求：画面表达正文中的场景和真实情绪；柔和的玫瑰粉与自然色调；细腻的插画或轻写实绘画质感；不要出现任何文字、字母、数字、水印、Logo、边框或社交媒体版式；不要虚构明显违背正文的事实；输出适合作为私人日记配图的单张画面。
+  return `请为下面这篇情侣日记画一张配图。
 
-日记正文：
+【先定主体】
+- 通读正文,挑出其中写到的一个具体场景(谁、在哪里、正在做什么),把它作为画面中心。
+- 正文没有提到的人物、宠物、地点、季节、天气和物品都不要出现,也不要自行编造背景故事。
+- 正文若只提到物品或心情,就画那件物品/那种光线,不要硬塞人物。
+
+【画面】
+- 单张完整画面,近景或中景,构图自然,像随手记下的一瞬,而不是海报、封面或分镜拼图。
+- 色调柔和自然,可带一点温暖的玫瑰色;光线柔和,氛围安静。
+- 细腻的插画或轻写实质感,避免夸张卡通、霓虹赛博和浓重的商业广告感。
+
+【不要出现】
+- 任何文字、字母、数字、水印、Logo、签名、边框、九宫格拼图或社交媒体版式。
+- 正文里的 Markdown 符号、链接、图片地址都不是画面内容。
+- 与正文无关的装饰道具和摆拍元素。
+
+日记正文:
 ${text}`
 }
 
@@ -134,6 +180,12 @@ function extForMime(mime) {
 async function runJob(id) {
   const row = db.prepare('SELECT * FROM image_jobs WHERE id = ?').get(id)
   if (!row || row.status === 'cancelled') return
+  const cfg = imageRuntimeConfig(row.user_id)
+  const configError = imageConfigError(cfg)
+  if (configError) {
+    updateJob(id, { status: 'failed', error: configError, finished_at: new Date().toISOString().replace('T', ' ').slice(0, 19) })
+    return
+  }
   if (!webdav.isConnected()) {
     updateJob(id, { status: 'failed', error: 'AI 配图需要先配置可用的 WebDAV 存储', finished_at: new Date().toISOString().replace('T', ' ').slice(0, 19) })
     return
@@ -148,10 +200,10 @@ async function runJob(id) {
   }, JOB_TIMEOUT_MS)
   try {
     updateJob(id, { status: 'running', error: '' })
-    const upstream = await fetch(`${imageBaseUrl()}/images/generations`, {
+    const upstream = await fetch(`${cfg.baseUrl.trim().replace(/\/+$/, '')}/images/generations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${imageApiKey()}` },
-      body: JSON.stringify({ model: IMAGE_MODEL, prompt: makePrompt(row.prompt), n: 1, size: '1024x1024', response_format: 'url' }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({ model: cfg.model || DEFAULT_IMAGE_MODEL, prompt: makePrompt(row.prompt), n: 1, size: '1024x1024', response_format: 'url' }),
       signal: controller.signal,
     })
     if (!upstream.ok) {
@@ -207,33 +259,78 @@ imageJobsApp.get('/', requireAuth, (c) => {
 })
 
 imageJobsApp.get('/config', requireAuth, (c) => {
-  const cfg = imageRuntimeConfig()
-  return c.json({ baseUrl: cfg.baseUrl, hasApiKey: Boolean(cfg.apiKey), model: IMAGE_MODEL, webdavConnected: webdav.isConnected() })
+  const userId = c.get('user').id
+  const view = (cfg) => ({ baseUrl: cfg.baseUrl, model: cfg.model, hasApiKey: Boolean(cfg.apiKey) })
+  const shared = imageRuntimeConfig(userId, 'shared')
+  const current = imageRuntimeConfig(userId)
+  return c.json({
+    ...view(current), // 兼容旧客户端的顶层字段。
+    mode: imageMode(userId),
+    shared: view(shared),
+    sharedModel: shared.model,
+    custom: view(imageRuntimeConfig(userId, 'custom')),
+    webdavConnected: webdav.isConnected(),
+  })
 })
 
 imageJobsApp.put('/config', requireAuth, async (c) => {
-  const body = await c.req.json().catch(() => ({}))
-  const baseUrl = String(body.baseUrl ?? '').trim() || imageRuntimeConfig().baseUrl
-  const apiKey = String(body.apiKey ?? '').trim()
-  if (!requireHttpUrl(baseUrl)) return c.json({ error: '图片接口地址必须以 http:// 或 https:// 开头' }, 400)
-  setSetting('image_base_url', baseUrl.replace(/\/+$/, ''))
-  if (apiKey) setSetting('image_api_key', apiKey)
+  const body = (await c.req.json().catch(() => ({}))) || {}
+  if (body.mode !== undefined && !['shared', 'custom'].includes(body.mode)) return c.json({ error: '请选择共享或独立配置' }, 400)
+  const userId = c.get('user').id
+  const cfg = draftImageConfig(userId, body)
+  if (!requireHttpUrl(cfg.baseUrl)) return c.json({ error: '图片接口地址必须以 http:// 或 https:// 开头' }, 400)
+  if (cfg.mode === 'shared') {
+    setSetting('image_base_url', cfg.baseUrl)
+    if (String(body.sharedApiKey ?? body.apiKey ?? '').trim()) setSetting('image_api_key', cfg.apiKey)
+    // 站点级模型只在还没有人设置过时补默认值,各人的选择存在自己的 shared_model 里。
+    if (!getSetting('image_model', '') && cfg.model) setSetting('image_model', cfg.model)
+    setUserSetting(userId, 'image_shared_model', cfg.model)
+  } else {
+    setUserSetting(userId, 'image_base_url', cfg.baseUrl)
+    setUserSetting(userId, 'image_model', cfg.model)
+    if (String(body.apiKey ?? '').trim()) setUserSetting(userId, 'image_api_key', cfg.apiKey)
+  }
+  setUserSetting(userId, 'image_mode', cfg.mode)
   return c.json({ ok: true })
 })
 
-imageJobsApp.post('/config/test', requireAuth, async (c) => {
-  const body = await c.req.json().catch(() => ({}))
-  const saved = imageRuntimeConfig()
-  const baseUrl = (String(body.baseUrl ?? '').trim() || saved.baseUrl).replace(/\/+$/, '')
-  const apiKey = String(body.apiKey ?? '').trim() || saved.apiKey
-  if (!requireHttpUrl(baseUrl) || !apiKey) return c.json({ error: '请先填写合法的图片接口地址和 API Key' }, 400)
-  const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(20000) }).catch(() => null)
-  if (!response) return c.json({ error: '无法连接图片接口' }, 502)
-  if (!response.ok) return c.json({ error: `连接失败 (${response.status})` }, 400)
-  const data = await response.json().catch(() => ({}))
-  const models = Array.isArray(data.data) ? data.data.map((item) => item?.id).filter(Boolean) : []
-  return c.json({ ok: true, models, supportsGptImage2: models.includes(IMAGE_MODEL) })
+// 自动获取模型列表:与 AI 优化同形,凭据由服务端按所选来源解析,不要求前端回显已保存的 Key。
+imageJobsApp.post('/config/models', requireAuth, async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) || {}
+  if (body.mode !== undefined && !['shared', 'custom'].includes(body.mode)) return c.json({ error: '请选择共享或独立配置' }, 400)
+  const cfg = draftImageConfig(c.get('user').id, body)
+  if (!requireHttpUrl(cfg.baseUrl)) return c.json({ error: '请先填写合法的图片接口地址' }, 400)
+  try {
+    return c.json({ models: await fetchModels(cfg) })
+  } catch (e) {
+    return c.json({ error: e.message }, 400)
+  }
 })
+
+imageJobsApp.post('/config/test', requireAuth, async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) || {}
+  if (body.mode !== undefined && !['shared', 'custom'].includes(body.mode)) return c.json({ error: '请选择共享或独立配置' }, 400)
+  const cfg = draftImageConfig(c.get('user').id, body)
+  if (!requireHttpUrl(cfg.baseUrl) || !cfg.apiKey) return c.json({ error: '请先填写合法的图片接口地址和 API Key' }, 400)
+  try {
+    const models = await fetchModels(cfg)
+    return c.json({ ok: true, models, supportsModel: Boolean(cfg.model) && models.includes(cfg.model) })
+  } catch (e) {
+    return c.json({ error: e.message }, 400)
+  }
+})
+
+// 只读上游模型列表,图片服务没有便宜的连通性探测方式,测试连接与自动获取都走这里。
+async function fetchModels(cfg) {
+  const response = await fetch(`${cfg.baseUrl.replace(/\/+$/, '')}/models`, {
+    headers: { Authorization: `Bearer ${cfg.apiKey}` },
+    signal: AbortSignal.timeout(20000),
+  }).catch(() => null)
+  if (!response) throw new Error('无法连接图片接口')
+  if (!response.ok) throw new Error(`连接失败 (${response.status})`)
+  const data = await response.json().catch(() => ({}))
+  return Array.isArray(data.data) ? data.data.map((item) => item?.id).filter(Boolean) : []
+}
 
 imageJobsApp.post('/', requireAuth, async (c) => {
   const userId = c.get('user').id
@@ -242,8 +339,8 @@ imageJobsApp.post('/', requireAuth, async (c) => {
   const draftId = String(body.draftId ?? '').trim()
   if (!text) return c.json({ error: '正文为空，无法生成配图' }, 400)
   if (!draftId || !draftOwnedBy(userId, draftId)) return c.json({ error: '草稿不存在或无权操作' }, 403)
-  if (!imageApiKey()) return c.json({ error: '尚未配置 AI 绘图 API Key，请到设置 → AI 优化 → AI 配图中填写' }, 400)
-  if (!requireHttpUrl(imageBaseUrl())) return c.json({ error: '尚未配置合法的图片接口地址，请到设置 → AI 优化 → AI 配图中填写' }, 400)
+  const configError = imageConfigError(imageRuntimeConfig(userId))
+  if (configError) return c.json({ error: configError }, 400)
   const hash = promptHash(text)
   const duplicate = db.prepare(`SELECT * FROM image_jobs WHERE user_id = ? AND draft_id = ? AND prompt_hash = ?
     AND status IN ('queued', 'running', 'uploading', 'succeeded') ORDER BY created_at DESC LIMIT 1`).get(userId, draftId, hash)
@@ -278,6 +375,8 @@ imageJobsApp.post('/:id/retry', requireAuth, (c) => {
   const row = db.prepare('SELECT * FROM image_jobs WHERE id = ? AND user_id = ?').get(c.req.param('id'), c.get('user').id)
   if (!row) return c.json({ error: '任务不存在' }, 404)
   if (!['failed', 'cancelled'].includes(row.status)) return c.json({ error: '当前任务不能重试' }, 409)
+  const configError = imageConfigError(imageRuntimeConfig(row.user_id))
+  if (configError) return c.json({ error: configError }, 400)
   const active = db.prepare("SELECT id FROM image_jobs WHERE user_id = ? AND status IN ('queued', 'running', 'uploading') LIMIT 1").get(c.get('user').id)
   if (active) return c.json({ error: '已有一项 AI 配图正在生成' }, 409)
   db.prepare("UPDATE image_jobs SET status = 'queued', error = '', filename = NULL, storage = NULL, storage_path = NULL, mime = NULL, hash = NULL, finished_at = NULL, updated_at = datetime('now') WHERE id = ?").run(row.id)

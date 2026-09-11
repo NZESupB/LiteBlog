@@ -29,6 +29,7 @@ const ENV_KEYS = {
   'storage.webdav.password': 'WEBDAV_PASSWORD',
   'storage.webdav.folder': 'WEBDAV_FOLDER',
   'ai.image.baseUrl': 'IMAGE_API_BASE_URL',
+  'ai.image.model': 'IMAGE_MODEL',
   'ai.image.apiKey': 'IMAGE_API_KEY',
   'ai.llm.baseUrl': 'LLM_BASE_URL',
   'ai.llm.model': 'LLM_MODEL',
