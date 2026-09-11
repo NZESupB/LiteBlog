@@ -96,20 +96,99 @@ function showToast(message, action = null) {
   toastTimer = setTimeout(() => toast.remove(), action ? 6000 : 2600)
 }
 
-function composeDraftKey() {
-  return `compose-draft:${site?.user?.id || 'guest'}`
+function newDraftId() {
+  return globalThis.crypto?.randomUUID?.() || `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
-function readComposeDraft() {
-  try { return sessionStorage.getItem(composeDraftKey()) || '' } catch { return '' }
+
+function composeDraftKey(draftId) {
+  return `compose-draft:${location.origin}:${site?.user?.id || 'guest'}:${draftId}`
 }
-function saveComposeDraft(value) {
+
+function readComposeState(draftId) {
   try {
-    if (value.trim()) sessionStorage.setItem(composeDraftKey(), value)
-    else sessionStorage.removeItem(composeDraftKey())
+    const raw = localStorage.getItem(composeDraftKey(draftId))
+    if (raw) return JSON.parse(raw)
+    // 早期草稿没有文章 ID,只迁移到新建草稿,不能覆盖已有动态的正文。
+    if (!String(draftId).startsWith('post-')) {
+      const legacy = sessionStorage.getItem(`compose-draft:${site?.user?.id || 'guest'}`)
+      return legacy ? { content: legacy } : null
+    }
+    return null
+  } catch { return null }
+}
+
+function saveComposeState(draftId, state) {
+  try {
+    localStorage.setItem(composeDraftKey(draftId), JSON.stringify({ ...state, savedAt: new Date().toISOString() }))
+    document.querySelector('.draft-save-state')?.replaceChildren(document.createTextNode('已保存到此浏览器'))
+  } catch {
+    document.querySelector('.draft-save-state')?.replaceChildren(document.createTextNode('浏览器缓存不可用'))
+  }
+}
+
+function clearComposeState(draftId) {
+  try {
+    localStorage.removeItem(composeDraftKey(draftId))
+    sessionStorage.removeItem(`compose-draft:${site?.user?.id || 'guest'}`)
   } catch {}
 }
-function clearComposeDraft() {
-  try { sessionStorage.removeItem(composeDraftKey()) } catch {}
+
+let draftFileDbPromise = null
+function draftFileDb() {
+  if (draftFileDbPromise) return draftFileDbPromise
+  draftFileDbPromise = new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) { resolve(null); return }
+    const request = indexedDB.open('couple-blog-drafts', 1)
+    request.onupgradeneeded = () => request.result.createObjectStore('files', { keyPath: 'key' })
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  }).catch(() => null)
+  return draftFileDbPromise
+}
+
+async function saveDraftFile(draftId, file) {
+  const db = await draftFileDb()
+  if (!db || !file._id) return
+  await new Promise((resolve) => {
+    const tx = db.transaction('files', 'readwrite')
+    tx.objectStore('files').put({ key: `${draftId}:${file._id}`, draftId, id: file._id, name: file.name, type: file.type, blob: file })
+    tx.oncomplete = resolve; tx.onerror = resolve
+  })
+}
+
+async function loadDraftFiles(draftId) {
+  const db = await draftFileDb()
+  if (!db) return []
+  return new Promise((resolve) => {
+    const tx = db.transaction('files', 'readonly')
+    const request = tx.objectStore('files').getAll()
+    request.onsuccess = () => resolve(request.result.filter((row) => row.draftId === draftId).map((row) => Object.assign(new File([row.blob], row.name, { type: row.type }), { _id: row.id })))
+    request.onerror = () => resolve([])
+  })
+}
+
+async function clearDraftFiles(draftId) {
+  const db = await draftFileDb()
+  if (!db) return
+  await new Promise((resolve) => {
+    const tx = db.transaction('files', 'readwrite')
+    const store = tx.objectStore('files')
+    const request = store.getAllKeys()
+    request.onsuccess = () => {
+      for (const key of request.result) if (String(key).startsWith(`${draftId}:`)) store.delete(key)
+    }
+    tx.oncomplete = resolve; tx.onerror = resolve
+  })
+}
+
+async function removeDraftFile(draftId, fileId) {
+  const db = await draftFileDb()
+  if (!db || !fileId) return
+  await new Promise((resolve) => {
+    const tx = db.transaction('files', 'readwrite')
+    tx.objectStore('files').delete(`${draftId}:${fileId}`)
+    tx.oncomplete = resolve; tx.onerror = resolve
+  })
 }
 
 let activeComposerModal = null
@@ -118,18 +197,30 @@ function openComposerModal(post = null) {
   if (activeComposerModal) return
   const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
   const scrollY = window.scrollY
+  const draftId = post ? `post-${post.id}` : (() => {
+    const key = `compose-draft-id:${location.origin}:${site.user.id}`
+    try {
+      let id = localStorage.getItem(key)
+      if (!id) { id = newDraftId(); localStorage.setItem(key, id) }
+      return id
+    } catch { return newDraftId() }
+  })()
   let closeModal = () => {}
   const overlay = el(`<div class="composer-overlay" role="dialog" aria-modal="true" aria-label="${post ? '编辑日常' : '写日常'}">
     <div class="composer-dialog"><button class="composer-close" type="button" aria-label="关闭">×</button><div class="composer-body"></div></div>
   </div>`)
   const body = $('.composer-body', overlay)
-  const card = createComposer(post, async (result = {}) => {
+  const card = createComposer(post, draftId, async (result = {}) => {
     closeModal()
     if (post) {
+      clearComposeState(draftId)
+      await clearDraftFiles(draftId)
       showToast('动态已保存')
       renderTimeline()
     } else {
-      clearComposeDraft()
+      clearComposeState(draftId)
+      await clearDraftFiles(draftId)
+      try { localStorage.removeItem(`compose-draft-id:${location.origin}:${site.user.id}`) } catch {}
       showToast('发布成功', () => { location.hash = `#/post/${result.id}` })
     }
   }, () => closeModal())
@@ -147,6 +238,7 @@ function openComposerModal(post = null) {
   }
   closeModal = () => {
     if (!activeComposerModal) return
+    card.dispose?.()
     document.removeEventListener('keydown', onKeydown)
     document.body.classList.remove('modal-open')
     overlay.remove()
@@ -309,10 +401,10 @@ function attachEditorResize(handle, textarea) {
 }
 
 // post 传 null 表示新建;编辑时带已有图片(keep 未勾除的 id)
-function createComposer(post, onDone, onCancel) {
+function createComposer(post, draftId, onDone, onCancel) {
   const card = el(`
     <div class="card compose">
-      <div class="compose-heading"><span>${post ? '编辑这段日常' : '今天，有什么想记住的？'}</span>${icon('heart')}</div>
+      <div class="compose-heading"><span>${post ? '编辑这段日常' : '今天，有什么想记住的？'}</span><span class="draft-save-state" aria-live="polite">草稿未发布</span>${icon('heart')}</div>
       <div class="md-toolbar" role="toolbar" aria-label="Markdown 格式">
         <button data-md="bold" title="加粗 (⌘B)">${icon('bold')}</button>
         <button data-md="italic" title="斜体 (⌘I)">${icon('italic')}</button>
@@ -329,7 +421,9 @@ function createComposer(post, onDone, onCancel) {
         <button data-md="link" title="链接 (⌘K)">${icon('link')}</button>
         <span class="md-sep"></span>
         <button data-md="emoji" title="表情" type="button">${icon('smile')}</button>
+        <span class="ai-tools-label">AI 工具</span>
         <button class="md-polish" title="AI 优化正文" type="button">${icon('sparkles')}<span>AI 优化</span></button>
+        <button class="md-image" title="根据正文生成配图" type="button">${icon('image')}<span>AI 配图</span></button>
       </div>
       <div class="editor-box">
         <textarea aria-label="动态正文" placeholder="一顿晚餐、一场散步，或是突然想说的话…"></textarea>
@@ -352,6 +446,15 @@ function createComposer(post, onDone, onCancel) {
           <button class="btn ai-adopt" type="button">采用优化</button>
         </div>
       </div>
+      <div class="image-job-panel" hidden>
+        <div class="image-job-head"><span class="image-job-title">${icon('image')}<span>AI 配图</span></span><span class="image-job-status" aria-live="polite"></span></div>
+        <div class="image-job-preview"></div>
+        <div class="image-job-actions">
+          <button class="btn-ghost image-job-retry" type="button" hidden>重新生成</button>
+          <button class="btn-ghost image-job-cancel" type="button">取消任务</button>
+          <button class="btn image-job-use" type="button" hidden>使用这张图</button>
+        </div>
+      </div>
       <div class="preview-grid"></div>
       <div class="form-error"></div>
       <div class="compose-actions">
@@ -363,7 +466,7 @@ function createComposer(post, onDone, onCancel) {
           <label class="public-chip"><input type="checkbox" name="publicImages" ${post && post.public_images ? 'checked' : ''} /><span>图片</span></label>
         </div>
         <span class="spacer"></span>
-        ${post ? '<button class="btn-ghost cancel">取消</button>' : ''}
+        ${post ? '<button class="btn-ghost cancel">取消</button>' : '<button class="btn-ghost discard-draft" type="button">丢弃草稿</button>'}
         <button class="btn submit">${post ? '保存' : '发布'}</button>
       </div>
       <input class="album-input" type="file" accept="image/*" multiple hidden />
@@ -384,11 +487,13 @@ function createComposer(post, onDone, onCancel) {
   const errorLine = $('.form-error', card)
   const submitBtn = $('.submit', card)
   const polishBtn = $('.md-polish', card)
-
-  if (!post) {
-    textarea.value = readComposeDraft()
-    textarea.addEventListener('input', () => saveComposeDraft(textarea.value))
-  }
+  const imageBtn = $('.md-image', card)
+  const imagePanel = $('.image-job-panel', card)
+  const imageStatus = $('.image-job-status', card)
+  const imagePreview = $('.image-job-preview', card)
+  const imageRetry = $('.image-job-retry', card)
+  const imageCancel = $('.image-job-cancel', card)
+  const imageUse = $('.image-job-use', card)
 
   // AI 优化:后端代理流式返回(凭据服务端保管),结果与原文并排展示,由用户决定是否采用
   const compare = $('.ai-compare', card)
@@ -470,12 +575,178 @@ function createComposer(post, onDone, onCancel) {
   if (post) textarea.value = post.content
   const keepImages = post ? post.images.map((img) => ({ ...img })) : [] // 保留的已有图片(已就绪,不显示处理动画)
   const newFiles = [] // 新增文件,含 _status: processing/uploading/done/error
+  const savedDraft = readComposeState(draftId) || {}
+  let imageTask = null
+  let imagePollTimer = null
+  let disposed = false
+  const draftState = () => ({
+    content: textarea.value,
+    publicText: $('[name=publicText]', card)?.checked ?? false,
+    publicImages: $('[name=publicImages]', card)?.checked ?? false,
+    files: newFiles.map((file) => ({ id: file._id, name: file.name || '', type: file.type || '', status: file._status, filename: file._name || '', jobId: file._jobId || '' })),
+    keep: keepImages.map((image) => image.id),
+    imageJobId: imageTask?.id || savedDraft.imageJobId || '',
+  })
+  const persistDraft = () => { if (!disposed) saveComposeState(draftId, draftState()) }
+  const savedKeep = new Set(Array.isArray(savedDraft.keep) ? savedDraft.keep : keepImages.map((image) => image.id))
+  if (post) {
+    for (let i = keepImages.length - 1; i >= 0; i--) if (!savedKeep.has(keepImages[i].id)) keepImages.splice(i, 1)
+  }
+  textarea.value = typeof savedDraft.content === 'string' ? savedDraft.content : (post ? post.content : '')
+  for (const name of ['publicText', 'publicImages']) {
+    const input = $(`[name=${name}]`, card)
+    if (input && typeof savedDraft[name] === 'boolean') input.checked = savedDraft[name]
+    input?.addEventListener('change', persistDraft)
+  }
+  textarea.addEventListener('input', persistDraft)
+  const draftReady = api('/api/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: draftId, postId: post?.id || null }) }).catch(() => null)
 
-  const STATUS_TEXT = { processing: '处理中', uploading: '上传中' }
+  // 恢复已上传图片和 IndexedDB 中尚未处理完的原文件。
+  ;(async () => {
+    const restoredIds = new Set()
+    for (const saved of Array.isArray(savedDraft.files) ? savedDraft.files : []) {
+      if (!saved.filename) continue
+      const file = { _id: saved.id || newDraftId(), _name: saved.filename, _status: 'done', _jobId: saved.jobId || '', name: saved.name, type: saved.type, _url: `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(saved.filename)}` }
+      newFiles.push(file)
+      restoredIds.add(file._id)
+    }
+    const blobs = await loadDraftFiles(draftId)
+    for (const file of blobs) {
+      if (restoredIds.has(file._id)) continue
+      newFiles.push(file)
+      processFile(file)
+    }
+    renderPreviews()
+    updatePublishGuard()
+    persistDraft()
+  })()
+
+  function formatElapsed(startedAt) {
+    const start = startedAt ? parseTime(startedAt).getTime() : Date.now()
+    const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000))
+    return `${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, '0')}秒`
+  }
+
+  function renderImageTask(task) {
+    if (!task || disposed) return
+    imagePanel.hidden = false
+    const active = ['queued', 'running', 'uploading'].includes(task.status)
+    const labels = { queued: '已排队', running: '正在生成', uploading: '正在保存到 WebDAV', succeeded: '已完成', failed: '生成失败', cancelled: '已取消' }
+    imageStatus.textContent = active
+      ? `${labels[task.status] || task.status} · 已等待 ${formatElapsed(task.createdAt)} · 通常需要 60 秒以上`
+      : `${labels[task.status] || task.status}${task.error ? `：${task.error}` : ''}`
+    imageBtn.disabled = active
+    imageCancel.hidden = !active
+    imageRetry.hidden = !['failed', 'cancelled'].includes(task.status)
+    imageRetry.disabled = active
+    imageUse.hidden = task.status !== 'succeeded' || newFiles.some((file) => file._jobId === task.id)
+    if (task.status === 'succeeded' && task.previewUrl) {
+      imagePreview.innerHTML = `<img src="${esc(task.previewUrl)}" alt="AI 生成的日记配图" />`
+    } else if (!active && task.status !== 'failed') {
+      imagePreview.innerHTML = ''
+    }
+    if (active) {
+      clearInterval(imagePollTimer)
+      imagePollTimer = setInterval(() => refreshImageTask(task.id), 3000)
+    } else {
+      clearInterval(imagePollTimer)
+      imagePollTimer = null
+    }
+    persistDraft()
+    updatePublishGuard()
+  }
+
+  async function refreshImageTask(id) {
+    if (disposed) return
+    try {
+      const result = await api(`/api/image-jobs/${encodeURIComponent(id)}`)
+      if (disposed) return
+      imageTask = result.task
+      renderImageTask(imageTask)
+    } catch (error) {
+      imageStatus.textContent = error.message
+    }
+  }
+
+  async function startImageJob() {
+    if (disposed) return
+    const text = textarea.value.trim()
+    if (!text) { errorLine.textContent = '先写点内容再生成配图'; return }
+    errorLine.textContent = ''
+    imagePanel.hidden = false
+    imageStatus.textContent = '正在提交任务…'
+    imageBtn.disabled = true
+    imageCancel.hidden = true
+    imageRetry.hidden = true
+    imageUse.hidden = true
+    try {
+      const result = await api('/api/image-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draftId, text }),
+      })
+      if (disposed) return
+      imageTask = result.task
+      renderImageTask(imageTask)
+    } catch (error) {
+      imageBtn.disabled = false
+      imageStatus.textContent = ''
+      errorLine.textContent = error.message
+    }
+  }
+
+  async function retryImageJob() {
+    if (disposed) return
+    if (!imageTask?.id) return startImageJob()
+    imageRetry.disabled = true
+    try {
+      const result = await api(`/api/image-jobs/${encodeURIComponent(imageTask.id)}/retry`, { method: 'POST' })
+      if (disposed) return
+      imageTask = result.task
+      renderImageTask(imageTask)
+    } catch (error) {
+      imageRetry.disabled = false
+      imageStatus.textContent = error.message
+    }
+  }
+
+  imageBtn.onclick = startImageJob
+  imageRetry.onclick = retryImageJob
+  imageCancel.onclick = async () => {
+    if (!imageTask?.id) return
+    await api(`/api/image-jobs/${encodeURIComponent(imageTask.id)}`, { method: 'DELETE' }).catch(() => {})
+    await refreshImageTask(imageTask.id)
+  }
+  imageUse.onclick = () => {
+    if (!imageTask || imageTask.status !== 'succeeded' || newFiles.some((file) => file._jobId === imageTask.id)) return
+    newFiles.push({ _id: newDraftId(), _jobId: imageTask.id, _name: imageTask.filename, _url: imageTask.previewUrl, _status: 'done', name: 'AI 配图', type: imageTask.mime || 'image/png' })
+    imageUse.hidden = true
+    imageStatus.textContent = '已加入图片，发布时会一起保存'
+    renderPreviews()
+    updatePublishGuard()
+    persistDraft()
+  }
+
+  if (savedDraft.imageJobId) refreshImageTask(savedDraft.imageJobId)
+
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    clearInterval(imagePollTimer)
+    imagePollTimer = null
+    polishAbort?.abort()
+    polishAbort = null
+  }
+  card.dispose = dispose
+
+  const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
 
   // 选完图立刻处理(HEIC 转码 + 压缩)并上传到存储后端,发布时只提交文件名
   async function processFile(file) {
+    file._id ||= newDraftId()
+    await saveDraftFile(draftId, file)
     file._status = 'processing'
+    persistDraft()
     renderPreviews()
     updatePublishGuard()
     try {
@@ -486,15 +757,19 @@ function createComposer(post, onDone, onCancel) {
       renderPreviews()
       const form = new FormData()
       form.append('image', compressed)
+      form.append('draftId', draftId)
       const { filename } = await api('/api/uploads', { method: 'POST', body: form })
       file._name = filename
       file._status = 'done'
+      await removeDraftFile(draftId, file._id)
+      persistDraft()
     } catch (e) {
       file._status = 'error'
       file._errMsg = e.message || '处理失败'
     }
     renderPreviews()
     updatePublishGuard()
+    persistDraft()
   }
 
   function renderPreviews() {
@@ -523,10 +798,13 @@ function createComposer(post, onDone, onCancel) {
         // 按对象定位而非渲染时的下标,避免删除过程中列表变动导致删错
         const idx = list.indexOf(item)
         if (idx >= 0) list.splice(idx, 1)
+        if (item._jobId) api(`/api/image-jobs/${encodeURIComponent(item._jobId)}`, { method: 'DELETE' }).catch(() => {})
+        removeDraftFile(draftId, item._id)
         renderPreviews()
         updatePublishGuard()
         // 新图已经传到存储后端了,撤掉时连带删除;已发布的老图仍由发布时的 keep 决定
         if (item._name) api(`/api/uploads/${item._name}`, { method: 'DELETE' }).catch(() => {})
+        persistDraft()
       }
       previews.appendChild(node)
     }
@@ -535,8 +813,10 @@ function createComposer(post, onDone, onCancel) {
   // 发布守卫:任一图片还在处理或上传中则禁用发布
   function updatePublishGuard() {
     const pending = newFiles.some((f) => f._status === 'processing' || f._status === 'uploading')
-    submitBtn.disabled = pending
+    const generating = imageTask && ['queued', 'running', 'uploading'].includes(imageTask.status)
+    submitBtn.disabled = pending || generating
     if (pending) submitBtn.textContent = '图片上传中…'
+    else if (generating) submitBtn.textContent = 'AI 配图生成中…'
     else submitBtn.textContent = post ? '保存' : '发布'
   }
   renderPreviews()
@@ -569,7 +849,8 @@ function createComposer(post, onDone, onCancel) {
     submitBtn.textContent = '发布中…'
     errorLine.textContent = ''
     try {
-      const payload = { content, images: ready.map((f) => f._name) }
+      await draftReady
+      const payload = { content, images: ready.map((f) => f._name), draftId }
       if (post) payload.keep = keepImages.map((img) => img.id)
       const pubText = $('[name=publicText]', card)
       const pubImages = $('[name=publicImages]', card)
@@ -588,6 +869,13 @@ function createComposer(post, onDone, onCancel) {
     }
   }
   if (post) $('.cancel', card).onclick = onCancel
+  if (!post) $('.discard-draft', card).onclick = async () => {
+    if (!confirm('确定丢弃这篇未发布的草稿吗？')) return
+    onCancel()
+    await api(`/api/drafts/${encodeURIComponent(draftId)}`, { method: 'DELETE' }).catch(() => {})
+    clearComposeState(draftId)
+    await clearDraftFiles(draftId)
+  }
   return card
 }
 
@@ -1503,6 +1791,7 @@ function renderSiteSettingsCard() {
     }
   }
   appendSettingsItem(card)
+
 }
 
 function renderSettingsSection(kind) {
@@ -1708,6 +1997,43 @@ async function renderLlmCard() {
     }
   }
   appendSettingsItem(card)
+
+  let imageConfig
+  try {
+    imageConfig = await api('/api/image-jobs/config')
+  } catch (e) {
+    appendSettingsItem(el(`<div class="empty-tip">AI 配图配置读取失败：${esc(e.message)}</div>`))
+    return
+  }
+  const imageCard = el(`
+    <div class="card settings-card image-settings-card">
+      <h2>AI 配图</h2>
+      <div class="storage-status">根据正文生成一张氛围配图，结果先预览，图片会保存到 WebDAV 的 <code>ai-generated/</code> 子目录。</div>
+      <label>图片接口地址(OpenAI 兼容)<input name="imageBaseUrl" value="${esc(imageConfig.baseUrl)}" placeholder="https://api.example.com/v1" /></label>
+      <label>图片 API Key<input name="imageApiKey" type="password" placeholder="${imageConfig.hasApiKey ? '已保存，留空表示不修改' : 'sk-…'}" /></label>
+      <div class="storage-status">模型：<b>gpt-image-2</b> · WebDAV：<b>${imageConfig.webdavConnected ? '已连接' : '未连接'}</b></div>
+      <div class="settings-actions"><span class="save-tip" hidden>已保存</span><span class="spacer"></span><button class="btn-ghost image-test" type="button">测试模型</button><button class="btn image-save" type="button">保存</button></div>
+      <div class="form-error"></div>
+    </div>`)
+  const imageErr = $('.form-error', imageCard)
+  const imagePayload = () => ({ baseUrl: $('[name=imageBaseUrl]', imageCard).value, apiKey: $('[name=imageApiKey]', imageCard).value })
+  $('.image-test', imageCard).onclick = async () => {
+    imageErr.textContent = '正在查询模型…'
+    imageErr.style.color = ''
+    try {
+      const result = await api('/api/image-jobs/config/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(imagePayload()) })
+      imageErr.textContent = result.supportsGptImage2 ? '连接成功，已找到 gpt-image-2' : '连接成功，但接口未返回 gpt-image-2'
+      imageErr.style.color = result.supportsGptImage2 ? '#2e8b4f' : '#a56a25'
+    } catch (e) { imageErr.textContent = e.message }
+  }
+  $('.image-save', imageCard).onclick = async () => {
+    imageErr.textContent = ''
+    try {
+      await api('/api/image-jobs/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(imagePayload()) })
+      $('.save-tip', imageCard).hidden = false
+    } catch (e) { imageErr.textContent = e.message }
+  }
+  appendSettingsItem(imageCard)
 }
 
 // 图片存储配置(本地磁盘 / WebDAV)

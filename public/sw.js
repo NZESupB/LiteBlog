@@ -1,4 +1,4 @@
-const CACHE_NAME = 'couple-blog-shell-v6'
+const CACHE_NAME = 'couple-blog-shell-v7'
 const SHELL = [
   '/',
   '/index.html',

@@ -3,6 +3,7 @@
 import { Hono } from 'hono'
 import { db, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { requireAuth } from './auth.js'
+import { configValue } from './config.js'
 
 export const llmApp = new Hono()
 
@@ -149,9 +150,9 @@ function llmMode(userId) {
 
 function sharedLlmConfig() {
   return {
-    baseUrl: getSetting('llm_base_url', process.env.LLM_BASE_URL || ''),
-    model: getSetting('llm_model', process.env.LLM_MODEL || ''),
-    apiKey: getSetting('llm_api_key', process.env.LLM_API_KEY || ''),
+    baseUrl: getSetting('llm_base_url', String(configValue('ai.llm.baseUrl', ''))),
+    model: getSetting('llm_model', String(configValue('ai.llm.model', ''))),
+    apiKey: getSetting('llm_api_key', String(configValue('ai.llm.apiKey', ''))),
   }
 }
 

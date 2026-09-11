@@ -2,10 +2,11 @@
 // 订阅表也放在这里,index.js 只调 saveSubscription / removeSubscription / pushToUser。
 import { createECDH, createHmac, createCipheriv, createPrivateKey, randomBytes, sign } from 'node:crypto'
 import { db, getSetting, setSetting } from './db.js'
+import { configValue } from './config.js'
 
 const CURVE = 'prime256v1'
 // 推送服务要求 sub 是可联系到发送方的 mailto: 或 https: URL(Apple 会校验)
-const SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com'
+const SUBJECT = String(configValue('push.vapidSubject', 'mailto:admin@example.com'))
 // aes128gcm 的记录大小,单条通知远小于此值,固定成一条记录即可
 const RECORD_SIZE = 4096
 const PUSH_TIMEOUT_MS = 15_000

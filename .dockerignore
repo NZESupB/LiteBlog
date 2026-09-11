@@ -1,5 +1,7 @@
-node_modules
+config.json
 data
-.agentdocs
+node_modules
 .git
-*.md
+.github
+backups
+*.log

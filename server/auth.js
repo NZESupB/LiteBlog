@@ -3,10 +3,11 @@ import { sign, verify } from 'hono/jwt'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { randomBytes } from 'node:crypto'
 import { db } from './db.js'
+import { configValue } from './config.js'
 
-const JWT_SECRET = process.env.JWT_SECRET || randomBytes(32).toString('hex')
-if (!process.env.JWT_SECRET) {
-  console.warn('警告: 未设置 JWT_SECRET,已生成临时密钥,重启后所有登录会失效')
+const JWT_SECRET = String(configValue('security.jwtSecret', '')).trim() || randomBytes(32).toString('hex')
+if (!String(configValue('security.jwtSecret', '')).trim()) {
+  console.warn('警告: 未设置 security.jwtSecret 或 JWT_SECRET,已生成临时密钥,重启后所有登录会失效')
 }
 
 const COOKIE_NAME = 'session'

@@ -2,7 +2,7 @@
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -13,15 +13,17 @@ import { LOCAL, WEBDAV, activeBackend, putImage, getImage, deleteImage } from '.
 import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
 import * as webdav from './webdav.js'
 import { llmApp } from './llm.js'
+import { imageJobsApp, ensureDraft, draftOwnedBy, abandonDraft } from './image-jobs.js'
+import { configValue } from './config.js'
 
-const PORT = Number(process.env.PORT) || 3000
+const PORT = Number(configValue('server.port', 3000)) || 3000
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MAX_AVATAR_BYTES = 10 * 1024 * 1024
 const IMAGE_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' }
 // 新格式 YYYYMMDD-HHMMSS-<hash8>,旧格式为 16 位内容哈希,两者都要能读
-const UPLOAD_NAME_RE = /^(?:[a-f0-9]{16}|\d{8}-\d{6}-[a-f0-9]{8})\.(jpg|png|webp|gif)$/
+const UPLOAD_NAME_RE = /^(?:[a-f0-9]{16}|\d{8}-\d{6}-[a-f0-9]{8}(?:-[a-zA-Z0-9-]+)?|ai-[a-zA-Z0-9-]+)\.(jpg|png|webp|gif)$/
 const MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif' }
 const AVATAR_MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }
 const AVATAR_NAME_RE = /^avatar-\d+-\d+-[a-f0-9]{12}\.(jpg|png|webp)$/
@@ -34,12 +36,13 @@ const FILE_TZ_FORMAT = new Intl.DateTimeFormat('en-CA', {
 export const app = new Hono()
 app.use('*', sessionMiddleware)
 
-// 站点配置:数据库可后台修改,环境变量作为初始值
+// 站点配置:数据库可后台修改,config.json 作为初始值
 function siteConfig() {
+  const privateMode = configValue('site.privateMode', false)
   return {
-    title: getSetting('title', process.env.SITE_TITLE || '我们的日常'),
-    anniversary: getSetting('anniversary', process.env.ANNIVERSARY || ''),
-    privateMode: getSetting('private_mode', process.env.PRIVATE_MODE || 'false') === 'true',
+    title: getSetting('title', String(configValue('site.title', '我们的日常'))),
+    anniversary: getSetting('anniversary', String(configValue('site.anniversary', ''))),
+    privateMode: getSetting('private_mode', String(privateMode).toLowerCase()) === 'true',
   }
 }
 
@@ -332,9 +335,44 @@ app.get('/api/posts/:id', (c) => {
 
 // ---------- 图片上传(选图即上传,发布时才归属动态) ----------
 
-function stampedName(hash, ext) {
+// 草稿只保存归属和生命周期,正文与编辑器状态在浏览器本地保存。
+app.post('/api/drafts', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const postId = Number(body.postId) || null
+  const draftId = ensureDraft(c.get('user').id, body.id, postId)
+  return c.json({ id: draftId })
+})
+
+app.get('/api/drafts/:id', requireAuth, (c) => {
+  const draft = db.prepare('SELECT * FROM drafts WHERE id = ? AND user_id = ?').get(c.req.param('id'), c.get('user').id)
+  if (!draft) return c.json({ error: '草稿不存在' }, 404)
+  const pending = db.prepare('SELECT filename, hash, storage, draft_id, storage_path, created_at FROM pending_uploads WHERE draft_id = ? AND user_id = ? ORDER BY created_at, filename').all(draft.id, c.get('user').id)
+  const jobs = db.prepare('SELECT id, status, filename, storage, storage_path, mime, error, created_at, updated_at, finished_at FROM image_jobs WHERE draft_id = ? AND user_id = ? ORDER BY created_at DESC').all(draft.id, c.get('user').id)
+  return c.json({ draft, pending, jobs })
+})
+
+app.delete('/api/drafts/:id', requireAuth, async (c) => {
+  const ok = await abandonDraft(c.get('user').id, c.req.param('id'))
+  return c.json({ ok })
+})
+
+app.get('/api/drafts/:id/preview/:name', requireAuth, async (c) => {
+  const draft = db.prepare('SELECT id FROM drafts WHERE id = ? AND user_id = ?').get(c.req.param('id'), c.get('user').id)
+  const name = c.req.param('name')
+  if (!draft || !UPLOAD_NAME_RE.test(name)) return c.text('Not Found', 404)
+  const row = db.prepare('SELECT storage, storage_path FROM pending_uploads WHERE filename = ? AND draft_id = ? AND user_id = ?').get(name, draft.id, c.get('user').id)
+  if (!row) return c.text('Not Found', 404)
+  try {
+    const buf = await getImage(name, row.storage, row.storage_path || name)
+    return c.body(buf, 200, { 'Content-Type': MIME_BY_EXT[path.extname(name)], 'Cache-Control': 'private, max-age=300' })
+  } catch {
+    return c.text('Bad Gateway', 502)
+  }
+})
+
+function stampedName(hash, ext, unique = false) {
   const p = Object.fromEntries(FILE_TZ_FORMAT.formatToParts(new Date()).map((x) => [x.type, x.value]))
-  return `${p.year}${p.month}${p.day}-${p.hour}${p.minute}${p.second}-${hash.slice(0, 8)}${ext}`
+  return `${p.year}${p.month}${p.day}-${p.hour}${p.minute}${p.second}-${hash.slice(0, 8)}${unique ? `-${randomUUID().slice(0, 8)}` : ''}${ext}`
 }
 
 // 该文件是否还被别处引用(已发布的动态或其他待引用记录),无引用才能从存储后端删掉
@@ -345,16 +383,12 @@ function isReferenced(filename) {
   )
 }
 
-async function dropFile(filename, storage) {
-  await deleteImage(filename, storage).catch((e) => console.warn(`删除图片 ${filename} 失败: ${e.message}`))
-}
-
 // 选完图就上传但最终没发布的,超过一天视为孤儿清理掉
 async function cleanupPendingUploads() {
-  const stale = db.prepare("SELECT filename, storage FROM pending_uploads WHERE created_at < datetime('now', '-1 day')").all()
+  const stale = db.prepare("SELECT filename, storage, storage_path FROM pending_uploads WHERE draft_id IS NULL AND created_at < datetime('now', '-1 day')").all()
   for (const row of stale) {
     db.prepare('DELETE FROM pending_uploads WHERE filename = ?').run(row.filename)
-    if (!isReferenced(row.filename)) await dropFile(row.filename, row.storage)
+    if (!isReferenced(row.filename)) await deleteImage(row.filename, row.storage, row.storage_path || row.filename).catch(() => {})
   }
 }
 
@@ -362,6 +396,8 @@ app.post('/api/uploads', requireAuth, async (c) => {
   await cleanupPendingUploads()
   const form = await c.req.formData()
   const file = form.get('image')
+  const draftId = String(form.get('draftId') || '').trim() || null
+  if (draftId && !draftOwnedBy(c.get('user').id, draftId)) return c.json({ error: '草稿不存在或无权操作' }, 403)
   if (!file || typeof file !== 'object' || file.size === 0) return c.json({ error: '没有收到图片' }, 400)
   const ext = IMAGE_EXT[file.type]
   if (!ext) return c.json({ error: `不支持的图片类型: ${file.type || '未知'}` }, 400)
@@ -369,74 +405,100 @@ app.post('/api/uploads', requireAuth, async (c) => {
 
   const buf = Buffer.from(await file.arrayBuffer())
   const hash = createHash('sha256').update(buf).digest('hex').slice(0, 16)
-  // 内容去重:同一张图已存过(已发布或待引用)就复用原文件,不重复占网盘空间
-  const exist =
-    db.prepare('SELECT filename, storage FROM images WHERE hash = ? LIMIT 1').get(hash) ||
-    db.prepare('SELECT filename, storage FROM pending_uploads WHERE hash = ? LIMIT 1').get(hash)
+  // 内容去重只在当前用户/当前草稿范围内复用;跨账号或跨草稿时创建独立文件,避免覆盖待引用归属。
+  const userId = c.get('user').id
+  const pending = db.prepare(`SELECT filename, hash, storage, storage_path, user_id, draft_id
+    FROM pending_uploads WHERE hash = ? AND user_id = ? AND ${draftId ? 'draft_id = ?' : 'draft_id IS NULL'} LIMIT 1`)
+    .get(...(draftId ? [hash, userId, draftId] : [hash, userId]))
+  const ownedImage = db.prepare(`SELECT i.filename, i.hash, i.storage, i.storage_path
+    FROM images i JOIN posts p ON p.id = i.post_id
+    WHERE i.hash = ? AND p.user_id = ? ORDER BY i.id LIMIT 1`).get(hash, userId)
+  let exist = pending || null
+  if (!exist && ownedImage) {
+    const pendingAtName = db.prepare('SELECT user_id, draft_id, hash FROM pending_uploads WHERE filename = ? LIMIT 1').get(ownedImage.filename)
+    const sameDraft = pendingAtName && pendingAtName.user_id === userId && pendingAtName.hash === hash
+      && (pendingAtName.draft_id ?? null) === (draftId || null)
+    if (!pendingAtName || sameDraft) exist = ownedImage
+  }
 
-  const filename = exist ? exist.filename : stampedName(hash, ext)
+  const filename = exist ? exist.filename : stampedName(hash, ext, Boolean(
+    ownedImage
+      || db.prepare('SELECT 1 FROM images WHERE hash = ? LIMIT 1').get(hash)
+      || db.prepare('SELECT 1 FROM pending_uploads WHERE hash = ? LIMIT 1').get(hash),
+  ))
   let storage = exist ? exist.storage : null
   if (!exist) {
     try {
-      storage = await putImage(filename, buf, MIME_BY_EXT[ext])
+      storage = await putImage(filename, buf, MIME_BY_EXT[ext], filename)
     } catch (e) {
       console.warn(`上传图片 ${filename} 失败: ${e.message}`)
       return c.json({ error: e.message }, 502)
     }
   }
-  db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id) VALUES (?, ?, ?, ?)
-              ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, created_at = datetime('now')`)
-    .run(filename, hash, storage, c.get('user').id)
+  db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
+              storage_path = excluded.storage_path, created_at = datetime('now')`)
+    .run(filename, hash, storage, userId, draftId, exist?.storage_path || filename)
   return c.json({ filename, url: `/uploads/${filename}` })
 })
 
 // 编辑框里点 × 撤掉还没发布的图:连带把网盘上的文件删掉。幂等
 app.delete('/api/uploads/:name', requireAuth, async (c) => {
   const name = c.req.param('name')
-  const row = db.prepare('SELECT storage FROM pending_uploads WHERE filename = ? AND user_id = ?').get(name, c.get('user').id)
+  const row = db.prepare('SELECT storage, storage_path FROM pending_uploads WHERE filename = ? AND user_id = ?').get(name, c.get('user').id)
   if (!row) return c.json({ ok: true })
   db.prepare('DELETE FROM pending_uploads WHERE filename = ?').run(name)
-  if (!isReferenced(name)) await dropFile(name, row.storage)
+  if (!isReferenced(name)) await deleteImage(name, row.storage, row.storage_path || name).catch(() => {})
   return c.json({ ok: true })
 })
 
-// 把前端提交的文件名换成可写入 images 的记录:先找待引用的,再回落到已发布的同名图(内容去重复用)
-// 待引用记录按文件名唯一,两人同时选中同一张图时后传的会顶掉前一条,这里不限制上传者,避免误报「已过期」
-function claimUploads(names) {
+// 把前端提交的文件名换成可写入 images 的记录:只接受当前用户/当前草稿的待引用图片,
+// 已发布图片仅允许其原作者在编辑时复用,避免猜文件名跨账号挂载私密图片。
+function claimUploads(names, userId, draftId = null) {
   return names.map((name) => {
     if (!UPLOAD_NAME_RE.test(name)) throw new Error('图片参数不合法')
     const row =
-      db.prepare('SELECT filename, hash, storage FROM pending_uploads WHERE filename = ?').get(name) ||
-      db.prepare('SELECT filename, hash, storage FROM images WHERE filename = ? LIMIT 1').get(name)
+      (draftId
+        ? db.prepare('SELECT filename, hash, storage, storage_path FROM pending_uploads WHERE filename = ? AND user_id = ? AND draft_id = ?').get(name, userId, draftId)
+        : db.prepare('SELECT filename, hash, storage, storage_path FROM pending_uploads WHERE filename = ? AND user_id = ? AND draft_id IS NULL').get(name, userId)) ||
+      db.prepare(`SELECT i.filename, i.hash, i.storage, i.storage_path
+        FROM images i JOIN posts p ON p.id = i.post_id
+        WHERE i.filename = ? AND p.user_id = ? LIMIT 1`).get(name, userId)
     if (!row) throw new Error('图片不存在或已过期,请重新上传')
     return row
   })
 }
 
 function attachToPost(postId, claimed, startSort) {
-  const insertImg = db.prepare('INSERT INTO images (post_id, filename, sort, storage, hash) VALUES (?, ?, ?, ?, ?)')
+  const insertImg = db.prepare('INSERT INTO images (post_id, filename, sort, storage, hash, storage_path) VALUES (?, ?, ?, ?, ?, ?)')
   const dropPending = db.prepare('DELETE FROM pending_uploads WHERE filename = ?')
   claimed.forEach((img, i) => {
-    insertImg.run(postId, img.filename, startSort + i, img.storage, img.hash)
+    insertImg.run(postId, img.filename, startSort + i, img.storage, img.hash, img.storage_path || img.filename)
     dropPending.run(img.filename)
   })
 }
 
 // 动态被删/改时移除其图片:没有任何其他引用才从存储后端删文件
-async function removeImageFile(filename, storage) {
+async function removeImageFile(filename, storage, storagePath = filename) {
   if (isReferenced(filename)) return
-  await dropFile(filename, storage)
+  await deleteImage(filename, storage, storagePath).catch((e) => console.warn(`删除图片 ${filename} 失败: ${e.message}`))
 }
 
 app.post('/api/posts', requireAuth, async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const content = String(body.content || '').trim()
   const names = Array.isArray(body.images) ? body.images.map(String) : []
+  const draftId = String(body.draftId ?? '').trim() || null
+  if (draftId && !draftOwnedBy(c.get('user').id, draftId)) return c.json({ error: '草稿不存在或无权操作' }, 403)
+  if (draftId) {
+    const draft = db.prepare('SELECT post_id, status FROM drafts WHERE id = ? AND user_id = ?').get(draftId, c.get('user').id)
+    if (draft?.status === 'published' && draft.post_id) return c.json({ id: Number(draft.post_id), reused: true })
+  }
   if (!content && names.length === 0) return c.json({ error: '写点什么或传张图吧' }, 400)
 
   let claimed
   try {
-    claimed = claimUploads(names)
+    claimed = claimUploads(names, c.get('user').id, draftId)
   } catch (e) {
     return c.json({ error: e.message }, 400)
   }
@@ -451,6 +513,7 @@ app.post('/api/posts', requireAuth, async (c) => {
       .run(c.get('user').id, content, publicText, publicImages)
     postId = lastInsertRowid
     attachToPost(postId, claimed, 0)
+    if (draftId) db.prepare("UPDATE drafts SET status = 'published', post_id = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(Number(postId), draftId, c.get('user').id)
     db.exec('COMMIT')
   } catch (e) {
     db.exec('ROLLBACK')
@@ -478,17 +541,19 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
   if (!withinEditWindow(post)) return c.json({ error: '发布超过 24 小时,不能再编辑' }, 403)
   const body = await c.req.json().catch(() => ({}))
   const content = String(body.content || '').trim()
+  const draftId = String(body.draftId ?? '').trim() || null
+  if (draftId && !draftOwnedBy(c.get('user').id, draftId)) return c.json({ error: '草稿不存在或无权操作' }, 403)
   // keep 为保留的现有图片 id 列表,未列出的将被移除
   const keep = Array.isArray(body.keep) ? body.keep.map(Number) : []
   const names = Array.isArray(body.images) ? body.images.map(String) : []
 
-  const existing = db.prepare('SELECT id, filename, storage FROM images WHERE post_id = ? ORDER BY sort, id').all(post.id)
+  const existing = db.prepare('SELECT id, filename, storage, storage_path FROM images WHERE post_id = ? ORDER BY sort, id').all(post.id)
   const kept = existing.filter((img) => keep.includes(img.id))
   if (!content && kept.length + names.length === 0) return c.json({ error: '写点什么或传张图吧' }, 400)
 
   let claimed
   try {
-    claimed = claimUploads(names)
+    claimed = claimUploads(names, c.get('user').id, draftId)
   } catch (e) {
     return c.json({ error: e.message }, 400)
   }
@@ -509,7 +574,7 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
     db.exec('ROLLBACK')
     throw e
   }
-  for (const img of removed) await removeImageFile(img.filename, img.storage)
+  for (const img of removed) await removeImageFile(img.filename, img.storage, img.storage_path || img.filename)
   return c.json({ ok: true })
 })
 
@@ -517,7 +582,7 @@ app.delete('/api/posts/:id', requireAuth, async (c) => {
   const [post, err] = ownPostOr404(c)
   if (err) return err
   if (!withinEditWindow(post)) return c.json({ error: '发布超过 24 小时,不能再删除' }, 403)
-  const imgs = db.prepare('SELECT filename, storage FROM images WHERE post_id = ?').all(post.id)
+  const imgs = db.prepare('SELECT filename, storage, storage_path FROM images WHERE post_id = ?').all(post.id)
   // 多步写必须整体成败:删一半崩了会留半条动态(外键级联也依赖 posts 删除本身)
   db.exec('BEGIN')
   try {
@@ -530,7 +595,9 @@ app.delete('/api/posts/:id', requireAuth, async (c) => {
     db.exec('ROLLBACK')
     throw e
   }
-  for (const img of imgs) await removeImageFile(img.filename, img.storage)
+  for (const img of imgs) {
+    if (!isReferenced(img.filename)) await deleteImage(img.filename, img.storage, img.storage_path || img.filename).catch(() => {})
+  }
   return c.json({ ok: true })
 })
 
@@ -760,6 +827,7 @@ app.post('/api/storage/webdav/test', requireAuth, async (c) => {
 })
 
 app.route('/api/llm', llmApp)
+app.route('/api/image-jobs', imageJobsApp)
 
 // ---------- 图片文件与静态资源 ----------
 
@@ -787,12 +855,12 @@ app.get('/uploads/:name', async (c) => {
     const allowed = db.prepare('SELECT 1 FROM images i JOIN posts p ON p.id = i.post_id WHERE i.filename = ? AND p.public_images = 1 LIMIT 1').get(name)
     if (!allowed) return c.json({ error: '请先登录' }, 401)
   }
-  const row = db.prepare('SELECT storage FROM images WHERE filename = ? LIMIT 1').get(name)
+  const row = db.prepare('SELECT storage, storage_path FROM images WHERE filename = ? LIMIT 1').get(name)
   const backend = row ? row.storage : LOCAL
   // 历史 onedrive 等已失效后端:代码移除后无法再读,按不存在处理
   if (backend !== LOCAL && backend !== WEBDAV) return c.text('Not Found', 404)
   try {
-    const buf = await getImage(name, backend)
+    const buf = await getImage(name, backend, row?.storage_path || name)
     return c.body(buf, 200, {
       'Content-Type': MIME_BY_EXT[path.extname(name)],
       'Cache-Control': 'private, max-age=31536000, immutable',

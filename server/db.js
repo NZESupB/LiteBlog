@@ -3,8 +3,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
 import path from 'node:path'
+import { configValue, PROJECT_ROOT } from './config.js'
 
-export const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data')
+const configuredDataDir = String(configValue('server.dataDir', 'data'))
+export const DATA_DIR = path.isAbsolute(configuredDataDir) ? path.resolve(configuredDataDir) : path.resolve(PROJECT_ROOT, configuredDataDir)
 export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads')
 export const AVATAR_DIR = path.join(DATA_DIR, 'avatars')
 mkdirSync(UPLOAD_DIR, { recursive: true })
@@ -37,7 +39,8 @@ db.exec(`
     filename TEXT NOT NULL,
     sort     INTEGER NOT NULL DEFAULT 0,
     storage  TEXT NOT NULL DEFAULT 'local',
-    hash     TEXT NOT NULL DEFAULT ''
+    hash     TEXT NOT NULL DEFAULT '',
+    storage_path TEXT NOT NULL DEFAULT ''
   );
   -- 已传到存储后端但还没归属任何动态的图片(选图即上传),发布时转入 images
   CREATE TABLE IF NOT EXISTS pending_uploads (
@@ -45,6 +48,8 @@ db.exec(`
     hash       TEXT NOT NULL,
     storage    TEXT NOT NULL,
     user_id    INTEGER NOT NULL REFERENCES users(id),
+    draft_id   TEXT,
+    storage_path TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
@@ -86,6 +91,34 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
+  CREATE TABLE IF NOT EXISTS drafts (
+    id         TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    post_id    INTEGER,
+    status     TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_drafts_user ON drafts(user_id, status);
+  CREATE TABLE IF NOT EXISTS image_jobs (
+    id           TEXT PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    draft_id     TEXT,
+    prompt_hash  TEXT NOT NULL,
+    prompt       TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'queued',
+    filename     TEXT,
+    storage      TEXT,
+    storage_path TEXT,
+    mime         TEXT,
+    hash         TEXT,
+    error        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at  TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_image_jobs_user ON image_jobs(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_image_jobs_draft ON image_jobs(draft_id, status);
 `)
 
 // 旧库迁移:早期 users.name 同时承担登录账号和显示名称,先复制为 username
@@ -112,6 +145,19 @@ if (!db.prepare('PRAGMA table_info(images)').all().some((col) => col.name === 'h
   db.exec("UPDATE images SET hash = substr(filename, 1, 16)")
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_images_hash ON images(hash)')
+if (!db.prepare('PRAGMA table_info(images)').all().some((col) => col.name === 'storage_path')) {
+  db.exec("ALTER TABLE images ADD COLUMN storage_path TEXT NOT NULL DEFAULT ''")
+}
+
+const pendingColumns = db.prepare('PRAGMA table_info(pending_uploads)').all()
+if (!pendingColumns.some((col) => col.name === 'draft_id')) {
+  db.exec('ALTER TABLE pending_uploads ADD COLUMN draft_id TEXT')
+}
+if (!pendingColumns.some((col) => col.name === 'storage_path')) {
+  db.exec("ALTER TABLE pending_uploads ADD COLUMN storage_path TEXT NOT NULL DEFAULT ''")
+}
+db.exec("UPDATE images SET storage_path = filename WHERE trim(storage_path) = ''")
+db.exec("UPDATE pending_uploads SET storage_path = filename WHERE trim(storage_path) = ''")
 
 // 旧库补列:私密模式下按文章单独控制「公开正文」「公开图片」,默认都不公开
 const postColumns = db.prepare('PRAGMA table_info(posts)').all()

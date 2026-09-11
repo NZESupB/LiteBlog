@@ -9,7 +9,6 @@ RUN npm ci --omit=dev --no-fund --no-audit
 COPY server ./server
 COPY public ./public
 
-ENV NODE_ENV=production
 EXPOSE 3000
 
 # 数据(SQLite + 上传图片)全部落在 /app/data,部署时挂载卷
