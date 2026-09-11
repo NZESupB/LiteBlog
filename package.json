@@ -1,6 +1,6 @@
 {
   "name": "couple-blog",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "情侣日常记录博客,轻量自托管",
