@@ -18,5 +18,9 @@ Thumbs.db
 .env
 .agentdocs
 
+# 代理工具配置与项目 skill,只留在本地,不进仓库
+.claude/
+.agents/
+
 # 部署机本地复制模板后生成,不得被上传覆盖
 docker-compose.yml

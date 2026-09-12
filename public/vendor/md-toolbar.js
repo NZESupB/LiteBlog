@@ -1,5 +1,6 @@
 // Markdown 工具栏(自实现,零依赖)
 // 通过 data-md 声明操作类型;选区包裹/行前缀/光标处插入,尽量保留撤销栈(execCommand),失败回退 setRangeText
+import { animatePresence } from '/js/sheet-motion.js'
 const $ = (s, el) => el.querySelector(s)
 
 // 在保留原生撤销栈的前提下替换选区内容;不支持时回退 setRangeText
@@ -84,9 +85,14 @@ const EMOJIS = '😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉
 let emojiPanel = null
 // 表情面板:textarea 与单行 input 通用,trigger 为触发按钮(再次点击收起、点击面板外关闭)
 function toggleEmojiPanel(ta, trigger) {
-  if (emojiPanel && emojiPanel.isConnected) { emojiPanel.remove(); emojiPanel = null; return }
+  if (emojiPanel && emojiPanel.isConnected) {
+    emojiPanel._close?.()
+    emojiPanel = null
+    return
+  }
   const panel = document.createElement('div')
   panel.className = 'emoji-panel'
+  panel.hidden = true
   panel.innerHTML = `<div class="emoji-grid">${EMOJIS.map((e) => `<button type="button" class="emoji-btn">${e}</button>`).join('')}</div>`
   panel.addEventListener('click', (ev) => {
     const btn = ev.target.closest('.emoji-btn')
@@ -97,15 +103,20 @@ function toggleEmojiPanel(ta, trigger) {
     ta.focus()
   })
   // 关闭面板:点击面板外部时移除
-  const closer = (e) => {
-    if (panel.contains(e.target) || (trigger && trigger.contains(e.target))) return
-    panel.remove()
-    emojiPanel = null
+  const closePanel = () => {
+    animatePresence(panel, false, { className: 'panel-presence', duration: 180, remove: true })
+    if (emojiPanel === panel) emojiPanel = null
     document.removeEventListener('click', closer)
   }
+  const closer = (e) => {
+    if (panel.contains(e.target) || (trigger && trigger.contains(e.target))) return
+    closePanel()
+  }
+  panel._close = closePanel
   setTimeout(() => document.addEventListener('click', closer), 0)
   ta.parentElement.insertBefore(panel, ta)
   emojiPanel = panel
+  animatePresence(panel, true, { className: 'panel-presence', duration: 180 })
 }
 
 // 给任意输入框挂表情按钮(评论框等,不带完整 Markdown 工具栏时用)

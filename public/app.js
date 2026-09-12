@@ -1,7 +1,7 @@
 // 前端逻辑:hash 路由 + 时间轴 / 相册 / 登录 / 账号 / 设置视图
 import { attachMdToolbar, attachEmojiButton } from '/vendor/md-toolbar.js'
 import { icon } from '/vendor/icons.js'
-import { attachSheetMotion } from '/js/sheet-motion.js'
+import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
 import { attachComposerViewport } from '/js/composer-viewport.js'
 import { api, streamSse, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 const $ = (sel, el = document) => el.querySelector(sel)
@@ -22,6 +22,8 @@ let activePostMenu = null
 let serviceWorkerRegistration = null
 const SERVICE_WORKER_READY_TIMEOUT_MS = 5000
 let dayProgressTimer = null
+let hasRenderedView = false
+let pageTransitionToken = 0
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (event) => {
@@ -29,11 +31,12 @@ if ('serviceWorker' in navigator) {
   })
 }
 
-function closePostMenu() {
+function closePostMenu(immediate = false) {
   if (!activePostMenu) return
-  activePostMenu.menu.hidden = true
-  activePostMenu.button.setAttribute('aria-expanded', 'false')
+  const current = activePostMenu
   activePostMenu = null
+  current.button.setAttribute('aria-expanded', 'false')
+  animatePresence(current.menu, false, { className: 'menu-presence', duration: 180, immediate })
 }
 
 document.addEventListener('click', (event) => {
@@ -47,11 +50,11 @@ document.addEventListener('keydown', (event) => {
 // 下拉菜单(评论通知铃铛 / 用户菜单)的「点外部关闭」只在模块级注册一次:
 // 之前在每次渲染时各自注册 document 监听,重新渲染一次就叠加一份,永不释放
 // 铃铛与头像按钮各自 stopPropagation,不会走到这里,所以打开前还要显式收起另一个(见 closeDropdowns)
-function closeDropdowns(except = null) {
+function closeDropdowns(except = null, immediate = false) {
   document.querySelectorAll('.dropdown:not([hidden])').forEach((drop) => {
     if (drop === except) return
-    drop.hidden = true
     drop.parentElement?.querySelector(':scope > button')?.setAttribute('aria-expanded', 'false')
+    animatePresence(drop, false, { className: 'menu-presence', duration: 180, immediate })
   })
 }
 document.addEventListener('click', () => closeDropdowns())
@@ -136,18 +139,34 @@ function startDayProgress() {
 }
 
 let toastTimer = null
+let activeToast = null
+function dismissToast(toast = activeToast, immediate = false) {
+  if (!toast) return
+  if (toast === activeToast) activeToast = null
+  clearTimeout(toast._toastTimer)
+  animatePresence(toast, false, {
+    className: 'toast-presence',
+    duration: 220,
+    remove: true,
+    immediate,
+  })
+}
 function showToast(message, action = null) {
-  document.querySelector('.toast')?.remove()
+  dismissToast(document.querySelector('.toast'), true)
   const toast = el('<div class="toast" role="status"><span class="toast-message"></span></div>')
   $('.toast-message', toast).textContent = message
   if (action) {
     const button = el('<button type="button" class="toast-action">查看</button>')
-    button.onclick = () => { action(); toast.remove() }
+    button.onclick = () => { action(); dismissToast(toast) }
     toast.appendChild(button)
   }
+  toast.hidden = true
   document.body.appendChild(toast)
+  animatePresence(toast, true, { className: 'toast-presence', duration: 220 })
   clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => toast.remove(), action ? 6000 : 2600)
+  toast._toastTimer = setTimeout(() => dismissToast(toast), action ? 6000 : 2600)
+  toastTimer = toast._toastTimer
+  activeToast = toast
 }
 
 function newDraftId() {
@@ -354,12 +373,20 @@ function observeViewport(target, onChange, options) {
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
   activeComposerModal?.close?.(true)
-  closePostMenu()
+  closeLightbox(true)
+  closePostMenu(true)
+  closeDropdowns(null, true)
   revealObserver.disconnect()
   for (const observer of timelineObservers) observer.disconnect()
   timelineObservers = []
   main.innerHTML = ''
   main.className = 'container'
+  if (hasRenderedView) {
+    main.classList.add('page-enter')
+    const token = ++pageTransitionToken
+    setTimeout(() => { if (token === pageTransitionToken) main.classList.remove('page-enter') }, 520)
+  }
+  hasRenderedView = true
 }
 
 function emptyJournal(title, description, image = false) {
@@ -425,26 +452,158 @@ async function compressImage(file) {
 const lightbox = $('#lightbox')
 let lbUrls = []
 let lbIndex = 0
+let lbTrigger = null
+let lbMotionToken = 0
+let lbSwitchToken = 0
 
-function openLightbox(urls, index) {
+const reducedMotion = () => Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
+const wait = (duration) => new Promise((resolve) => setTimeout(resolve, duration))
+function waitForImage(image, url) {
+  image.src = url
+  if (image.complete && image.naturalWidth) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = () => { image.removeEventListener('load', done); image.removeEventListener('error', done); resolve() }
+    image.addEventListener('load', done)
+    image.addEventListener('error', done)
+  })
+}
+function preloadImage(url) {
+  const image = new Image()
+  image.src = url
+  if (image.complete && image.naturalWidth) return Promise.resolve()
+  return new Promise((resolve) => {
+    image.onload = resolve
+    image.onerror = resolve
+  })
+}
+function measureLightboxImage(image) {
+  const transform = image.style.transform
+  const transition = image.style.transition
+  image.style.transition = 'none'
+  image.style.transform = 'none'
+  const rect = image.getBoundingClientRect()
+  image.style.transform = transform
+  image.style.transition = transition
+  return rect
+}
+function transformToRect(from, to) {
+  if (!from || !to || !to.width || !to.height) return 'translateY(12px) scale(.98)'
+  const scaleX = Math.max(.01, from.width / to.width)
+  const scaleY = Math.max(.01, from.height / to.height)
+  const x = from.left + from.width / 2 - (to.left + to.width / 2)
+  const y = from.top + from.height / 2 - (to.top + to.height / 2)
+  return `translate(${x}px, ${y}px) scale(${scaleX}, ${scaleY})`
+}
+function setLightboxImageTransition(image, enabled = true) {
+  image.style.transition = enabled && !reducedMotion()
+    ? 'transform var(--motion-spring-duration) var(--motion-ease), opacity var(--motion-standard-duration) var(--motion-ease)'
+    : 'none'
+}
+function startLightboxOpen(origin, token) {
+  const image = $('#lightboxImg')
+  if (token !== lbMotionToken || lightbox.hidden) return
+  const target = measureLightboxImage(image)
+  const source = origin?.isConnected ? origin.getBoundingClientRect() : null
+  image.style.transition = 'none'
+  image.style.transform = transformToRect(source, target)
+  image.style.opacity = source ? '.01' : '0'
+  if (reducedMotion()) {
+    image.style.transform = 'none'
+    image.style.opacity = '1'
+    return
+  }
+  void image.offsetWidth
+  setLightboxImageTransition(image)
+  requestAnimationFrame(() => {
+    if (token !== lbMotionToken || lightbox.hidden) return
+    image.style.transform = 'none'
+    image.style.opacity = '1'
+  })
+}
+
+function openLightbox(urls, index, trigger = null) {
+  if (!Array.isArray(urls) || !urls.length) return
   lbUrls = urls
-  lbIndex = index
-  $('#lightboxImg').src = lbUrls[lbIndex]
+  lbIndex = Math.max(0, Math.min(urls.length - 1, index))
+  const source = trigger instanceof Element ? trigger : null
+  lbTrigger = source?.closest('button, a') || source
+  const token = ++lbMotionToken
+  ++lbSwitchToken
   lightbox.hidden = false
+  const image = $('#lightboxImg')
+  void waitForImage(image, lbUrls[lbIndex]).then(() => startLightboxOpen(lbTrigger, token))
+  animatePresence(lightbox, true, { className: 'lightbox-presence', duration: 220 })
 }
-function lbMove(step) {
-  lbIndex = (lbIndex + step + lbUrls.length) % lbUrls.length
-  $('#lightboxImg').src = lbUrls[lbIndex]
+
+function closeLightbox(immediate = false) {
+  if (lightbox.hidden) return
+  const token = ++lbMotionToken
+  ++lbSwitchToken
+  const image = $('#lightboxImg')
+  const returnFocus = lbTrigger
+  const target = lbTrigger?.isConnected ? lbTrigger.getBoundingClientRect() : null
+  const current = measureLightboxImage(image)
+  const targetTransform = transformToRect(target, current)
+  setLightboxImageTransition(image, !(immediate || reducedMotion()))
+  image.style.transform = targetTransform
+  image.style.opacity = target ? '.01' : '0'
+  const closing = animatePresence(lightbox, false, {
+    className: 'lightbox-presence',
+    duration: 340,
+    immediate: immediate || reducedMotion(),
+  })
+  Promise.resolve(closing).then(() => {
+    if (token !== lbMotionToken) return
+    image.style.transform = ''
+    image.style.opacity = ''
+    image.style.transition = ''
+    returnFocus?.focus?.({ preventScroll: true })
+    lbTrigger = null
+  })
 }
-$('.lb-close').onclick = () => (lightbox.hidden = true)
-$('.lb-prev').onclick = () => lbMove(-1)
-$('.lb-next').onclick = () => lbMove(1)
-lightbox.onclick = (e) => { if (e.target === lightbox) lightbox.hidden = true }
+
+async function lbMove(step) {
+  if (!lbUrls.length || lightbox.hidden) return
+  const nextIndex = (lbIndex + step + lbUrls.length) % lbUrls.length
+  const url = lbUrls[nextIndex]
+  const token = ++lbSwitchToken
+  await preloadImage(url)
+  if (token !== lbSwitchToken || lightbox.hidden) return
+  const image = $('#lightboxImg')
+  if (reducedMotion()) {
+    lbIndex = nextIndex
+    await waitForImage(image, url)
+    return
+  }
+  const direction = step > 0 ? 1 : -1
+  setLightboxImageTransition(image)
+  image.style.opacity = '0'
+  image.style.transform = `translateX(${direction * 14}px) scale(.985)`
+  await wait(140)
+  if (token !== lbSwitchToken || lightbox.hidden) return
+  lbIndex = nextIndex
+  await waitForImage(image, url)
+  if (token !== lbSwitchToken || lightbox.hidden) return
+  image.style.transition = 'none'
+  image.style.transform = `translateX(${-direction * 14}px) scale(.985)`
+  image.style.opacity = '0'
+  void image.offsetWidth
+  setLightboxImageTransition(image)
+  requestAnimationFrame(() => {
+    if (token !== lbSwitchToken || lightbox.hidden) return
+    image.style.transform = 'none'
+    image.style.opacity = '1'
+  })
+}
+$('.lb-close').onclick = () => closeLightbox()
+$('.lb-prev').onclick = () => { void lbMove(-1) }
+$('.lb-next').onclick = () => { void lbMove(1) }
+lightbox.onclick = (e) => { if (e.target === lightbox) closeLightbox() }
 document.addEventListener('keydown', (e) => {
   if (lightbox.hidden) return
-  if (e.key === 'Escape') lightbox.hidden = true
-  if (e.key === 'ArrowLeft') lbMove(-1)
-  if (e.key === 'ArrowRight') lbMove(1)
+  if (e.key === 'Escape') closeLightbox()
+  if (e.key === 'ArrowLeft') { e.preventDefault(); void lbMove(-1) }
+  if (e.key === 'ArrowRight') { e.preventDefault(); void lbMove(1) }
 })
 
 // ---------- 发布 / 编辑组件 ----------
@@ -595,7 +754,7 @@ function createComposer(post, draftId, onDone, onCancel) {
   function closeCompare() {
     polishAbort?.abort()
     polishAbort = null
-    compare.hidden = true
+    animatePresence(compare, false, { className: 'panel-presence', duration: 200 })
     setPolishState(false)
   }
 
@@ -606,7 +765,7 @@ function createComposer(post, draftId, onDone, onCancel) {
     originPane.textContent = text
     resultPane.textContent = ''
     polishResult = ''
-    compare.hidden = false
+    animatePresence(compare, true, { className: 'panel-presence', duration: 200 })
     statusEl.textContent = '生成中…'
     polishAbort = new AbortController()
     setPolishState(true)
@@ -621,13 +780,13 @@ function createComposer(post, draftId, onDone, onCancel) {
     } catch (e) {
       if (e.name === 'AbortError') return // 取消由 closeCompare 收尾
       if (e.code === 'LLM_NOT_CONFIGURED') {
-        compare.hidden = true
+        animatePresence(compare, false, { className: 'panel-presence', duration: 200 })
         location.hash = '#/settings'
         return
       }
       statusEl.textContent = ''
       errorLine.textContent = e.message
-      if (!polishResult) { compare.hidden = true }
+      if (!polishResult) animatePresence(compare, false, { className: 'panel-presence', duration: 200 })
     } finally {
       polishAbort = null
       setPolishState(false)
@@ -1012,11 +1171,11 @@ function renderArchive(months, onPick) {
     const month = tick.dataset.month
     bubble.textContent = `${monthTitle(month)} · ${counts.get(month)} 条`
     bubble.style.top = `${tick.getBoundingClientRect().top + tick.getBoundingClientRect().height / 2 - rail.getBoundingClientRect().top}px`
-    bubble.hidden = false
+    animatePresence(bubble, true, { className: 'bubble-presence', duration: 160 })
     for (const t of ticks.values()) t.classList.toggle('hot', t === tick)
   }
   const endDrag = (commit) => {
-    bubble.hidden = true
+    animatePresence(bubble, false, { className: 'bubble-presence', duration: 160 })
     for (const t of ticks.values()) t.classList.remove('hot')
     // 只有真的拖到了别的月份才在这里提交;原地点按交给刻度自身的 click,免得跳两次
     if (commit && dragTo && dragTo !== dragFrom) onPick(dragTo.dataset.month)
@@ -1092,8 +1251,8 @@ function renderComments(p) {
   function openComposer(comment = null) {
     if (!form || !input) return
     setReplyTarget(comment)
-    wrap.hidden = false
-    form.hidden = false
+    animatePresence(wrap, true, { className: 'panel-presence', duration: 200 })
+    animatePresence(form, true, { className: 'panel-presence', duration: 180 })
     input.focus()
   }
 
@@ -1102,10 +1261,10 @@ function renderComments(p) {
     try {
       const { comments } = await api(`/api/posts/${p.id}/comments`)
       if (comments.length === 0) {
-        if (!form || form.hidden) wrap.hidden = true
+        if (!form || form.hidden) animatePresence(wrap, false, { className: 'panel-presence', duration: 200 })
         return
       }
-      wrap.hidden = false
+      animatePresence(wrap, true, { className: 'panel-presence', duration: 200 })
       for (const c of comments) {
         const item = el(`
           <div class="comment">
@@ -1288,7 +1447,7 @@ function renderPost(p) {
   const urls = p.images.map((img) => img.url)
   p.images.forEach((img, i) => {
     const image = el(`<img src="${img.url}" alt="" loading="lazy" />`)
-    image.onclick = () => openLightbox(urls, i)
+    image.onclick = () => openLightbox(urls, i, image)
     grid.appendChild(image)
   })
 
@@ -1299,14 +1458,15 @@ function renderPost(p) {
   const moreBtn = $('.more-btn', card)
   moreBtn.onclick = (e) => {
     e.stopPropagation()
-    if (!menu.hidden) {
+    const isOpen = activePostMenu?.menu === menu && menu.classList.contains('menu-presence-present') && !menu.classList.contains('menu-presence-closing')
+    if (isOpen) {
       closePostMenu()
       return
     }
     closePostMenu()
     activePostMenu = { menu, button: moreBtn }
-    menu.hidden = false
     moreBtn.setAttribute('aria-expanded', 'true')
+    animatePresence(menu, true, { className: 'menu-presence', duration: 180 })
   }
   $('.post-actions', card).append(menu)
   menu.onclick = (e) => e.stopPropagation()
@@ -1467,7 +1627,7 @@ async function renderGallery() {
         <img src="${esc(img.url)}" alt="${esc(caption)}" loading="lazy" />
         <span>${esc(caption)}</span>
       </button>`)
-      photo.onclick = () => openLightbox(urls, i)
+      photo.onclick = () => openLightbox(urls, i, photo)
       grid.appendChild(photo)
     })
     main.appendChild(grid)
@@ -1538,6 +1698,8 @@ async function openAvatarCropper(file, onConfirm, onCancel) {
   let offsetY = 0
   let drag = null
   let closed = false
+  let closing = false
+  let closePromise = null
 
   const clamp = () => {
     const width = image.naturalWidth * baseScale * zoom
@@ -1555,13 +1717,23 @@ async function openAvatarCropper(file, onConfirm, onCancel) {
     ctx.fillRect(0, 0, canvas.width, canvas.height)
     ctx.drawImage(image, 128 + offsetX - width / 2, 128 + offsetY - height / 2, width, height)
   }
-  const cleanup = () => {
-    if (closed) return
-    closed = true
-    URL.revokeObjectURL(objectUrl)
-    overlay.remove()
-    onCancel?.()
+  const finish = (cancel = false) => {
+    if (closed) return Promise.resolve()
+    if (closing) return closePromise || Promise.resolve()
+    closing = true
+    drag = null
+    closePromise = Promise.all([
+      animatePresence(overlay, false, { className: 'overlay-presence', duration: 220, remove: true }),
+      animatePresence($('.avatar-crop-dialog', overlay), false, { className: 'dialog-presence', duration: 260 }),
+    ]).then(() => {
+      if (closed) return
+      closed = true
+      URL.revokeObjectURL(objectUrl)
+      if (cancel) onCancel?.()
+    })
+    return closePromise
   }
+  const cleanup = () => { void finish(true) }
   image.onload = () => {
     baseScale = 256 / Math.min(image.naturalWidth, image.naturalHeight)
     draw()
@@ -1594,9 +1766,7 @@ async function openAvatarCropper(file, onConfirm, onCancel) {
       if (!blob) throw new Error('头像裁剪失败')
       const result = await onConfirm(new File([blob], 'avatar.jpg', { type: 'image/jpeg' }))
       if (result !== false) {
-        closed = true
-        URL.revokeObjectURL(objectUrl)
-        overlay.remove()
+        await finish(false)
       } else {
         confirmButton.disabled = false
       }
@@ -1606,6 +1776,8 @@ async function openAvatarCropper(file, onConfirm, onCancel) {
     }
   }
   document.body.appendChild(overlay)
+  animatePresence(overlay, true, { className: 'overlay-presence', duration: 220 })
+  animatePresence($('.avatar-crop-dialog', overlay), true, { className: 'dialog-presence', duration: 260 })
   requestAnimationFrame(() => confirmButton.focus())
 }
 
@@ -2392,7 +2564,8 @@ function renderNotifyBell() {
           <small>${formatTime(it.created_at)}${it.post_excerpt ? ` · 动态:${esc(it.post_excerpt.slice(0, 20))}` : ''}</small>
         </button>`)
       node.onclick = () => {
-        drop.hidden = true
+        btn.setAttribute('aria-expanded', 'false')
+        animatePresence(drop, false, { className: 'menu-presence', duration: 180 })
         notificationTarget(it.post_id, it.id)
       }
       drop.appendChild(node)
@@ -2401,9 +2574,12 @@ function renderNotifyBell() {
 
   btn.onclick = async (e) => {
     e.stopPropagation()
-    const open = drop.hidden
+    const open = drop.hidden || !drop.classList.contains('menu-presence-present') || drop.classList.contains('menu-presence-closing')
     if (open) {
       closeDropdowns(drop)
+      btn.setAttribute('aria-expanded', 'true')
+      renderList()
+      animatePresence(drop, true, { className: 'menu-presence', duration: 180 })
       const refreshed = await refresh()
       renderList()
       // 打开即视为已读:清角标并推进服务端水位线,列表本次仍保留供点击
@@ -2411,9 +2587,10 @@ function renderNotifyBell() {
         badge.hidden = true
         api('/api/notifications/read', { method: 'POST' }).catch(() => {})
       }
+      return
     }
-    drop.hidden = !open
-    btn.setAttribute('aria-expanded', String(open))
+    btn.setAttribute('aria-expanded', 'false')
+    animatePresence(drop, false, { className: 'menu-presence', duration: 180 })
   }
   drop.onclick = (e) => e.stopPropagation()
 
@@ -2453,10 +2630,10 @@ function renderUserArea() {
   $('.browser-notify-slot', menu).replaceWith(browserNotificationAction())
   btn.onclick = (e) => {
     e.stopPropagation()
-    const open = drop.hidden
+    const open = drop.hidden || !drop.classList.contains('menu-presence-present') || drop.classList.contains('menu-presence-closing')
     if (open) closeDropdowns(drop)
-    drop.hidden = !open
     btn.setAttribute('aria-expanded', String(open))
+    animatePresence(drop, open, { className: 'menu-presence', duration: 180 })
   }
   menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => closeDropdowns()))
   $('.logout', menu).onclick = async () => {

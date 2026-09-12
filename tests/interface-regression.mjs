@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { stepSpring, shouldDismiss, attachSheetMotion } from '../public/js/sheet-motion.js'
+import { stepSpring, shouldDismiss, attachSheetMotion, projectMomentum, createSpringController, animatePresence } from '../public/js/sheet-motion.js'
 
 const source = readFileSync(new URL('../public/js/theme.js', import.meta.url), 'utf8')
 function themeEnvironment(stored, blocked = false) {
@@ -43,6 +43,10 @@ synced.events.dispatchEvent(Object.assign(new Event('storage'), { key: null, new
 assert.equal(synced.theme.current, 'pink')
 
 const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
+assert.match(css, /--motion-standard-duration/)
+assert.match(css, /\.menu-presence-closing/)
+assert.match(css, /\.page-enter/)
+assert.doesNotMatch(css, /@keyframes pop/)
 function tokens(block) {
   return Object.fromEntries([...block.matchAll(/(--[\w-]+):\s*(#[a-f0-9]{6})/g)].map((match) => [match[1], match[2]]))
 }
@@ -75,6 +79,8 @@ assert.ok(interrupted.position > 100, '反向目标先继承原速度，不能�
 assert.equal(shouldDismiss(40, 1400, 500), true, '短距离快速下甩可以收起')
 assert.equal(shouldDismiss(140, -300, 500), false, '向上反拉取消收起')
 assert.equal(shouldDismiss(40, 0, 500), false, '短距离慢拖回位')
+assert.ok(Math.abs(projectMomentum(1000, .99) - 99) < .001)
+assert.equal(projectMomentum(0), 0)
 
 const original = { window: globalThis.window, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, performance: globalThis.performance }
 let time = 0
@@ -110,8 +116,71 @@ function panel() {
   }
   return { motion, dialog, send, get closed() { return closed } }
 }
+function presenceNode() {
+  const names = new Set()
+  return {
+    hidden: true,
+    isConnected: true,
+    removed: false,
+    classList: {
+      add: (...values) => values.forEach((value) => names.add(value)),
+      remove: (...values) => values.forEach((value) => names.delete(value)),
+      contains: (value) => names.has(value),
+    },
+    remove() { this.removed = true; this.isConnected = false },
+    hasClass(value) { return names.has(value) },
+  }
+}
 try {
+  const controllerUpdates = []
+  const controllerRests = []
+  const controller = createSpringController({
+    value: 0,
+    response: .34,
+    reducedMotion: () => reduced,
+    onUpdate: (position, velocity, target) => controllerUpdates.push({ position, velocity, target }),
+    onRest: (target) => controllerRests.push(target),
+  })
+  controller.retarget(120)
+  advance(8)
+  const interruptedPosition = controller.getValue()
+  controller.retarget(-36)
+  assert.ok(controller.getValue() >= interruptedPosition - .001, '重定向从当前 presentation value 继续')
+  advance(120)
+  assert.ok(Math.abs(controller.getValue() + 36) < .001, '重定向最终到达新目标')
+  assert.ok(controllerRests.includes(-36), '重定向完成回调只在目标稳定后触发')
+  assert.ok(controllerUpdates.some((update) => update.target === 120), '控制器持续报告目标与速度')
+  controller.dispose()
+
+  const presence = presenceNode()
+  animatePresence(presence, true, { className: 'test-presence', duration: 20 })
+  advance(1)
+  assert.equal(presence.hidden, false)
+  assert.equal(presence.hasClass('test-presence-present'), true)
+  const closePresence = animatePresence(presence, false, { className: 'test-presence', duration: 1, remove: true })
+  assert.equal(presence.removed, false, '退出动画完成前保留节点')
+  await closePresence
+  assert.equal(presence.removed, true, '退出动画完成后移除节点')
+
+  const interruptedPresence = presenceNode()
+  animatePresence(interruptedPresence, true, { className: 'test-presence', duration: 20 })
+  advance(1)
+  animatePresence(interruptedPresence, false, { className: 'test-presence', duration: 50, remove: true })
+  animatePresence(interruptedPresence, true, { className: 'test-presence', duration: 20 })
+  advance(1)
+  assert.equal(interruptedPresence.removed, false, '重新打开会取消上一段退出')
+  assert.equal(interruptedPresence.hasClass('test-presence-present'), true)
+
+  reduced = true
+  const reducedPresence = presenceNode()
+  animatePresence(reducedPresence, true, { className: 'test-presence', reducedMotion: () => reduced })
+  assert.equal(reducedPresence.hasClass('test-presence-present'), true)
+  animatePresence(reducedPresence, false, { className: 'test-presence', reducedMotion: () => reduced, remove: true })
+  assert.equal(reducedPresence.removed, true, '减少动态立即完成 presence 清理')
+  reduced = false
+
   const first = panel()
+  assert.ok(Number(first.dialog.style.scale) < 1, '面板入场从缩放状态开始')
   advance()
   first.send('pointerdown', 200)
   time += 50
