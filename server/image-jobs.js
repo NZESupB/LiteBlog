@@ -91,6 +91,47 @@ export function draftOwnedBy(userId, draftId) {
   return Boolean(draftForUser(userId, draftId))
 }
 
+function imageReferenced(filename) {
+  return Boolean(db.prepare(
+    'SELECT 1 FROM images WHERE filename = ? OR motion_filename = ? OR poster_filename = ? LIMIT 1',
+  ).get(filename, filename, filename))
+}
+
+// 草稿结束(发布或丢弃)后,清掉用户没有采用的待引用文件。
+// 已挂到动态上的文件会被 images 引用,不会被误删。
+export async function cleanupDraftUploads(userId, draftId) {
+  if (!draftId) return 0
+  const pending = db.prepare('SELECT filename, storage, storage_path FROM pending_uploads WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
+  const jobs = db.prepare('SELECT id, status, filename, storage, storage_path FROM image_jobs WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
+  const unusedJobs = jobs.filter((job) => !job.filename || !imageReferenced(job.filename))
+  for (const job of unusedJobs) {
+    if (['queued', 'running', 'uploading'].includes(job.status)) controllers.get(job.id)?.abort()
+  }
+  db.exec('BEGIN')
+  try {
+    db.prepare('DELETE FROM pending_uploads WHERE user_id = ? AND draft_id = ?').run(userId, draftId)
+    const cancelJob = db.prepare("UPDATE image_jobs SET status = 'cancelled', error = '', updated_at = datetime('now') WHERE id = ? AND status <> 'cancelled'")
+    for (const job of unusedJobs) cancelJob.run(job.id)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+
+  const files = new Map()
+  for (const row of pending) {
+    if (!imageReferenced(row.filename)) files.set(`${row.storage}:${row.storage_path || row.filename}`, row)
+  }
+  for (const job of unusedJobs) {
+    if (!job.filename) continue
+    files.set(`${job.storage}:${job.storage_path || job.filename}`, { filename: job.filename, storage: job.storage, storage_path: job.storage_path })
+  }
+  for (const row of files.values()) {
+    if (!imageReferenced(row.filename)) await deleteImage(row.filename, row.storage, row.storage_path || row.filename).catch(() => {})
+  }
+  return files.size
+}
+
 function updateJob(id, fields) {
   const allowed = ['status', 'filename', 'storage', 'storage_path', 'mime', 'hash', 'error', 'finished_at']
   const entries = Object.entries(fields).filter(([key, value]) => allowed.includes(key) && value !== undefined)
@@ -402,15 +443,7 @@ imageJobsApp.delete('/:id', requireAuth, async (c) => {
 export async function abandonDraft(userId, draftId) {
   const draft = draftForUser(userId, draftId)
   if (!draft) return false
-  const pending = db.prepare('SELECT filename, storage, storage_path FROM pending_uploads WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
-  const activeJobs = db.prepare("SELECT id FROM image_jobs WHERE user_id = ? AND draft_id = ? AND status IN ('queued', 'running', 'uploading')").all(userId, draftId)
-  for (const job of activeJobs) controllers.get(job.id)?.abort()
   db.prepare("UPDATE drafts SET status = 'abandoned', updated_at = datetime('now') WHERE id = ? AND user_id = ?").run(draftId, userId)
-  db.prepare("UPDATE image_jobs SET status = 'cancelled', updated_at = datetime('now') WHERE user_id = ? AND draft_id = ? AND status <> 'cancelled'").run(userId, draftId)
-  db.prepare('DELETE FROM pending_uploads WHERE user_id = ? AND draft_id = ?').run(userId, draftId)
-  for (const row of pending) {
-    const reference = db.prepare('SELECT 1 FROM images WHERE filename = ? LIMIT 1').get(row.filename)
-    if (!reference) await deleteImage(row.filename, row.storage, row.storage_path || row.filename).catch(() => {})
-  }
+  await cleanupDraftUploads(userId, draftId)
   return true
 }

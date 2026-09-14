@@ -15,7 +15,7 @@ import { LOCAL, WEBDAV, activeBackend, putImage, putFileFromTemp, getImage, open
 import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
 import * as webdav from './webdav.js'
 import { llmApp } from './llm.js'
-import { imageJobsApp, ensureDraft, draftOwnedBy, abandonDraft } from './image-jobs.js'
+import { imageJobsApp, ensureDraft, draftOwnedBy, abandonDraft, cleanupDraftUploads } from './image-jobs.js'
 import { configValue } from './config.js'
 
 const PORT = Number(configValue('server.port', 3000)) || 3000
@@ -479,7 +479,50 @@ app.post('/api/uploads', requireAuth, async (c) => {
 
 // 视频上传:原始字节流(不是 multipart),先流式落到 data/tmp 临时文件并边写边算 sha256、边校验上限,
 // 再转存到当前激活的存储后端。全程不把视频读进内存 —— 200MB 的片段读进内存会直接压垮最低配 VPS。
+// 服务器接收完成即先回 202;WebDAV 转存在后台继续,前端轮询状态,避免反向代理把长转存请求截成 504。
+const videoUploadJobs = new Map()
+const VIDEO_UPLOAD_RETENTION_MS = 60 * 60 * 1000
+function cleanupVideoUploadJobs() {
+  const now = Date.now()
+  for (const [id, job] of videoUploadJobs) {
+    if (job.status !== 'saving' && job.expiresAt <= now) videoUploadJobs.delete(id)
+  }
+}
+
+function videoUploadView(job) {
+  const view = { uploadId: job.id, status: job.status, size: job.size }
+  if (job.status === 'done' && job.filename) {
+    view.filename = job.filename
+    view.url = `/uploads/${job.filename}`
+  }
+  if (job.error) view.error = job.error
+  return view
+}
+
+async function persistVideoUpload(job) {
+  let storage = null
+  try {
+    storage = await putFileFromTemp(job.filename, job.tempPath, job.size, job.contentType, job.filename)
+    db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
+                storage_path = excluded.storage_path, created_at = datetime('now')`)
+      .run(job.filename, job.hash, storage, job.userId, job.draftId, job.filename)
+    await unlink(job.tempPath).catch(() => {})
+    job.storage = storage
+    job.status = 'done'
+    job.expiresAt = Date.now() + VIDEO_UPLOAD_RETENTION_MS
+  } catch (error) {
+    if (storage) await deleteImage(job.filename, storage, job.filename).catch(() => {})
+    await unlink(job.tempPath).catch(() => {})
+    job.status = 'failed'
+    job.error = error.message
+    job.expiresAt = Date.now() + VIDEO_UPLOAD_RETENTION_MS
+    console.warn(`转存视频 ${job.filename} 失败: ${error.message}`)
+  }
+}
+
 app.post('/api/uploads/video', requireAuth, async (c) => {
+  cleanupVideoUploadJobs()
   const draftId = String(c.req.query('draftId') || '').trim() || null
   if (draftId && !draftOwnedBy(c.get('user').id, draftId)) return c.json({ error: '草稿不存在或无权操作' }, 403)
   const contentType = String(c.req.header('content-type') || '').split(';')[0].trim().toLowerCase()
@@ -523,19 +566,29 @@ app.post('/api/uploads/video', requireAuth, async (c) => {
   // 视频不参与内容去重(文件名里放随机段),hash 仍记下来供以后排查与迁移使用
   const digest = hash.digest('hex')
   const filename = stampedName(randomBytes(8).toString('hex'), ext)
-  let storage
-  try {
-    storage = await putFileFromTemp(filename, tempPath, size, contentType, filename)
-  } catch (e) {
-    await unlink(tempPath).catch(() => {})
-    console.warn(`转存视频 ${filename} 失败: ${e.message}`)
-    return c.json({ error: e.message }, 502)
+  const id = randomUUID()
+  const job = {
+    id,
+    userId: c.get('user').id,
+    draftId,
+    filename,
+    tempPath,
+    size,
+    hash: digest,
+    contentType,
+    status: 'saving',
+    expiresAt: Date.now() + VIDEO_UPLOAD_RETENTION_MS,
   }
-  db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
-              storage_path = excluded.storage_path, created_at = datetime('now')`)
-    .run(filename, digest, storage, c.get('user').id, draftId, filename)
-  return c.json({ filename, url: `/uploads/${filename}`, size })
+  videoUploadJobs.set(id, job)
+  void persistVideoUpload(job)
+  return c.json(videoUploadView(job), 202)
+})
+
+app.get('/api/uploads/video/:id', requireAuth, (c) => {
+  cleanupVideoUploadJobs()
+  const job = videoUploadJobs.get(c.req.param('id'))
+  if (!job || job.userId !== c.get('user').id) return c.json({ error: '上传任务不存在或已过期' }, 404)
+  return c.json(videoUploadView(job))
 })
 
 // 编辑框里点 × 撤掉还没发布的图:连带把网盘上的文件删掉。幂等
@@ -647,6 +700,7 @@ app.post('/api/posts', requireAuth, async (c) => {
     db.exec('ROLLBACK')
     throw e
   }
+  if (draftId) await cleanupDraftUploads(c.get('user').id, draftId).catch((e) => console.warn(`清理未采用草稿媒体失败: ${e.message}`))
   return c.json({ id: Number(postId) })
 })
 
@@ -703,6 +757,7 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
     throw e
   }
   for (const img of removed) await removeMediaFiles(img)
+  if (draftId) await cleanupDraftUploads(c.get('user').id, draftId).catch((e) => console.warn(`清理未采用草稿媒体失败: ${e.message}`))
   return c.json({ ok: true })
 })
 

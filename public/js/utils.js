@@ -51,6 +51,50 @@ export async function streamSse(path, body, onEvent, signal) {
   }
 }
 
+// 原始字节上传:XMLHttpRequest 的 upload.progress 才能拿浏览器到服务器的实时字节数。
+export function uploadWithProgress(path, body, { headers = {}, onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    let settled = false
+    const cleanup = () => signal?.removeEventListener('abort', abort)
+    const finish = (callback, value) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      callback(value)
+    }
+    const abort = () => xhr.abort()
+    if (signal?.aborted) {
+      reject(new DOMException('上传已取消', 'AbortError'))
+      return
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    xhr.open('POST', path)
+    for (const [key, value] of Object.entries(headers)) xhr.setRequestHeader(key, value)
+    xhr.upload.onprogress = (event) => {
+      onProgress?.({
+        loaded: event.loaded,
+        total: event.lengthComputable ? event.total : (body?.size || 0),
+      })
+    }
+    xhr.onload = () => {
+      let data = {}
+      try { data = JSON.parse(xhr.responseText || '{}') } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) finish(resolve, data)
+      else finish(reject, new Error(data.error || data.message || `上传失败 (${xhr.status})`))
+    }
+    xhr.onerror = () => finish(reject, new Error('上传连接中断，请重试'))
+    xhr.onabort = () => finish(reject, new DOMException('上传已取消', 'AbortError'))
+    xhr.send(body)
+  })
+}
+
+export function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0)
+  const mb = value / 1024 / 1024
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)}MB`
+}
+
 export function el(html) {
   const t = document.createElement('template')
   t.innerHTML = html.trim()

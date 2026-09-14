@@ -58,6 +58,10 @@ assert.match(css, /--motion-standard-duration/)
 assert.match(css, /\.menu-presence-closing/)
 assert.match(css, /\.page-enter/)
 assert.doesNotMatch(css, /@keyframes pop/)
+assert.match(css, /\.comment-reply-state\[hidden\] \{ display: none; \}/)
+assert.match(css, /\.comment-form\[hidden\] \{ display: none; \}/)
+assert.match(css, /@keyframes day-progress-sheen/)
+assert.match(css, /\.day-progress-fill \{[\s\S]*?transform: scaleX\(var\(--day-progress\)\)/)
 function tokens(block) {
   return Object.fromEntries([...block.matchAll(/(--[\w-]+):\s*(#[a-f0-9]{6})/g)].map((match) => [match[1], match[2]]))
 }

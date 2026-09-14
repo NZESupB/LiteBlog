@@ -71,11 +71,26 @@ try {
   async function uploadVideo(bytes, type = 'video/mp4', draft = draftId) {
     const res = await request(`/api/uploads/video?draftId=${draft}`, { method: 'POST', body: bytes, headers: { 'Content-Type': type } })
     const text = await res.text()
-    assert.equal(res.status, 200, text)
-    return JSON.parse(text).filename
+    assert.equal(res.status, 202, text)
+    const task = JSON.parse(text)
+    assert.equal(task.status, 'saving')
+    assert.equal(task.size, bytes.length)
+    for (let i = 0; i < 200; i++) {
+      await new Promise((resolve) => setImmediate(resolve))
+      const stateRes = await request(`/api/uploads/video/${task.uploadId}`)
+      const stateText = await stateRes.text()
+      assert.equal(stateRes.status, 200, stateText)
+      const state = JSON.parse(stateText)
+      if (state.status === 'failed') assert.fail(state.error || '视频保存失败')
+      if (state.status === 'done') {
+        assert.equal(state.size, bytes.length)
+        return state.filename
+      }
+    }
+    assert.fail('视频后台保存未结束')
   }
 
-  // 视频:内容不参与去重(同名随机段),上传后立刻可从 /uploads 读到
+  // 视频:内容不参与去重(同名随机段),后台保存完成后可从 /uploads 读到
   const videoBytes = new Uint8Array(1000).map((_, i) => (i * 7) % 251)
   const videoName = await uploadVideo(videoBytes)
   assert.match(videoName, /^\d{8}-\d{6}-[a-f0-9]{8}\.mp4$/)
@@ -196,14 +211,11 @@ try {
 
   // 上传到别的草稿/别的账号的视频不能被我挂到自己的动态上
   const otherDraft = 'media-regression-other'
-  await request('/api/drafts', { method: 'POST', body: { id: otherDraft } })
   const user2 = await request('/api/login', { method: 'POST', body: { username: 'user2', password: 'pass2' } })
   const user1Cookie = cookie
   cookie = user2.headers.get('set-cookie').split(';')[0]
-  const foreign = await request(`/api/uploads/video?draftId=${otherDraft}`, {
-    method: 'POST', body: videoBytes, headers: { 'Content-Type': 'video/mp4' },
-  })
-  const foreignName = (await foreign.json()).filename
+  await request('/api/drafts', { method: 'POST', body: { id: otherDraft } })
+  const foreignName = await uploadVideo(videoBytes, 'video/mp4', otherDraft)
   cookie = user1Cookie
   const hijack = await request('/api/posts', { method: 'POST', body: { content: 'x', images: [foreignName] } })
   assert.equal(hijack.status, 400)

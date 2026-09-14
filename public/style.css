@@ -174,13 +174,31 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible), input:focus:not(:
 .days strong { font-size: var(--fs-footnote); font-weight: 700; color: var(--accent-deep); }
 /* 作者样式的 display 会压过 UA 的 [hidden],凡给类写了 display 又要靠 hidden 收起的都要补这条 */
 .days[hidden] { display: none; }
-.day-progress { width: 64px; height: 3px; border-radius: var(--radius-pill); background: var(--fill-strong); overflow: hidden; }
-.day-progress-fill {
-  display: block; height: 100%; width: 0;
-  border-radius: inherit; background: var(--accent);
-  transition: width var(--motion-standard-duration) var(--motion-ease);
+.day-progress {
+  --day-progress: 0;
+  position: relative; width: clamp(92px, 10vw, 118px); height: 6px; border-radius: var(--radius-pill);
+  background: var(--fill-strong); overflow: hidden;
+  box-shadow: inset 0 1px 2px rgba(48, 30, 38, .12), inset 0 0 0 1px rgba(255, 255, 255, .25);
 }
-.day-progress-fill::after { content: none; }
+.day-progress-fill {
+  position: relative; display: block; height: 100%; width: 100%;
+  border-radius: inherit; overflow: hidden;
+  background: linear-gradient(90deg, var(--accent), var(--accent-deep));
+  box-shadow: 0 0 12px var(--accent-wash);
+  transform: scaleX(var(--day-progress)); transform-origin: left center;
+  transition: transform 1s linear;
+  will-change: transform;
+}
+.day-progress-fill::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(105deg, transparent 18%, rgba(255, 255, 255, .62) 46%, transparent 72%);
+  transform: translateX(-130%);
+  animation: day-progress-sheen 3.6s var(--motion-ease) infinite;
+}
+@keyframes day-progress-sheen {
+  0%, 32% { transform: translateX(-130%); }
+  62%, 100% { transform: translateX(130%); }
+}
 
 .site-nav { margin-left: auto; display: flex; align-items: center; gap: 14px; flex-shrink: 0; font-size: var(--fs-footnote); }
 .nav-segments { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border-radius: var(--radius-pill); background: var(--fill); }
@@ -507,6 +525,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .comment-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
 .comment-actions button { padding: 0; background: none; border: 0; color: var(--muted); font-size: var(--fs-caption); transition: color var(--motion-fast-duration) var(--motion-ease); }
 .comment-actions button:hover { color: var(--accent-deep); }
+.comment-form[hidden] { display: none; }
 .comment-form { display: flex; align-items: flex-end; gap: 8px; margin-top: 14px; }
 .comment-input { flex: 1; min-height: 38px; resize: none; padding: 9px 12px; border-radius: var(--radius-lg); }
 .comment-form .emoji-toggle, .emoji-btn {
@@ -515,6 +534,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
   transition: background var(--motion-fast-duration) var(--motion-ease), color var(--motion-fast-duration) var(--motion-ease);
 }
 .comment-form .emoji-toggle:hover, .emoji-btn:hover { background: var(--fill-strong); color: var(--ink); }
+.comment-reply-state[hidden] { display: none; }
 .comment-reply-state { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 7px 12px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent-deep); font-size: var(--fs-caption); }
 .comment-reply-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .comment-reply-cancel { border: 0; background: none; color: inherit; font-size: var(--fs-caption); text-decoration: underline; }

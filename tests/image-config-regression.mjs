@@ -140,7 +140,15 @@ try {
   assert.equal(generation().key, 'Bearer shared-key')
   assert.equal(JSON.parse(generation().body).model, 'flux-image-pro', '切回共享后使用该作者此前选择的共享模型')
   assert.equal((await config(1)).custom.hasApiKey, true)
-  console.log('通过：默认共享、旧配置兼容、双人独立隔离、空 Key 保留、候选测试不落库、密钥不回显、模型按人选择、生成与重试来源。')
+
+  const unused = await generate(1, '生成但发布时不采用')
+  const cleanupStart = calls.length
+  const published = await request(1, 'posts', 'POST', { draftId: 'draft-1', content: '发布正文但不采用 AI 配图' })
+  assert.equal(published.status, 200)
+  const { task: cleaned } = await (await request(1, `image-jobs/${unused.id}`)).json()
+  assert.equal(cleaned.status, 'cancelled')
+  assert.ok(calls.slice(cleanupStart).some((call) => call.method === 'DELETE' && call.url.endsWith(`/ai-generated/${unused.filename}`)), '发布后未采用的 AI 配图要从 WebDAV 删除')
+  console.log('通过：默认共享、旧配置兼容、双人独立隔离、空 Key 保留、候选测试不落库、密钥不回显、模型按人选择、生成与重试来源、未采用配图清理。')
 } finally {
   globalThis.fetch = originalFetch
   db?.close()

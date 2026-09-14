@@ -3,7 +3,7 @@ import { attachMdToolbar, attachEmojiButton } from '/vendor/md-toolbar.js'
 import { icon } from '/vendor/icons.js'
 import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
 import { attachComposerViewport } from '/js/composer-viewport.js'
-import { api, streamSse, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
+import { api, streamSse, uploadWithProgress, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
 import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration, videoContentType } from '/js/media.js'
 const $ = (sel, el = document) => el.querySelector(sel)
@@ -127,7 +127,7 @@ function updateDayProgress() {
   const minutes = remainingMinutes % 60
   const remaining = hours ? `${hours}小时${minutes}分钟` : `${minutes}分钟`
   const progressBar = $('.day-progress', daysEl)
-  $('.day-progress-fill', daysEl).style.width = `${(progress * 100).toFixed(2)}%`
+  progressBar.style.setProperty('--day-progress', progress.toFixed(6))
   progressBar.setAttribute('aria-valuenow', String(percent))
   progressBar.setAttribute('aria-valuetext', `距离下一天还有${remaining}`)
   daysEl.hidden = false
@@ -656,6 +656,7 @@ function createComposer(post, draftId, onDone, onCancel) {
   const newFiles = [] // 新增文件,含 _status: processing/uploading/done/error
   const savedDraft = readComposeState(draftId) || {}
   let imageTask = null
+  let imageJobId = savedDraft.imageJobId || ''
   let imagePollTimer = null
   let disposed = false
   const draftState = () => ({
@@ -722,6 +723,7 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   function renderImageTask(task) {
     if (!task || disposed) return
+    imageJobId = task.id
     imagePanel.hidden = false
     const active = ['queued', 'running', 'uploading'].includes(task.status)
     const labels = { queued: '已排队', running: '正在生成', uploading: '正在保存到 WebDAV', succeeded: '已完成', failed: '生成失败', cancelled: '已取消' }
@@ -729,10 +731,12 @@ function createComposer(post, draftId, onDone, onCancel) {
       ? `${labels[task.status] || task.status} · 已等待 ${formatElapsed(task.createdAt)} · 通常需要 60 秒以上`
       : `${labels[task.status] || task.status}${task.error ? `：${task.error}` : ''}`
     imageBtn.disabled = active
-    imageCancel.hidden = !active
     imageRetry.hidden = !['failed', 'cancelled'].includes(task.status)
     imageRetry.disabled = active
-    imageUse.hidden = task.status !== 'succeeded' || newFiles.some((file) => file._jobId === task.id)
+    const adopted = newFiles.some((file) => file._jobId === task.id)
+    imageUse.hidden = task.status !== 'succeeded' || adopted
+    imageCancel.hidden = !active && (task.status !== 'succeeded' || adopted)
+    imageCancel.textContent = active ? '取消任务' : '不使用'
     if (task.status === 'succeeded' && task.previewUrl) {
       imagePreview.innerHTML = `<img src="${esc(task.previewUrl)}" alt="AI 生成的日记配图" />`
     } else if (!active && task.status !== 'failed') {
@@ -753,7 +757,12 @@ function createComposer(post, draftId, onDone, onCancel) {
     if (disposed) return
     try {
       const result = await api(`/api/image-jobs/${encodeURIComponent(id)}`)
-      if (disposed) return
+      if (disposed) {
+        if (result.task?.id && !newFiles.some((file) => file._jobId === result.task.id)) {
+          api(`/api/image-jobs/${encodeURIComponent(result.task.id)}`, { method: 'DELETE' }).catch(() => {})
+        }
+        return
+      }
       imageTask = result.task
       renderImageTask(imageTask)
     } catch (error) {
@@ -778,7 +787,10 @@ function createComposer(post, draftId, onDone, onCancel) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ draftId, text }),
       })
-      if (disposed) return
+      if (disposed) {
+        if (result.task?.id) api(`/api/image-jobs/${encodeURIComponent(result.task.id)}`, { method: 'DELETE' }).catch(() => {})
+        return
+      }
       imageTask = result.task
       renderImageTask(imageTask)
     } catch (error) {
@@ -794,7 +806,10 @@ function createComposer(post, draftId, onDone, onCancel) {
     imageRetry.disabled = true
     try {
       const result = await api(`/api/image-jobs/${encodeURIComponent(imageTask.id)}/retry`, { method: 'POST' })
-      if (disposed) return
+      if (disposed) {
+        if (result.task?.id) api(`/api/image-jobs/${encodeURIComponent(result.task.id)}`, { method: 'DELETE' }).catch(() => {})
+        return
+      }
       imageTask = result.task
       renderImageTask(imageTask)
     } catch (error) {
@@ -829,10 +844,35 @@ function createComposer(post, draftId, onDone, onCancel) {
     imagePollTimer = null
     polishAbort?.abort()
     polishAbort = null
+    // 关闭编辑器时，未加入发布内容的 AI 结果没有保留价值；运行中的任务也一并取消。
+    if (imageJobId && !newFiles.some((file) => file._jobId === imageJobId)) {
+      api(`/api/image-jobs/${encodeURIComponent(imageJobId)}`, { method: 'DELETE' }).catch(() => {})
+    }
   }
   card.dispose = dispose
 
   const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
+
+  async function waitForVideoUpload(uploadId) {
+    const deadline = Date.now() + 30 * 60 * 1000
+    while (Date.now() < deadline) {
+      const state = await api(`/api/uploads/video/${encodeURIComponent(uploadId)}`)
+      if (state.status === 'done') return state
+      if (state.status === 'failed') throw new Error(state.error || '视频保存失败')
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+    throw new Error('视频保存超时，请稍后在草稿中确认')
+  }
+
+  async function uploadVideoFile(file, onProgress) {
+    const uploaded = await uploadWithProgress(`/api/uploads/video?draftId=${encodeURIComponent(draftId)}`, file, {
+      headers: { 'Content-Type': videoContentType(file) },
+      onProgress,
+    })
+    if (uploaded.status === 'saving' && uploaded.uploadId) return waitForVideoUpload(uploaded.uploadId)
+    if (uploaded.filename) return uploaded
+    throw new Error(uploaded.error || '视频上传没有返回结果')
+  }
 
   // 视频不压缩不转码:先抽一帧做封面(列表只加载封面,不会为了显示格子去拉视频),
   // 再把原文件按原始字节流上传。大文件刻意不写进 IndexedDB 草稿缓存 —— 手机浏览器配额撑不住 200MB 视频。
@@ -855,14 +895,21 @@ function createComposer(post, draftId, onDone, onCancel) {
         file._poster = uploaded.filename
       }
       file._status = 'uploading'
+      file._progress = { loaded: 0, total: file.size, phase: 'uploading' }
       renderPreviews()
-      const { filename } = await api(`/api/uploads/video?draftId=${encodeURIComponent(draftId)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': videoContentType(file) },
-        body: file,
+      let lastPaint = 0
+      const uploaded = await uploadVideoFile(file, ({ loaded, total }) => {
+        file._progress = { loaded, total: total || file.size, phase: 'uploading' }
+        const now = performance.now()
+        if (now - lastPaint < 100) return
+        lastPaint = now
+        renderPreviews()
       })
-      file._name = filename
+      file._progress = { loaded: uploaded.size || file.size, total: uploaded.size || file.size, phase: 'saving' }
+      renderPreviews()
+      file._name = uploaded.filename
       file._status = 'done'
+      file._progress = null
     } catch (e) {
       file._status = 'error'
       file._errMsg = e.message || '视频处理失败'
@@ -879,13 +926,21 @@ function createComposer(post, draftId, onDone, onCancel) {
     renderPreviews()
     updatePublishGuard()
     try {
-      const { filename } = await api(`/api/uploads/video?draftId=${encodeURIComponent(draftId)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': videoContentType(motionFile) },
-        body: motionFile,
+      still._motion._progress = { loaded: 0, total: motionFile.size, phase: 'uploading' }
+      renderPreviews()
+      let lastPaint = 0
+      const uploaded = await uploadVideoFile(motionFile, ({ loaded, total }) => {
+        still._motion._progress = { loaded, total: total || motionFile.size, phase: 'uploading' }
+        const now = performance.now()
+        if (now - lastPaint < 100) return
+        lastPaint = now
+        renderPreviews()
       })
-      still._motion._name = filename
+      still._motion._progress = { loaded: uploaded.size || motionFile.size, total: uploaded.size || motionFile.size, phase: 'saving' }
+      renderPreviews()
+      still._motion._name = uploaded.filename
       still._motion._status = 'done'
+      still._motion._progress = null
     } catch (e) {
       still._motion._status = 'error'
       still._motion._errMsg = e.message || '实况视频上传失败'
@@ -927,6 +982,15 @@ function createComposer(post, draftId, onDone, onCancel) {
     persistDraft()
   }
 
+  function uploadProgressText(item) {
+    const progress = item._progress
+    if (progress?.total > 0) {
+      const label = progress.phase === 'saving' ? '正在保存到 WebDAV' : '上传中'
+      return `${label} ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
+    }
+    return STATUS_TEXT[item._status] || '上传中'
+  }
+
   function renderPreviews() {
     previews.innerHTML = ''
     const rows = [
@@ -953,11 +1017,18 @@ function createComposer(post, draftId, onDone, onCancel) {
           overlay.textContent = item._errMsg || '失败'
         } else {
           overlay.appendChild(el('<span class="spinner"></span>'))
-          overlay.appendChild(el(`<span>${STATUS_TEXT[item._status]}</span>`))
+          overlay.appendChild(el(`<span>${uploadProgressText(item)}</span>`))
         }
         node.appendChild(overlay)
       } else if (item._status === 'done') {
-        node.appendChild(el(`<div class="upload-badge">${icon('check')}</div>`))
+        if (item._motion?._status === 'uploading') {
+          const overlay = el('<div class="upload-overlay"></div>')
+          overlay.appendChild(el('<span class="spinner"></span>'))
+          overlay.appendChild(el(`<span>${uploadProgressText(item._motion)}</span>`))
+          node.appendChild(overlay)
+        } else {
+          node.appendChild(el(`<div class="upload-badge">${icon('check')}</div>`))
+        }
       }
       $('.remove', node).onclick = () => {
         for (const url of [item._url, item._posterUrl]) {
