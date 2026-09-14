@@ -1,4 +1,4 @@
-// 无框架的界面回归：主题恢复与容错、配色对比度、面板手势和弹簧中断。
+// 无框架的界面回归：外观(跟随系统/浅色/深色)恢复与容错、明暗配色对比度、面板手势和弹簧中断。
 // 执行：node tests/interface-regression.mjs
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -6,14 +6,19 @@ import vm from 'node:vm'
 import { stepSpring, shouldDismiss, attachSheetMotion, projectMomentum, createSpringController, animatePresence } from '../public/js/sheet-motion.js'
 
 const source = readFileSync(new URL('../public/js/theme.js', import.meta.url), 'utf8')
-function themeEnvironment(stored, blocked = false) {
+// system 档由系统偏好决定,这里用可控的 matchMedia 模拟深色系统
+function themeEnvironment(stored, blocked = false, systemDark = false) {
   const events = new EventTarget()
+  events.matchMedia = (query) => ({
+    get matches() { return systemDark && query.includes('prefers-color-scheme: dark') },
+    addEventListener() {},
+  })
   const root = { dataset: {} }
-  const meta = {}
+  const meta = { content: '' }
   const storage = new Map([['journal-theme', stored]])
   const context = {
-    window: events, Event,
-    document: { documentElement: root, querySelector: () => meta },
+    window: events, Event, EventTarget,
+    document: { documentElement: root, querySelector: () => ({ setAttribute: (_key, value) => { meta.content = value } }) },
     localStorage: {
       getItem: (key) => { if (blocked) throw Error('存储不可用'); return storage.get(key) },
       setItem: (key, value) => { if (blocked) throw Error('存储不可用'); storage.set(key, value) },
@@ -22,25 +27,31 @@ function themeEnvironment(stored, blocked = false) {
   vm.runInNewContext(source, context)
   return { theme: events.JournalTheme, storage, root, meta, events }
 }
-for (const stored of [undefined, '', 'unknown', '<script>']) {
-  assert.equal(themeEnvironment(stored).theme.current, 'pink')
+// 旧版存的是 pink/blue/cream,配色收敛后一律回落成「跟随系统」
+for (const stored of [undefined, '', 'unknown', '<script>', 'pink', 'blue', 'cream']) {
+  const environment = themeEnvironment(stored)
+  assert.equal(environment.theme.preference, 'system', String(stored))
+  assert.equal(environment.theme.current, 'light', String(stored))
 }
-for (const id of ['pink', 'blue', 'cream']) {
-  const environment = themeEnvironment(id)
-  assert.equal(environment.theme.current, id)
+const systemDark = themeEnvironment(undefined, false, true)
+assert.equal(systemDark.theme.current, 'dark', '跟随系统时要解析成深色')
+assert.equal(systemDark.meta.content, '#000000', '浏览器界面色要跟着深浅切换')
+for (const [id, expected] of [['light', 'light'], ['dark', 'dark'], ['system', 'light']]) {
+  const environment = themeEnvironment('light')
   assert.equal(environment.theme.set(id), true)
+  assert.equal(environment.theme.preference, id)
+  assert.equal(environment.theme.current, expected)
   assert.equal(environment.storage.get('journal-theme'), id)
-  assert.equal(environment.meta.content, environment.theme.choices.find((choice) => choice.id === id).color)
 }
-const blocked = themeEnvironment('blue', true)
-assert.equal(blocked.theme.current, 'pink')
-assert.equal(blocked.theme.set('cream'), false)
-assert.equal(blocked.theme.current, 'cream')
-const synced = themeEnvironment('pink')
-synced.events.dispatchEvent(Object.assign(new Event('storage'), { key: 'journal-theme', newValue: 'blue' }))
-assert.equal(synced.theme.current, 'blue')
+const blocked = themeEnvironment('light', true)
+assert.equal(blocked.theme.preference, 'system', '读不到本机存储时回落为跟随系统')
+assert.equal(blocked.theme.set('dark'), false, '存储不可用时要如实返回 false')
+assert.equal(blocked.theme.current, 'dark', '存不下也要立刻生效')
+const synced = themeEnvironment('light')
+synced.events.dispatchEvent(Object.assign(new Event('storage'), { key: 'journal-theme', newValue: 'dark' }))
+assert.equal(synced.theme.current, 'dark')
 synced.events.dispatchEvent(Object.assign(new Event('storage'), { key: null, newValue: null }))
-assert.equal(synced.theme.current, 'pink')
+assert.equal(synced.theme.current, 'light')
 
 const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
 assert.match(css, /--motion-standard-duration/)
@@ -59,15 +70,17 @@ function contrast(a, b) {
   const values = [luminance(a), luminance(b)].sort((a, b) => b - a)
   return (values[0] + .05) / (values[1] + .05)
 }
-const defaults = tokens(css.match(/:root \{([^}]+)\}/)[1])
-for (const id of ['pink', 'blue', 'cream']) {
-  const colors = { ...defaults, ...tokens(css.match(new RegExp(`\\[data-theme="${id}"\\] \\{([^}]+)\\}`))?.[1] || '') }
+const light = tokens(css.match(/:root \{([^}]+)\}/)[1])
+const dark = { ...light, ...tokens(css.match(/\[data-theme="dark"\] \{([^}]+)\}/)[1]) }
+for (const [scheme, colors, onAccent] of [['light', light, '#ffffff'], ['dark', dark, '#2a0d18']]) {
   for (const foreground of ['--ink', '--text', '--muted', '--faint']) {
-    for (const background of ['--bg', '--card', '--accent-soft']) {
-      assert.ok(contrast(colors[foreground], colors[background]) >= 4.5, `${id} ${foreground}/${background}`)
+    for (const background of ['--bg', '--surface']) {
+      assert.ok(contrast(colors[foreground], colors[background]) >= 4.5, `${scheme} ${foreground}/${background}`)
     }
   }
-  for (const button of ['--accent', '--accent-deep']) assert.ok(contrast('#ffffff', colors[button]) >= 4.5, `${id} ${button}`)
+  // 强调色在浅色底上既要能当按钮底(白字),也要能当文字色
+  assert.ok(contrast(onAccent, colors['--accent']) >= 4.5, `${scheme} 按钮文字`)
+  assert.ok(contrast(colors['--accent-deep'], colors['--bg']) >= 4.5, `${scheme} 强调文字/底`)
 }
 
 let spring = { position: 300, velocity: 0 }
@@ -215,4 +228,4 @@ try {
 } finally {
   Object.assign(globalThis, original)
 }
-console.log('通过：三种主题恢复、存储容错、跨页同步、文本对比度、弹簧连续性、取消手势、反向中断与减少动态。')
+console.log('通过：外观三档恢复、旧值回落、跨页同步、明暗对比度、弹簧连续性、取消手势、反向中断与减少动态。')

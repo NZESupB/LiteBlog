@@ -4,6 +4,8 @@ import { icon } from '/vendor/icons.js'
 import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
 import { attachComposerViewport } from '/js/composer-viewport.js'
 import { api, streamSse, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
+import { openLightbox, closeLightbox } from '/js/lightbox.js'
+import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration, videoContentType } from '/js/media.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
@@ -389,13 +391,14 @@ function clearMain() {
   hasRenderedView = true
 }
 
-function emptyJournal(title, description, image = false) {
+function emptyJournal(title, description, cover = false) {
   const empty = el(`<div class="journal-empty">
-    <span class="empty-symbol">${icon(image ? 'image' : 'heart')}</span>
+    ${cover ? `<div class="journal-cover"><img src="${esc(cover)}" alt="" /></div>` : ''}
+    <span class="empty-symbol">${icon('heart')}</span>
     <h3>${esc(title)}</h3><p>${esc(description)}</p>
   </div>`)
   if (!site.user) empty.appendChild(el('<a class="btn" href="#/login">登录，写下第一篇</a>'))
-  else if (image) {
+  else if (cover) {
     const write = el('<button class="btn-ghost" type="button">去记录今天</button>')
     write.onclick = (event) => openComposerModal(null, event.currentTarget)
     empty.appendChild(write)
@@ -446,165 +449,6 @@ async function compressImage(file) {
     return file
   }
 }
-
-// ---------- 灯箱 ----------
-
-const lightbox = $('#lightbox')
-let lbUrls = []
-let lbIndex = 0
-let lbTrigger = null
-let lbMotionToken = 0
-let lbSwitchToken = 0
-
-const reducedMotion = () => Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
-const wait = (duration) => new Promise((resolve) => setTimeout(resolve, duration))
-function waitForImage(image, url) {
-  image.src = url
-  if (image.complete && image.naturalWidth) return Promise.resolve()
-  return new Promise((resolve) => {
-    const done = () => { image.removeEventListener('load', done); image.removeEventListener('error', done); resolve() }
-    image.addEventListener('load', done)
-    image.addEventListener('error', done)
-  })
-}
-function preloadImage(url) {
-  const image = new Image()
-  image.src = url
-  if (image.complete && image.naturalWidth) return Promise.resolve()
-  return new Promise((resolve) => {
-    image.onload = resolve
-    image.onerror = resolve
-  })
-}
-function measureLightboxImage(image) {
-  const transform = image.style.transform
-  const transition = image.style.transition
-  image.style.transition = 'none'
-  image.style.transform = 'none'
-  const rect = image.getBoundingClientRect()
-  image.style.transform = transform
-  image.style.transition = transition
-  return rect
-}
-function transformToRect(from, to) {
-  if (!from || !to || !to.width || !to.height) return 'translateY(12px) scale(.98)'
-  const scaleX = Math.max(.01, from.width / to.width)
-  const scaleY = Math.max(.01, from.height / to.height)
-  const x = from.left + from.width / 2 - (to.left + to.width / 2)
-  const y = from.top + from.height / 2 - (to.top + to.height / 2)
-  return `translate(${x}px, ${y}px) scale(${scaleX}, ${scaleY})`
-}
-function setLightboxImageTransition(image, enabled = true) {
-  image.style.transition = enabled && !reducedMotion()
-    ? 'transform var(--motion-spring-duration) var(--motion-ease), opacity var(--motion-standard-duration) var(--motion-ease)'
-    : 'none'
-}
-function startLightboxOpen(origin, token) {
-  const image = $('#lightboxImg')
-  if (token !== lbMotionToken || lightbox.hidden) return
-  const target = measureLightboxImage(image)
-  const source = origin?.isConnected ? origin.getBoundingClientRect() : null
-  image.style.transition = 'none'
-  image.style.transform = transformToRect(source, target)
-  image.style.opacity = source ? '.01' : '0'
-  if (reducedMotion()) {
-    image.style.transform = 'none'
-    image.style.opacity = '1'
-    return
-  }
-  void image.offsetWidth
-  setLightboxImageTransition(image)
-  requestAnimationFrame(() => {
-    if (token !== lbMotionToken || lightbox.hidden) return
-    image.style.transform = 'none'
-    image.style.opacity = '1'
-  })
-}
-
-function openLightbox(urls, index, trigger = null) {
-  if (!Array.isArray(urls) || !urls.length) return
-  lbUrls = urls
-  lbIndex = Math.max(0, Math.min(urls.length - 1, index))
-  const source = trigger instanceof Element ? trigger : null
-  lbTrigger = source?.closest('button, a') || source
-  const token = ++lbMotionToken
-  ++lbSwitchToken
-  lightbox.hidden = false
-  const image = $('#lightboxImg')
-  void waitForImage(image, lbUrls[lbIndex]).then(() => startLightboxOpen(lbTrigger, token))
-  animatePresence(lightbox, true, { className: 'lightbox-presence', duration: 220 })
-}
-
-function closeLightbox(immediate = false) {
-  if (lightbox.hidden) return
-  const token = ++lbMotionToken
-  ++lbSwitchToken
-  const image = $('#lightboxImg')
-  const returnFocus = lbTrigger
-  const target = lbTrigger?.isConnected ? lbTrigger.getBoundingClientRect() : null
-  const current = measureLightboxImage(image)
-  const targetTransform = transformToRect(target, current)
-  setLightboxImageTransition(image, !(immediate || reducedMotion()))
-  image.style.transform = targetTransform
-  image.style.opacity = target ? '.01' : '0'
-  const closing = animatePresence(lightbox, false, {
-    className: 'lightbox-presence',
-    duration: 340,
-    immediate: immediate || reducedMotion(),
-  })
-  Promise.resolve(closing).then(() => {
-    if (token !== lbMotionToken) return
-    image.style.transform = ''
-    image.style.opacity = ''
-    image.style.transition = ''
-    returnFocus?.focus?.({ preventScroll: true })
-    lbTrigger = null
-  })
-}
-
-async function lbMove(step) {
-  if (!lbUrls.length || lightbox.hidden) return
-  const nextIndex = (lbIndex + step + lbUrls.length) % lbUrls.length
-  const url = lbUrls[nextIndex]
-  const token = ++lbSwitchToken
-  await preloadImage(url)
-  if (token !== lbSwitchToken || lightbox.hidden) return
-  const image = $('#lightboxImg')
-  if (reducedMotion()) {
-    lbIndex = nextIndex
-    await waitForImage(image, url)
-    return
-  }
-  const direction = step > 0 ? 1 : -1
-  setLightboxImageTransition(image)
-  image.style.opacity = '0'
-  image.style.transform = `translateX(${direction * 14}px) scale(.985)`
-  await wait(140)
-  if (token !== lbSwitchToken || lightbox.hidden) return
-  lbIndex = nextIndex
-  await waitForImage(image, url)
-  if (token !== lbSwitchToken || lightbox.hidden) return
-  image.style.transition = 'none'
-  image.style.transform = `translateX(${-direction * 14}px) scale(.985)`
-  image.style.opacity = '0'
-  void image.offsetWidth
-  setLightboxImageTransition(image)
-  requestAnimationFrame(() => {
-    if (token !== lbSwitchToken || lightbox.hidden) return
-    image.style.transform = 'none'
-    image.style.opacity = '1'
-  })
-}
-$('.lb-close').onclick = () => closeLightbox()
-$('.lb-prev').onclick = () => { void lbMove(-1) }
-$('.lb-next').onclick = () => { void lbMove(1) }
-lightbox.onclick = (e) => { if (e.target === lightbox) closeLightbox() }
-document.addEventListener('keydown', (e) => {
-  if (lightbox.hidden) return
-  if (e.key === 'Escape') closeLightbox()
-  if (e.key === 'ArrowLeft') { e.preventDefault(); void lbMove(-1) }
-  if (e.key === 'ArrowRight') { e.preventDefault(); void lbMove(1) }
-})
 
 // ---------- 发布 / 编辑组件 ----------
 
@@ -693,7 +537,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       <div class="preview-grid"></div>
       <div class="form-error"></div>
       <div class="compose-actions">
-        <button class="btn-ghost pick" type="button" title="从相册选择" aria-label="从相册选择">${icon('image')}</button>
+        <button class="btn-ghost pick" type="button" title="从相册选择照片或视频" aria-label="从相册选择照片或视频">${icon('image')}</button>
         <button class="btn-ghost camera" type="button" title="调用相机拍照" aria-label="调用相机拍照">${icon('camera')}</button>
         <div class="public-opts" ${site.privateMode ? '' : 'hidden'}>
           <span class="public-opts-tip">${icon('lock')}<span>访客可见</span></span>
@@ -704,7 +548,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         ${post ? '<button class="btn-ghost cancel">取消</button>' : '<button class="btn-ghost discard-draft" type="button">丢弃草稿</button>'}
         <button class="btn submit">${post ? '保存' : '发布'}</button>
       </div>
-      <input class="album-input" type="file" accept="image/*" multiple hidden />
+      <input class="album-input" type="file" accept="image/*,video/*" multiple hidden />
       <input class="camera-input" type="file" accept="image/*" capture="environment" hidden />
     </div>`)
   const textarea = $('textarea', card)
@@ -818,7 +662,12 @@ function createComposer(post, draftId, onDone, onCancel) {
     content: textarea.value,
     publicText: $('[name=publicText]', card)?.checked ?? false,
     publicImages: $('[name=publicImages]', card)?.checked ?? false,
-    files: newFiles.map((file) => ({ id: file._id, name: file.name || '', type: file.type || '', status: file._status, filename: file._name || '', jobId: file._jobId || '' })),
+    files: newFiles.map((file) => ({
+      id: file._id, name: file.name || '', type: file.type || '', status: file._status,
+      filename: file._name || '', jobId: file._jobId || '',
+      kind: file._kind || 'image', poster: file._poster || '', duration: file._duration || null,
+      motion: file._motion?._name || '', motionStatus: file._motion?._status || '',
+    })),
     keep: keepImages.map((image) => image.id),
     imageJobId: imageTask?.id || savedDraft.imageJobId || '',
   })
@@ -841,7 +690,16 @@ function createComposer(post, draftId, onDone, onCancel) {
     const restoredIds = new Set()
     for (const saved of Array.isArray(savedDraft.files) ? savedDraft.files : []) {
       if (!saved.filename) continue
-      const file = { _id: saved.id || newDraftId(), _name: saved.filename, _status: 'done', _jobId: saved.jobId || '', name: saved.name, type: saved.type, _url: `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(saved.filename)}` }
+      const kind = saved.kind || 'image'
+      // 视频的缩略图只能是它的封面帧;拿不到封面就留空,渲染成中性底而不是裂图
+      const thumb = kind === 'video' ? saved.poster : saved.filename
+      const file = {
+        _id: saved.id || newDraftId(), _name: saved.filename, _status: 'done', _jobId: saved.jobId || '',
+        name: saved.name, type: saved.type, _kind: kind, _poster: saved.poster || '',
+        _duration: saved.duration || null,
+        _url: thumb ? `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(thumb)}` : '',
+      }
+      if (saved.motion) file._motion = { _id: newDraftId(), name: '', _status: 'done', _name: saved.motion }
       newFiles.push(file)
       restoredIds.add(file._id)
     }
@@ -976,9 +834,71 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
 
+  // 视频不压缩不转码:先抽一帧做封面(列表只加载封面,不会为了显示格子去拉视频),
+  // 再把原文件按原始字节流上传。大文件刻意不写进 IndexedDB 草稿缓存 —— 手机浏览器配额撑不住 200MB 视频。
+  async function processVideo(file) {
+    file._kind = 'video'
+    file._status = 'processing'
+    persistDraft()
+    renderPreviews()
+    updatePublishGuard()
+    try {
+      const { duration, poster } = await readVideoPoster(file)
+      file._duration = duration
+      if (poster) {
+        file._posterUrl = URL.createObjectURL(poster)
+        file._url = file._posterUrl
+        const form = new FormData()
+        form.append('image', poster)
+        form.append('draftId', draftId)
+        const uploaded = await api('/api/uploads', { method: 'POST', body: form })
+        file._poster = uploaded.filename
+      }
+      file._status = 'uploading'
+      renderPreviews()
+      const { filename } = await api(`/api/uploads/video?draftId=${encodeURIComponent(draftId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': videoContentType(file) },
+        body: file,
+      })
+      file._name = filename
+      file._status = 'done'
+    } catch (e) {
+      file._status = 'error'
+      file._errMsg = e.message || '视频处理失败'
+    }
+    renderPreviews()
+    updatePublishGuard()
+    persistDraft()
+  }
+
+  // 实况图的配对视频:跟着静帧一起传,发布时用文件名把两者挂在一起
+  async function attachMotion(still, motionFile) {
+    still._motion = { _id: newDraftId(), name: motionFile.name, _status: 'uploading' }
+    persistDraft()
+    renderPreviews()
+    updatePublishGuard()
+    try {
+      const { filename } = await api(`/api/uploads/video?draftId=${encodeURIComponent(draftId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': videoContentType(motionFile) },
+        body: motionFile,
+      })
+      still._motion._name = filename
+      still._motion._status = 'done'
+    } catch (e) {
+      still._motion._status = 'error'
+      still._motion._errMsg = e.message || '实况视频上传失败'
+    }
+    renderPreviews()
+    updatePublishGuard()
+    persistDraft()
+  }
+
   // 选完图立刻处理(HEIC 转码 + 压缩)并上传到存储后端,发布时只提交文件名
   async function processFile(file) {
     file._id ||= newDraftId()
+    file._kind = 'image'
     await saveDraftFile(draftId, file)
     file._status = 'processing'
     persistDraft()
@@ -1014,8 +934,19 @@ function createComposer(post, draftId, onDone, onCancel) {
       ...newFiles.map((f) => [newFiles, f]),
     ]
     for (const [list, item] of rows) {
-      const src = item._url || item.url || ''
-      const node = el(`<div class="preview-item">${src ? `<img src="${src}" alt="" />` : ''}<button class="remove">×</button></div>`)
+      // 已发布的图片/视频/实况图走同一套格子:视频看封面帧,实况图看静帧
+      const kind = item._kind || item.type || 'image'
+      const live = Boolean(item._motion || item.live)
+      const src = item._url || (kind === 'video' ? item.poster : item.url) || ''
+      const node = el(`<div class="preview-item${kind === 'video' ? ' is-video' : ''}${src ? '' : ' no-poster'}">${src ? `<img src="${src}" alt="" />` : ''}<button class="remove" aria-label="移除这项媒体">×</button></div>`)
+      if (kind === 'video') {
+        node.appendChild(el(`<span class="media-play" aria-hidden="true">${icon('play')}</span>`))
+        if (item._duration || item.duration) node.appendChild(el(`<span class="media-duration">${formatDuration(item._duration || item.duration)}</span>`))
+      } else if (live) {
+        node.appendChild(el('<span class="media-live" aria-hidden="true"><span class="lb-live-dot"></span>LIVE</span>'))
+        // 配对视频单独上传:失败时在缩略图上直接说清楚,不然用户以为配对成功了
+        if (item._motion?._status === 'error') node.appendChild(el(`<div class="upload-overlay error">${esc(item._motion._errMsg || '实况视频上传失败')}</div>`))
+      }
       if (item._status && item._status !== 'done') {
         const overlay = el(`<div class="upload-overlay${item._status === 'error' ? ' error' : ''}"></div>`)
         if (item._status === 'error') {
@@ -1029,7 +960,9 @@ function createComposer(post, draftId, onDone, onCancel) {
         node.appendChild(el(`<div class="upload-badge">${icon('check')}</div>`))
       }
       $('.remove', node).onclick = () => {
-        if (item._url && item._url.startsWith('blob:')) URL.revokeObjectURL(item._url)
+        for (const url of [item._url, item._posterUrl]) {
+          if (url && url.startsWith('blob:')) URL.revokeObjectURL(url)
+        }
         // 按对象定位而非渲染时的下标,避免删除过程中列表变动导致删错
         const idx = list.indexOf(item)
         if (idx >= 0) list.splice(idx, 1)
@@ -1037,7 +970,9 @@ function createComposer(post, draftId, onDone, onCancel) {
         removeDraftFile(draftId, item._id)
         renderPreviews()
         updatePublishGuard()
-        // 新图已经传到存储后端了,撤掉时连带删除;已发布的老图仍由发布时的 keep 决定
+        if (item._motion?._name) api(`/api/uploads/${item._motion._name}`, { method: 'DELETE' }).catch(() => {})
+        if (item._poster) api(`/api/uploads/${item._poster}`, { method: 'DELETE' }).catch(() => {})
+        // 新文件已经传到存储后端了,撤掉时连带删除;已发布的老文件仍由发布时的 keep 决定
         if (item._name) api(`/api/uploads/${item._name}`, { method: 'DELETE' }).catch(() => {})
         persistDraft()
       }
@@ -1045,9 +980,10 @@ function createComposer(post, draftId, onDone, onCancel) {
     }
   }
 
-  // 发布守卫:任一图片还在处理或上传中则禁用发布
+  // 发布守卫:任一媒体(含实况配对视频)还在处理或上传中则禁用发布
+  const MEDIA_PENDING = ['processing', 'uploading']
   function updatePublishGuard() {
-    const pending = newFiles.some((f) => f._status === 'processing' || f._status === 'uploading')
+    const pending = newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))
     const generating = imageTask && ['queued', 'running', 'uploading'].includes(imageTask.status)
     submitBtn.disabled = pending || generating
     if (pending) submitBtn.textContent = '图片上传中…'
@@ -1063,29 +999,53 @@ function createComposer(post, draftId, onDone, onCancel) {
     // 先取出文件再清空 input(清空 value 会同时清掉 input.files)
     const picked = [...input.files]
     input.value = ''
-    newFiles.push(...picked)
+    // 实况图 = 同名主干上的静帧 + 配对视频。分组在改名之前按原始文件名做,
+    // 因为 HEIC 转码与压缩都会把文件名换成 .jpg,之后再配就配不上了。
+    const groups = groupMediaFiles(picked)
+    const queued = []
+    for (const group of groups) {
+      if (group.video) {
+        newFiles.push(group.video)
+        queued.push(() => processVideo(group.video))
+        continue
+      }
+      if (!group.still) continue
+      newFiles.push(group.still)
+      queued.push(() => processFile(group.still))
+      if (group.motion) queued.push(() => attachMotion(group.still, group.motion))
+    }
     renderPreviews()
     updatePublishGuard()
     // 处理与上传异步进行,完成后各自刷新状态
-    for (const f of picked) processFile(f)
+    for (const task of queued) task()
   }
   fileInput.onchange = () => handleFiles(fileInput)
   cameraInput.onchange = () => handleFiles(cameraInput)
 
   submitBtn.onclick = async () => {
     const content = textarea.value.trim()
-    const ready = newFiles.filter((f) => f._status === 'done')
+    const ready = newFiles.filter((f) => f._status === 'done' && !MEDIA_PENDING.includes(f._motion?._status) && f._motion?._status !== 'error')
     if (!content && keepImages.length + ready.length === 0) {
       errorLine.textContent = '写点什么或传张图吧'
       return
     }
-    if (newFiles.some((f) => f._status === 'processing' || f._status === 'uploading')) return
+    if (newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))) return
     submitBtn.disabled = true
     submitBtn.textContent = '发布中…'
     errorLine.textContent = ''
     try {
       await draftReady
-      const payload = { content, images: ready.map((f) => f._name), draftId }
+      const payload = {
+        content,
+        draftId,
+        images: ready.map((f) => {
+          const media = { filename: f._name }
+          if (f._motion?._name) media.motion = f._motion._name
+          if (f._poster) media.poster = f._poster
+          if (f._duration) media.duration = f._duration
+          return media
+        }),
+      }
       if (post) payload.keep = keepImages.map((img) => img.id)
       const pubText = $('[name=publicText]', card)
       const pubImages = $('[name=publicImages]', card)
@@ -1402,6 +1362,32 @@ function renderPostMenu(p, comments, reactions) {
   return menu
 }
 
+// 列表里的媒体格子:图片给静帧;视频给封面帧 + 播放角标 + 时长;实况图给静帧 + LIVE 角标。
+// 一律不自动播放、不预加载视频 —— 只有封面图会被真的加载,格子再多也不会拖着视频文件走。
+function mediaTile(media, alt = '') {
+  const poster = media.type === 'video' ? (media.poster || '') : media.url
+  const tile = el(`<button class="media-tile" type="button">${poster ? `<img src="${esc(poster)}" alt="${esc(alt)}" loading="lazy" />` : ''}</button>`)
+  if (!poster) tile.classList.add('no-poster')
+  if (media.type === 'video') {
+    tile.classList.add('is-video')
+    tile.append(el(`<span class="media-play" aria-hidden="true">${icon('play')}</span>`))
+    if (media.duration) tile.append(el(`<span class="media-duration">${formatDuration(media.duration)}</span>`))
+  } else if (media.live) {
+    tile.classList.add('is-live')
+    tile.append(el('<span class="media-live" aria-hidden="true"><span class="lb-live-dot"></span>LIVE</span>'))
+  }
+  return tile
+}
+
+// 时间轴与相册共用:按顺序渲染格子并把灯箱串起来
+function renderMediaGrid(grid, list, alt = '') {
+  list.forEach((media, i) => {
+    const tile = mediaTile(media, alt)
+    tile.onclick = () => openLightbox(list, i, tile)
+    grid.appendChild(tile)
+  })
+}
+
 function renderPost(p) {
   // 私密模式下未登录访客:按文章开关决定可见性,默认全隐
   const guest = site.privateMode && !site.user
@@ -1444,12 +1430,7 @@ function renderPost(p) {
   } else $('.post-content', card).remove()
 
   const grid = $('.img-grid', card)
-  const urls = p.images.map((img) => img.url)
-  p.images.forEach((img, i) => {
-    const image = el(`<img src="${img.url}" alt="" loading="lazy" />`)
-    image.onclick = () => openLightbox(urls, i, image)
-    grid.appendChild(image)
-  })
+  renderMediaGrid(grid, p.images)
 
   const comments = renderComments(p)
   const reactions = renderReactions(p)
@@ -1614,23 +1595,40 @@ async function renderGallery() {
   main.appendChild(heading)
   try {
     const { images } = await api('/api/gallery')
-    $('.gallery-count', heading).textContent = `${images.length} 张照片`
+    const hasVideo = images.some((img) => img.type === 'video')
+    $('.gallery-count', heading).textContent = images.length === 0 ? ''
+      : `${images.length} ${hasVideo ? '项影像' : '张照片'}`
     if (images.length === 0) {
-      main.appendChild(emptyJournal('等待第一张，一起的照片', '留住眼前的风景，也留住那一刻的心情。', true))
+      main.appendChild(emptyJournal('等待第一张，一起的照片', '留住眼前的风景，也留住那一刻的心情。', '/images/journal-cover.jpg'))
       return
     }
-    const grid = el('<div class="gallery-grid"></div>')
-    const urls = images.map((img) => img.url)
-    images.forEach((img, i) => {
-      const caption = `${img.author} · ${formatTime(img.created_at)}`
-      const photo = el(`<button class="gallery-photo" type="button" aria-label="查看照片：${esc(caption)}">
-        <img src="${esc(img.url)}" alt="${esc(caption)}" loading="lazy" />
-        <span>${esc(caption)}</span>
-      </button>`)
-      photo.onclick = () => openLightbox(urls, i, photo)
-      grid.appendChild(photo)
-    })
-    main.appendChild(grid)
+    // 按年月分段:跨度一大,连续网格就变成了没有时间坐标的缩略图墙
+    const months = new Map()
+    for (const media of images) {
+      const at = parseTime(media.created_at)
+      const key = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}`
+      if (!months.has(key)) months.set(key, [])
+      months.get(key).push(media)
+    }
+    for (const [key, list] of months) {
+      const [year, month] = key.split('-')
+      const section = el(`<section class="gallery-month">
+        <h2 class="gallery-month-heading"><span>${year}年${Number(month)}月</span><span class="gallery-month-count">${list.length}</span></h2>
+        <div class="gallery-grid"></div>
+      </section>`)
+      const grid = $('.gallery-grid', section)
+      // 灯箱序列跨月连续:在相册里可以直接一路翻到上个月
+      list.forEach((media) => {
+        const caption = `${media.author} · ${formatTime(media.created_at)}`
+        const tile = mediaTile(media, caption)
+        tile.classList.add('gallery-photo')
+        tile.append(el(`<span>${esc(caption)}</span>`))
+        tile.setAttribute('aria-label', `查看${media.type === 'video' ? '视频' : '照片'}：${caption}`)
+        tile.onclick = () => openLightbox(images, images.indexOf(media), tile)
+        grid.appendChild(tile)
+      })
+      main.appendChild(section)
+    }
   } catch (e) {
     main.appendChild(el(`<div class="empty-tip">${esc(e.message)}</div>`))
   }
@@ -1643,6 +1641,7 @@ function renderLogin() {
   main.classList.add('login-page')
   const form = el(`
     <form class="login-card">
+      <div class="journal-cover login-cover"><img src="/images/journal-cover.jpg" alt="" /></div>
       <span class="empty-symbol" aria-hidden="true">${icon('heart')}</span><h1>欢迎回家</h1>
       <div class="sub">今天的故事，想从哪里说起？</div>
       <label for="login-username">登录账号</label>
@@ -2052,25 +2051,25 @@ function renderSettingsSection(kind) {
 
 function renderThemeCard() {
   const card = el(`<section class="settings-card theme-card">
-    <div class="settings-card-heading"><div><h2>外观</h2><p>选一个喜欢的颜色，让这里更像你。</p></div></div>
-    <fieldset class="theme-options"><legend class="sr-only">选择主题</legend></fieldset>
+    <div class="settings-card-heading"><div><h2>外观</h2><p>浅色、深色，或者跟着系统走。</p></div></div>
+    <fieldset class="theme-options"><legend class="sr-only">选择外观</legend></fieldset>
     <p class="theme-help" aria-live="polite">仅用于当前浏览器，刷新后保留。</p>
   </section>`)
   for (const choice of window.JournalTheme.choices) {
     const option = el(`<label class="theme-option" data-palette="${choice.id}">
-      <input type="radio" name="theme" value="${choice.id}" ${window.JournalTheme.current === choice.id ? 'checked' : ''} />
-      <span class="theme-swatch" aria-hidden="true"></span><span>${choice.name}</span>
+      <input type="radio" name="theme" value="${choice.id}" ${window.JournalTheme.preference === choice.id ? 'checked' : ''} />
+      <span>${choice.name}</span>
     </label>`)
     $('input', option).onchange = () => {
       const saved = window.JournalTheme.set(choice.id)
-      $('.theme-help', card).textContent = saved ? `已切换为${choice.name}，刷新后保留。` : '主题已切换；当前浏览器无法保存偏好，刷新后可能恢复原来的主题。'
+      $('.theme-help', card).textContent = saved ? `已切换为${choice.name}，刷新后保留。` : '外观已切换；当前浏览器无法保存偏好，刷新后可能恢复原来的设置。'
     }
     $('.theme-options', card).appendChild(option)
   }
   return card
 }
 window.addEventListener('journal-theme-change', () => {
-  document.querySelectorAll('.theme-option input').forEach((input) => { input.checked = input.value === window.JournalTheme.current })
+  document.querySelectorAll('.theme-option input').forEach((input) => { input.checked = input.value === window.JournalTheme.preference })
 })
 
 function renderSettings() {
@@ -2689,6 +2688,15 @@ function trackHeaderHeight() {
   new ResizeObserver(sync).observe(header)
 }
 
+// 顶栏默认完全透明,滚过页面顶端后才淡入材质(Apple 官网里内容滚到导航下面才出现材质的那种做法)。
+// 用 1px 哨兵 + IntersectionObserver 判断,不加 scroll 监听、无需节流。
+function trackHeaderMaterial() {
+  const header = $('.site-header')
+  const sentinel = el('<div class="top-material-sentinel" aria-hidden="true"></div>')
+  document.body.prepend(sentinel)
+  new IntersectionObserver(([entry]) => header.classList.toggle('is-scrolled', !entry.isIntersecting)).observe(sentinel)
+}
+
 async function init() {
   site = await api('/api/site')
   document.title = site.title
@@ -2696,6 +2704,7 @@ async function init() {
   $('.site-name').textContent = site.title
   $('.site-heart').innerHTML = icon('heart')
   trackHeaderHeight()
+  trackHeaderMaterial()
   startDayProgress()
   if ('serviceWorker' in navigator) {
     // 推送订阅要求 registration 已激活,统一等到 ready 再交给通知开关使用

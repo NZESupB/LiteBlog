@@ -9,8 +9,11 @@ const configuredDataDir = String(configValue('server.dataDir', 'data'))
 export const DATA_DIR = path.isAbsolute(configuredDataDir) ? path.resolve(configuredDataDir) : path.resolve(PROJECT_ROOT, configuredDataDir)
 export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads')
 export const AVATAR_DIR = path.join(DATA_DIR, 'avatars')
+// 视频先流式落到这里再转存最终后端,避免把大文件整体读进内存
+export const TMP_DIR = path.join(DATA_DIR, 'tmp')
 mkdirSync(UPLOAD_DIR, { recursive: true })
 mkdirSync(AVATAR_DIR, { recursive: true })
+mkdirSync(TMP_DIR, { recursive: true })
 
 export const db = new DatabaseSync(path.join(DATA_DIR, 'blog.db'))
 
@@ -40,7 +43,17 @@ db.exec(`
     sort     INTEGER NOT NULL DEFAULT 0,
     storage  TEXT NOT NULL DEFAULT 'local',
     hash     TEXT NOT NULL DEFAULT '',
-    storage_path TEXT NOT NULL DEFAULT ''
+    storage_path TEXT NOT NULL DEFAULT '',
+    -- 一行 = 一个逻辑媒体项:image / video。实况图的配对视频与视频封面帧都是本行附属文件,
+    -- 不单独占行,否则时间轴格子数与相册计数都会翻倍。
+    type     TEXT NOT NULL DEFAULT 'image',
+    motion_filename TEXT,
+    motion_storage  TEXT,
+    motion_path     TEXT,
+    poster_filename TEXT,
+    poster_storage  TEXT,
+    poster_path     TEXT,
+    duration REAL
   );
   -- 已传到存储后端但还没归属任何动态的图片(选图即上传),发布时转入 images
   CREATE TABLE IF NOT EXISTS pending_uploads (
@@ -147,6 +160,18 @@ if (!db.prepare('PRAGMA table_info(images)').all().some((col) => col.name === 'h
 db.exec('CREATE INDEX IF NOT EXISTS idx_images_hash ON images(hash)')
 if (!db.prepare('PRAGMA table_info(images)').all().some((col) => col.name === 'storage_path')) {
   db.exec("ALTER TABLE images ADD COLUMN storage_path TEXT NOT NULL DEFAULT ''")
+}
+
+// 旧库补列:实况图的配对视频(motion)与视频封面帧(poster)各是一组附属文件,历史图片默认都是普通图片
+const imageColumns = db.prepare('PRAGMA table_info(images)').all()
+if (!imageColumns.some((col) => col.name === 'type')) {
+  db.exec("ALTER TABLE images ADD COLUMN type TEXT NOT NULL DEFAULT 'image'")
+}
+for (const column of ['motion_filename', 'motion_storage', 'motion_path', 'poster_filename', 'poster_storage', 'poster_path']) {
+  if (!imageColumns.some((col) => col.name === column)) db.exec(`ALTER TABLE images ADD COLUMN ${column} TEXT`)
+}
+if (!imageColumns.some((col) => col.name === 'duration')) {
+  db.exec('ALTER TABLE images ADD COLUMN duration REAL')
 }
 
 const pendingColumns = db.prepare('PRAGMA table_info(pending_uploads)').all()

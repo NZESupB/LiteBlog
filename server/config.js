@@ -35,6 +35,7 @@ const ENV_KEYS = {
   'ai.llm.model': 'LLM_MODEL',
   'ai.llm.apiKey': 'LLM_API_KEY',
   'push.vapidSubject': 'VAPID_SUBJECT',
+  'media.maxVideoBytes': 'MAX_VIDEO_BYTES',
 }
 
 export function configValue(pathName, fallback = '') {

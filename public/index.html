@@ -39,7 +39,7 @@
     <a href="#/settings" data-mobile-nav="settings"><span class="mobile-nav-icon" data-icon="settings"></span><span>设置</span></a>
   </nav>
 
-  <!-- 图片灯箱 -->
+  <!-- 媒体灯箱:图片 / 视频 / 实况图共用一个序列,一律由用户点击才播放 -->
   <div id="lightbox" class="lightbox" hidden>
     <button class="lb-btn lb-close" aria-label="关闭">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -47,7 +47,13 @@
     <button class="lb-btn lb-prev" aria-label="上一张">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
     </button>
-    <img id="lightboxImg" alt="" />
+    <div class="lb-stage" id="lightboxStage">
+      <img id="lightboxImg" alt="" />
+      <video id="lightboxVideo" playsinline preload="none" hidden></video>
+      <button id="lightboxLive" class="lb-live" type="button" aria-pressed="false" hidden>
+        <span class="lb-live-dot" aria-hidden="true"></span><span>LIVE</span>
+      </button>
+    </div>
     <button class="lb-btn lb-next" aria-label="下一张">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
     </button>

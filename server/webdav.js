@@ -1,4 +1,5 @@
-// WebDAV(坚果云等)图片存储后端:Basic Auth,PUT/GET/DELETE + 按需建目录
+// WebDAV(坚果云等)媒体存储后端:Basic Auth,PUT/GET/DELETE + 按需建目录
+import { createReadStream } from 'node:fs'
 import { getSetting } from './db.js'
 import { configValue } from './config.js'
 
@@ -71,6 +72,43 @@ export async function putImage(filename, buf, contentType, relativePath = filena
     const text = await res.text().catch(() => '')
     throw new Error(`WebDAV 上传失败 (${res.status}): ${text.slice(0, 200)}`)
   }
+}
+
+// 大文件上传:从临时文件流式 PUT,带 Content-Length。部分网盘只接受带长度的 PUT,
+// 用 ReadableStream 分块上传会失败,所以这里显式给出长度而不是 chunked。
+export async function putFile(filename, tempPath, size, contentType, relativePath = filename, folder = config().folder) {
+  await ensureFolder(relativePath, folder)
+  const res = await fetch(itemUrl(relativePath, folder), {
+    method: 'PUT',
+    headers: { Authorization: authHeader(), 'Content-Type': contentType, 'Content-Length': String(size) },
+    body: createReadStream(tempPath),
+    duplex: 'half',
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`WebDAV 上传失败 (${res.status}): ${text.slice(0, 200)}`)
+  }
+}
+
+// 视频读取:透传 Range,上游回 206 时原样把 Content-Range 交给调用方。
+// 上游不支持 Range(回 200)时退回整段返回,由路由按 200 处理。
+export async function openStream(filename, relativePath = filename, rangeHeader = null, folder = config().folder) {
+  const headers = { Authorization: authHeader() }
+  if (rangeHeader) headers.Range = rangeHeader
+  const res = await fetch(itemUrl(relativePath, folder), { headers })
+  if (!res.ok && res.status !== 206) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`WebDAV 读取失败 (${res.status}): ${text.slice(0, 200)}`)
+  }
+  if (res.status !== 206 || !res.body) {
+    return { stream: res.body, start: 0, end: null, total: null, partial: false }
+  }
+  const contentRange = res.headers.get('content-range') || ''
+  const match = /bytes\s+(\d+)-(\d+)\/(\d+|\*)/i.exec(contentRange)
+  const start = match ? Number(match[1]) : 0
+  const end = match ? Number(match[2]) : null
+  const total = match && match[3] !== '*' ? Number(match[3]) : null
+  return { stream: res.body, start, end, total, partial: true }
 }
 
 export async function getImage(filename, relativePath = filename, folder = config().folder) {

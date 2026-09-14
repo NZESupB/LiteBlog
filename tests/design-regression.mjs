@@ -137,7 +137,16 @@ try {
   }
   const manifest = await (await request('/manifest.webmanifest')).json()
   assert.equal(manifest.theme_color, '#a54363')
-  console.log('通过：登录、图文发布、读取、相册、归档、私密边界、页面资源与主题。')
+  // 灯箱的三件套:一图一视频一 LIVE 角标,全部由用户点击才播(脚本里搜不到 autoplay)
+  const shell = await (await request('/index.html')).text()
+  for (const id of ['lightboxImg', 'lightboxVideo', 'lightboxLive']) assert.ok(shell.includes(`id="${id}"`), id)
+  assert.ok(shell.includes('playsinline'))
+  assert.ok(!/autoplay/.test(shell))
+  for (const asset of ['/js/lightbox.js', '/js/media.js']) {
+    const body = await (await request(asset)).text()
+    assert.ok(!/autoplay\s*=/.test(body), `${asset} 不应自行自动播放`)
+  }
+  console.log('通过：登录、图文发布、读取、相册、归档、私密边界、页面资源、灯箱外壳与主题。')
 } finally {
   db?.close()
   rmSync(dataDir, { recursive: true, force: true })
