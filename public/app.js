@@ -110,10 +110,10 @@ function updateDayProgress() {
     daysEl.hidden = true
     return
   }
-  if (!daysEl.querySelector('.days-count')) {
-    daysEl.innerHTML = '<span class="days-count"><strong></strong></span><span class="day-progress" role="progressbar" aria-label="到下一天的进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="day-progress-fill"></span></span>'
+  if (!daysEl.querySelector('.day-progress')) {
+    daysEl.innerHTML = '<span class="day-progress" role="progressbar" aria-label="到下一天的进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="day-progress-fill" aria-hidden="true"></span><span class="day-progress-label"><strong></strong></span></span>'
   }
-  $('.days-count strong', daysEl).textContent = `${days}天`
+  $('.day-progress-label strong', daysEl).textContent = `${days}天`
 
   const today = new Date(now)
   today.setHours(0, 0, 0, 0)
@@ -128,6 +128,7 @@ function updateDayProgress() {
   const remaining = hours ? `${hours}小时${minutes}分钟` : `${minutes}分钟`
   const progressBar = $('.day-progress', daysEl)
   progressBar.style.setProperty('--day-progress', progress.toFixed(6))
+  progressBar.classList.toggle('is-filled', progress >= 0.5)
   progressBar.setAttribute('aria-valuenow', String(percent))
   progressBar.setAttribute('aria-valuetext', `距离下一天还有${remaining}`)
   daysEl.hidden = false
@@ -1276,7 +1277,7 @@ function renderComments(p) {
     if (!replyState || !input) return
     replyState.hidden = !replyTarget
     $('.comment-reply-target', replyState).textContent = replyTarget ? `回复 ${replyTarget.author}` : ''
-    input.placeholder = replyTarget ? `回复 ${replyTarget.author}…` : '写条评论…'
+    input.placeholder = replyTarget ? '写下回复…' : '写条评论…'
   }
 
   function openComposer(comment = null) {

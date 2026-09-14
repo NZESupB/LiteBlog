@@ -169,35 +169,60 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible), input:focus:not(:
   48% { transform: scale(1); }
 }
 
-.days { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--fs-caption); font-weight: 500; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.days-count { display: inline-flex; align-items: baseline; }
-.days strong { font-size: var(--fs-footnote); font-weight: 700; color: var(--accent-deep); }
+.days { display: inline-flex; align-items: center; color: var(--muted); font-size: var(--fs-caption); font-weight: 500; line-height: 1.4; white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* 作者样式的 display 会压过 UA 的 [hidden],凡给类写了 display 又要靠 hidden 收起的都要补这条 */
 .days[hidden] { display: none; }
 .day-progress {
   --day-progress: 0;
-  position: relative; width: clamp(92px, 10vw, 118px); height: 6px; border-radius: var(--radius-pill);
-  background: var(--fill-strong); overflow: hidden;
-  box-shadow: inset 0 1px 2px rgba(48, 30, 38, .12), inset 0 0 0 1px rgba(255, 255, 255, .25);
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: clamp(112px, 13vw, 148px); height: 28px; padding: 0 13px;
+  border-radius: var(--radius-pill); overflow: hidden;
+  background: var(--fill-strong);
+  box-shadow: inset 0 0 0 1px var(--separator), inset 0 1px 2px rgba(48, 30, 38, .12);
 }
 .day-progress-fill {
-  position: relative; display: block; height: 100%; width: 100%;
-  border-radius: inherit; overflow: hidden;
-  background: linear-gradient(90deg, var(--accent), var(--accent-deep));
-  box-shadow: 0 0 12px var(--accent-wash);
+  position: absolute; inset: 0; z-index: 0; overflow: hidden;
+  border-radius: inherit;
+  background: linear-gradient(100deg, var(--accent), var(--accent-deep) 54%, var(--accent));
+  background-size: 180% 100%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1), 0 0 16px var(--accent-wash);
   transform: scaleX(var(--day-progress)); transform-origin: left center;
   transition: transform 1s linear;
   will-change: transform;
 }
-.day-progress-fill::after {
-  content: ""; position: absolute; inset: 0;
-  background: linear-gradient(105deg, transparent 18%, rgba(255, 255, 255, .62) 46%, transparent 72%);
-  transform: translateX(-130%);
-  animation: day-progress-sheen 3.6s var(--motion-ease) infinite;
+.day-progress-fill::before,
+.day-progress-fill::after { content: ""; position: absolute; inset: 0; pointer-events: none; }
+.day-progress-fill::before {
+  left: -48%; width: 44%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .78), transparent);
+  transform: skewX(-18deg);
+  animation: day-progress-flow 1.8s linear infinite;
 }
-@keyframes day-progress-sheen {
-  0%, 32% { transform: translateX(-130%); }
-  62%, 100% { transform: translateX(130%); }
+.day-progress-fill::after {
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, .96) 0 1px, transparent 1.55px),
+    radial-gradient(circle, rgba(255, 255, 255, .68) 0 .8px, transparent 1.35px);
+  background-size: 34px 100%, 53px 100%;
+  background-position: 0 50%, 17px 50%;
+  animation: day-progress-particles 2.2s linear infinite;
+}
+.day-progress-label {
+  position: relative; z-index: 1;
+  color: var(--ink); font-size: var(--fs-caption); font-weight: 750; letter-spacing: .01em;
+  text-shadow: 0 1px 2px var(--surface);
+  transition: color var(--motion-standard-duration) var(--motion-ease), text-shadow var(--motion-standard-duration) var(--motion-ease);
+}
+.day-progress.is-filled .day-progress-label {
+  color: var(--on-accent);
+  text-shadow: 0 1px 7px rgba(33, 12, 20, .42);
+}
+@keyframes day-progress-flow {
+  from { transform: translateX(0) skewX(-18deg); }
+  to { transform: translateX(390%) skewX(-18deg); }
+}
+@keyframes day-progress-particles {
+  from { background-position: 0 50%, 17px 50%; }
+  to { background-position: 34px 50%, 70px 50%; }
 }
 
 .site-nav { margin-left: auto; display: flex; align-items: center; gap: 14px; flex-shrink: 0; font-size: var(--fs-footnote); }
@@ -526,7 +551,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .comment-actions button { padding: 0; background: none; border: 0; color: var(--muted); font-size: var(--fs-caption); transition: color var(--motion-fast-duration) var(--motion-ease); }
 .comment-actions button:hover { color: var(--accent-deep); }
 .comment-form[hidden] { display: none; }
-.comment-form { display: flex; align-items: flex-end; gap: 8px; margin-top: 14px; }
+.comment-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 14px; }
 .comment-input { flex: 1; min-height: 38px; resize: none; padding: 9px 12px; border-radius: var(--radius-lg); }
 .comment-form .emoji-toggle, .emoji-btn {
   display: flex; align-items: center; justify-content: center; width: 36px; height: 36px;
@@ -535,9 +560,16 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 }
 .comment-form .emoji-toggle:hover, .emoji-btn:hover { background: var(--fill-strong); color: var(--ink); }
 .comment-reply-state[hidden] { display: none; }
-.comment-reply-state { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 7px 12px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent-deep); font-size: var(--fs-caption); }
+.comment-reply-state { flex: 0 0 100%; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 7px 6px 12px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--accent-deep); font-size: var(--fs-caption); }
 .comment-reply-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.comment-reply-cancel { border: 0; background: none; color: inherit; font-size: var(--fs-caption); text-decoration: underline; }
+.comment-reply-cancel {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 26px; height: 26px; margin-left: auto; padding: 0; border: 0; border-radius: 50%;
+  background: var(--fill-strong); color: inherit; font-size: 16px; line-height: 1;
+  transition: background var(--motion-fast-duration) var(--motion-ease), transform var(--motion-fast-duration) var(--motion-ease);
+}
+.comment-reply-cancel:hover { background: var(--accent-wash); }
+.comment-reply-cancel:active { transform: scale(.92); }
 .comment-reply-target { animation: target-flash 1.6s var(--motion-ease); }
 @keyframes target-flash {
   0%, 100% { background: transparent; }
