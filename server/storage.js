@@ -89,6 +89,7 @@ export async function openStream(filename, backend, relativePath = filename, ran
     start,
     end: Math.max(start, end),
     total: size,
+    partial: Boolean(range),
   }
 }
 

@@ -1097,7 +1097,9 @@ app.get('/uploads/:name', async (c) => {
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'private, max-age=31536000, immutable',
     }
-    const partial = opened.start > 0 || opened.end == null || opened.total == null || opened.end < opened.total - 1
+    // 只要客户端发了 Range 且后端确实按区间返回,就必须保持 206。
+    // bytes=0- 是很常见的首包请求;iOS Safari 会据此决定能否流式播放。
+    const partial = Boolean(opened.partial)
     if (partial && opened.total != null && opened.end != null) {
       headers['Content-Range'] = `bytes ${opened.start}-${opened.end}/${opened.total}`
       headers['Content-Length'] = String(opened.end - opened.start + 1)

@@ -5,6 +5,7 @@ import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
 import { attachComposerViewport } from '/js/composer-viewport.js'
 import { api, streamSse, uploadWithProgress, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
+import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/inline-video.js'
 import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration, videoContentType } from '/js/media.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
@@ -376,6 +377,7 @@ function observeViewport(target, onChange, options) {
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
   activeComposerModal?.close?.(true)
+  stopInlineVideo()
   closeLightbox(true)
   closePostMenu(true)
   closeDropdowns(null, true)
@@ -1436,28 +1438,51 @@ function renderPostMenu(p, comments, reactions) {
 
 // 列表里的媒体格子:图片给静帧;视频给封面帧 + 播放角标 + 时长;实况图给静帧 + LIVE 角标。
 // 一律不自动播放、不预加载视频 —— 只有封面图会被真的加载,格子再多也不会拖着视频文件走。
-function mediaTile(media, alt = '') {
-  const poster = media.type === 'video' ? (media.poster || '') : media.url
-  const tile = el(`<button class="media-tile" type="button">${poster ? `<img src="${esc(poster)}" alt="${esc(alt)}" loading="lazy" />` : ''}</button>`)
-  if (!poster) tile.classList.add('no-poster')
-  if (media.type === 'video') {
-    tile.classList.add('is-video')
+// 视频在这个格子里原地播放,所以格子是容器:封面撑尺寸,点击层、播放器层、收起按钮各占一层。
+// 播放器由 inline-video.js 在点击时建到 .media-player 里(ArtPlayer 会自己重建里面的 DOM)。
+function mediaTile(media) {
+  const isVideo = media.type === 'video'
+  const poster = isVideo ? (media.poster || '') : media.url
+  // 封面一律是装饰图:格子的可读名字由点击层的 aria-label 给,免得读两遍
+  const tile = el(`<div class="media-tile${isVideo ? ' is-video' : ''}${poster ? '' : ' no-poster'}">${poster ? `<img src="${esc(poster)}" alt="" loading="lazy" />` : ''}</div>`)
+  if (isVideo) {
     tile.append(el(`<span class="media-play" aria-hidden="true">${icon('play')}</span>`))
     if (media.duration) tile.append(el(`<span class="media-duration">${formatDuration(media.duration)}</span>`))
   } else if (media.live) {
-    tile.classList.add('is-live')
     tile.append(el('<span class="media-live" aria-hidden="true"><span class="lb-live-dot"></span>LIVE</span>'))
+  }
+  tile.append(el(`<button class="media-hit" type="button" aria-label="${isVideo ? '播放视频' : '查看照片'}"></button>`))
+  if (isVideo) {
+    tile.append(
+      el('<div class="media-player" hidden></div>'),
+      el(`<button class="media-collapse" type="button" aria-label="收起视频" hidden>${icon('x')}</button>`),
+    )
   }
   return tile
 }
 
-// 时间轴与相册共用:按顺序渲染格子并把灯箱串起来
-function renderMediaGrid(grid, list, alt = '') {
-  list.forEach((media, i) => {
-    const tile = mediaTile(media, alt)
-    tile.onclick = () => openLightbox(list, i, tile)
+// 时间轴与相册共用:图片与实况图交给灯箱,视频在自己格子里播 —— 两种交互不互相穿插
+function mediaTileAction(tile, media, photos) {
+  const hit = $('.media-hit', tile)
+  if (media.type === 'video') {
+    hit.onclick = () => playInlineVideo(tile, media, { onError: () => showToast('这个视频的编码浏览器放不了') })
+    // 收起按钮是点击层的兄弟节点(不能套在按钮里),事件不会冒泡过去,得单独接
+    $('.media-collapse', tile).onclick = () => stopInlineVideo()
+    return hit
+  }
+  hit.onclick = () => { stopInlineVideo(); openLightbox(photos, photos.indexOf(media), hit) }
+  return hit
+}
+
+function renderMediaGrid(grid, list) {
+  const photos = list.filter((media) => media.type !== 'video')
+  // 播放器脚本先取回来:iOS 只有在点击手势里同步开始播放才放声音
+  if (list.some((media) => media.type === 'video')) void preloadInlineVideoPlayer()
+  for (const media of list) {
+    const tile = mediaTile(media)
+    mediaTileAction(tile, media, photos)
     grid.appendChild(tile)
-  })
+  }
 }
 
 function renderPost(p) {
@@ -1674,6 +1699,9 @@ async function renderGallery() {
       main.appendChild(emptyJournal('等待第一张，一起的照片', '留住眼前的风景，也留住那一刻的心情。', '/images/journal-cover.jpg'))
       return
     }
+    // 灯箱只承载图片与实况图;视频有自己的原地播放器,不进灯箱序列
+    const photos = images.filter((media) => media.type !== 'video')
+    if (images.some((media) => media.type === 'video')) void preloadInlineVideoPlayer()
     // 按年月分段:跨度一大,连续网格就变成了没有时间坐标的缩略图墙
     const months = new Map()
     for (const media of images) {
@@ -1692,11 +1720,11 @@ async function renderGallery() {
       // 灯箱序列跨月连续:在相册里可以直接一路翻到上个月
       list.forEach((media) => {
         const caption = `${media.author} · ${formatTime(media.created_at)}`
-        const tile = mediaTile(media, caption)
+        const tile = mediaTile(media)
         tile.classList.add('gallery-photo')
-        tile.append(el(`<span>${esc(caption)}</span>`))
-        tile.setAttribute('aria-label', `查看${media.type === 'video' ? '视频' : '照片'}：${caption}`)
-        tile.onclick = () => openLightbox(images, images.indexOf(media), tile)
+        tile.append(el(`<span class="media-caption">${esc(caption)}</span>`))
+        const hit = mediaTileAction(tile, media, photos)
+        hit.setAttribute('aria-label', `${media.type === 'video' ? '播放视频' : '查看照片'}：${caption}`)
         grid.appendChild(tile)
       })
       main.appendChild(section)

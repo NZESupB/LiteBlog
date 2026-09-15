@@ -495,8 +495,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .img-grid.n2 { grid-template-columns: 1fr 1fr; }
 .img-grid:not(.n1):not(.n2) { grid-template-columns: repeat(3, 1fr); }
 .media-tile {
-  position: relative; display: block; padding: 0; overflow: hidden;
-  border: 0; border-radius: var(--radius); background: var(--surface-2); cursor: zoom-in;
+  position: relative; overflow: hidden;
+  border-radius: var(--radius); background: var(--surface-2);
   aspect-ratio: 1;
   box-shadow: inset 0 0 0 var(--hairline) var(--separator);
 }
@@ -505,6 +505,17 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .media-tile.no-poster { background: var(--surface-3); }
 .img-grid.n1 .media-tile { aspect-ratio: auto; }
 .img-grid.n1 .media-tile img { width: 100%; height: auto; max-height: 460px; object-fit: cover; }
+/* 没有封面就没有内容撑高,单列的格子会塌成 0 */
+.img-grid.n1 .media-tile.no-poster { aspect-ratio: 16 / 9; }
+/* 整格点击层:压在封面与角标之上,视频播放时让位给原生控件 */
+.media-hit {
+  position: absolute; inset: 0; z-index: 2;
+  padding: 0; border: 0; background: none; cursor: zoom-in;
+}
+.media-tile.is-video .media-hit { cursor: pointer; }
+/* 焦点环画在格子上:overflow: hidden 会把子元素的 outline 裁掉 */
+.media-tile:has(.media-hit:focus-visible) { outline: 2px solid var(--accent-deep); outline-offset: 3px; }
+.media-hit:focus-visible { outline: none; }
 /* 角标:视频给播放按钮+时长,实况图给 LIVE */
 .media-play {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -525,6 +536,24 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 }
 .media-duration { right: 8px; bottom: 8px; font-variant-numeric: tabular-nums; letter-spacing: 0; }
 .media-live { left: 8px; top: 8px; padding-left: 6px; }
+/* 原地播放:ArtPlayer 铺满整格,收起按钮再盖在播放器之上 */
+.media-player {
+  position: absolute; inset: 0; z-index: 3;
+  background: #000;
+}
+.media-player[hidden], .media-collapse[hidden] { display: none; }
+/* 播放时占满整行:三列格子里的小方块摆不下播放器控件,竖版视频再由 max-height 兜住 */
+.media-tile.is-playing { grid-column: 1 / -1; max-height: 70vh; }
+/* 播放期间点击层让位:播放、全屏这些交给播放器自己的控件 */
+.media-tile.is-playing .media-hit { visibility: hidden; }
+.media-collapse {
+  position: absolute; top: 8px; right: 8px; z-index: 5;
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%;
+  background: rgba(20, 16, 18, .55); color: #fff;
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+}
+.media-collapse .icon { width: 13px; height: 13px; }
 .lb-live-dot {
   width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
   background: #ffd60a; box-shadow: 0 0 0 2px rgba(255, 214, 10, .28);
@@ -675,9 +704,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .gallery-month-count { font-family: var(--font-body); font-size: var(--fs-caption); font-weight: 500; color: var(--faint); font-variant-numeric: tabular-nums; }
 .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 .gallery-photo { border-radius: var(--radius); }
-.gallery-photo span { position: absolute; left: 0; right: 0; bottom: 0; padding: 20px 12px 10px; background: linear-gradient(transparent, rgba(0, 0, 0, .62)); color: #fff; font-size: 11px; text-align: left; opacity: 0; transition: opacity var(--motion-standard-duration) var(--motion-ease); }
-.gallery-photo:hover span, .gallery-photo:focus-visible span { opacity: 1; }
-.gallery-photo:focus-visible { outline-offset: 3px; }
+.gallery-photo .media-caption { position: absolute; left: 0; right: 0; bottom: 0; padding: 20px 12px 10px; background: linear-gradient(transparent, rgba(0, 0, 0, .62)); color: #fff; font-size: 11px; text-align: left; opacity: 0; transition: opacity var(--motion-standard-duration) var(--motion-ease); }
+.gallery-photo:hover .media-caption, .gallery-photo:has(.media-hit:focus-visible) .media-caption { opacity: 1; }
 .gallery-count { color: var(--muted); font-size: var(--fs-footnote); padding-bottom: 8px; }
 
 /* ---------- 空状态 ---------- */

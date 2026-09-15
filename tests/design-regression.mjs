@@ -132,7 +132,7 @@ try {
   assert.equal((await request(avatar.avatarUrl, { authenticated: false })).status, 200)
   assert.equal((await request('/api/profile/avatar', { method: 'DELETE' })).status, 200)
   assert.equal((await (await request('/api/site')).json()).user.avatarUrl, null)
-  for (const resource of ['/', '/style.css', '/app.js', '/js/theme.js', '/js/sheet-motion.js', '/js/composer-viewport.js', '/images/journal-cover.jpg', '/vendor/icons.js']) {
+  for (const resource of ['/', '/style.css', '/app.js', '/js/theme.js', '/js/sheet-motion.js', '/js/composer-viewport.js', '/images/journal-cover.jpg', '/vendor/icons.js', '/vendor/artplayer.min.js']) {
     assert.equal((await request(resource, { authenticated: false })).status, 200, resource)
   }
   const manifest = await (await request('/manifest.webmanifest')).json()
@@ -142,7 +142,7 @@ try {
   for (const id of ['lightboxImg', 'lightboxVideo', 'lightboxLive']) assert.ok(shell.includes(`id="${id}"`), id)
   assert.ok(shell.includes('playsinline'))
   assert.ok(!/autoplay/.test(shell))
-  for (const asset of ['/js/lightbox.js', '/js/media.js']) {
+  for (const asset of ['/js/lightbox.js', '/js/media.js', '/js/inline-video.js']) {
     const body = await (await request(asset)).text()
     assert.ok(!/autoplay\s*=/.test(body), `${asset} 不应自行自动播放`)
   }

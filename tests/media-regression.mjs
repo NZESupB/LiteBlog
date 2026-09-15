@@ -1,4 +1,4 @@
-// 视频与实况图回归:流式上传、配对发布、Range 读取、可见性边界与删除清理。
+// 视频与实况图回归:原地播放器、流式上传、配对发布、Range 读取、可见性边界与删除清理。
 // 执行: node tests/media-regression.mjs
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
@@ -23,6 +23,108 @@ assert.equal(mediaStem('IMG_0001.HEIC'), 'IMG_0001')
 assert.equal(isVideoFile(file('IMG_0001.MOV')), true)
 assert.equal(videoContentType(file('a.MOV')), 'video/quicktime')
 assert.equal(videoContentType(file('a.webm', '')), 'video/webm')
+
+// 原地播放器:同一时刻只有一个播放器,点收起或编码不支持时销毁并退回封面。
+// 播放体验(全屏/画中画/倍速)由 ArtPlayer 提供,这里用最小假 DOM + 假播放器钉住我们的接线。
+class FakeArtplayer {
+  static instances = []
+  constructor(option) {
+    this.option = option
+    this.destroyed = false
+    this.played = 0
+    this.events = new Map()
+    this.video = { videoWidth: 0, videoHeight: 0 }
+    FakeArtplayer.instances.push(this)
+  }
+  on(event, handler) { this.events.set(event, handler) }
+  emit(event) { this.events.get(event)?.() }
+  play() { this.played += 1; return Promise.resolve() }
+  destroy() { this.destroyed = true }
+}
+globalThis.Artplayer = FakeArtplayer
+
+const { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } = await import('../public/js/inline-video.js')
+
+function fakeTile({ singleColumn = false, poster = null, player = true } = {}) {
+  const classes = new Set()
+  const container = { hidden: true }
+  const collapse = { hidden: true }
+  const nodes = { '.media-player': player ? container : null, '.media-collapse': collapse, img: poster }
+  return {
+    container, collapse,
+    style: { aspectRatio: '' },
+    closest: (sel) => (singleColumn && sel === '.img-grid.n1' ? {} : null),
+    querySelector: (sel) => nodes[sel] ?? null,
+    classList: { add: (name) => classes.add(name), remove: (name) => classes.delete(name) },
+    playing: () => classes.has('is-playing'),
+  }
+}
+
+const clip = { url: '/uploads/a.mp4', poster: '/uploads/a.jpg' }
+const tileA = fakeTile({ poster: { naturalWidth: 640, naturalHeight: 360 } })
+assert.equal(FakeArtplayer.instances.length, 0, '没点之前不能建播放器,列表也不该去加载视频文件')
+playInlineVideo(tileA, clip)
+const artA = FakeArtplayer.instances.at(-1)
+assert.equal(FakeArtplayer.instances.length, 1)
+assert.equal(artA.option.url, clip.url)
+assert.equal(artA.option.poster, clip.poster)
+// 「内嵌也要有全屏/设置/画中画」就落在这些开关上,别在裁剪时手滑关掉
+assert.equal(artA.option.autoplay, false, '播放只由用户点击触发,不能自动播放')
+assert.equal(artA.option.fullscreen, true, '要有全屏')
+assert.equal(artA.option.pip, true, '要有画中画')
+assert.equal(artA.option.setting, true, '要有设置面板')
+assert.equal(artA.option.playbackRate, true, '设置里要有倍速')
+assert.equal(artA.option.aspectRatio, true, '设置里要有画面比例')
+assert.equal(artA.option.moreVideoAttr.playsInline, true, 'iOS 要能内嵌播')
+assert.equal(artA.played, 1, '点封面即播,不再等第二次点击')
+assert.equal(tileA.playing(), true)
+assert.equal(tileA.container.hidden, false)
+assert.equal(tileA.collapse.hidden, false)
+assert.equal(tileA.style.aspectRatio, '640 / 360', '先把格子按封面比例铺开,免得等元数据时跳一下')
+artA.video.videoWidth = 480
+artA.video.videoHeight = 854
+artA.emit('video:loadedmetadata')
+assert.equal(tileA.style.aspectRatio, '480 / 854', '元数据到手后按真实画面比例校正')
+
+const plainTile = fakeTile({ player: false }) // 图片格子:只有点击层,没有播放器容器
+playInlineVideo(plainTile, clip)
+assert.equal(FakeArtplayer.instances.length, 1, '图片格子没有播放器容器,不能被当成视频格')
+assert.equal(tileA.playing(), true, '也不能把在播的那个挤掉')
+
+const tileB = fakeTile()
+playInlineVideo(tileB, { url: '/uploads/b.mp4' })
+const artB = FakeArtplayer.instances.at(-1)
+assert.equal(artA.destroyed, true, '开始播第二个时第一个要销毁')
+assert.equal(tileA.playing(), false)
+assert.equal(tileA.container.hidden, true)
+assert.equal(tileA.collapse.hidden, true)
+assert.equal(tileA.style.aspectRatio, '', '收起后要清掉播放时的比例,回到封面尺寸')
+assert.equal(artB.destroyed, false)
+assert.equal(tileB.playing(), true)
+
+const soloTile = fakeTile({ singleColumn: true, poster: { naturalWidth: 640, naturalHeight: 360 } })
+playInlineVideo(soloTile, clip)
+const artSolo = FakeArtplayer.instances.at(-1)
+assert.equal(artB.destroyed, true, '单列格子同样共享「只有一个在播」')
+assert.equal(soloTile.style.aspectRatio, '', '单列格子本来就够大,不跟着画面比例改尺寸')
+artSolo.video.videoWidth = 480
+artSolo.video.videoHeight = 854
+artSolo.emit('video:loadedmetadata')
+assert.equal(soloTile.style.aspectRatio, '', '单列格子拿到元数据也不重排')
+
+let notified = 0
+const tileC = fakeTile()
+playInlineVideo(tileC, clip, { onError: () => { notified += 1 } })
+const artC = FakeArtplayer.instances.at(-1)
+artC.emit('video:error') // 浏览器解不了这个编码(例如 Chrome 播 HEVC)
+assert.equal(notified, 1, '播放失败要回调出去,交给界面提示用户')
+assert.equal(artC.destroyed, true)
+assert.equal(tileC.playing(), false)
+assert.equal(tileC.container.hidden, true)
+
+stopInlineVideo()
+assert.equal(FakeArtplayer.instances.every((art) => art.destroyed), true)
+assert.ok((await preloadInlineVideoPlayer()) === FakeArtplayer, '已经有了就不要再插脚本标签')
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 mkdirSync(path.join(root, 'data'), { recursive: true })
@@ -150,7 +252,13 @@ try {
   assert.equal(videoRes.headers.get('content-type'), 'video/mp4')
   assert.equal((await videoRes.arrayBuffer()).byteLength, videoBytes.length)
 
-  // Range 请求必须回 206 与正确的 Content-Range/Slice
+  // Range 请求必须回 206 与正确的 Content-Range/Slice。
+  // iOS Safari 会先发 bytes=0-;即使覆盖整个文件,也不能降级成 200。
+  const openRangeRes = await request(post.images[2].url, { headers: { Range: 'bytes=0-' } })
+  assert.equal(openRangeRes.status, 206)
+  assert.equal(openRangeRes.headers.get('content-range'), `bytes 0-${videoBytes.length - 1}/${videoBytes.length}`)
+  assert.equal(openRangeRes.headers.get('content-length'), String(videoBytes.length))
+  assert.equal((await openRangeRes.arrayBuffer()).byteLength, videoBytes.length)
   const rangeRes = await request(post.images[2].url, { headers: { Range: 'bytes=0-9' } })
   assert.equal(rangeRes.status, 206)
   assert.equal(rangeRes.headers.get('content-range'), `bytes 0-9/${videoBytes.length}`)
