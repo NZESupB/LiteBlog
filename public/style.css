@@ -34,8 +34,14 @@
   --glass-shadow: 0 20px 50px -22px rgba(90, 40, 60, .42);
   --scrim: rgba(24, 20, 22, .34);
   --material-header: rgba(255, 250, 251, .78);
-  --material-dock: rgba(255, 250, 251, .72);
+  --material-dock: rgba(255, 250, 251, .5);
   --material-divider: rgba(255, 250, 251, .88);
+  /* Dock 的液面:斜掠高光 + 底部积光,让玻璃看起来有厚度 */
+  --dock-sheen: rgba(255, 255, 255, .6);
+  --dock-glow: rgba(255, 255, 255, .46);
+  /* 容器变形滑行时的液态玻璃(比 Dock 更透,要能一路看见底下的内容) */
+  --morph-glass: rgba(255, 250, 251, .34);
+  --morph-sheen: rgba(255, 255, 255, .55);
   /* ---- 尺度 ---- */
   --radius-sm: 10px;
   --radius: 14px;
@@ -52,6 +58,8 @@
   --fs-caption: 12px;
   /* ---- 动效 ---- */
   --spring: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 带过冲的吸附曲线:按钮「啪」地吸进顶栏 */
+  --spring-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
   --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --motion-fast-duration: 120ms;
   --motion-standard-duration: 220ms;
@@ -86,8 +94,12 @@
   --glass-shadow: 0 20px 50px -22px rgba(0, 0, 0, .9);
   --scrim: rgba(0, 0, 0, .62);
   --material-header: rgba(10, 9, 11, .72);
-  --material-dock: rgba(18, 17, 20, .78);
+  --material-dock: rgba(22, 21, 26, .62);
   --material-divider: rgba(0, 0, 0, .82);
+  --dock-sheen: rgba(255, 255, 255, .16);
+  --dock-glow: rgba(255, 255, 255, .11);
+  --morph-glass: rgba(28, 26, 30, .4);
+  --morph-sheen: rgba(255, 255, 255, .13);
   --shadow-pop: 0 18px 50px -18px rgba(0, 0, 0, .9);
 }
 
@@ -402,6 +414,17 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
   transition: transform var(--motion-fast-duration) var(--motion-ease), opacity var(--motion-fast-duration) var(--motion-ease);
 }
 .write-trigger .icon { width: 15px; height: 15px; }
+/* 顶栏那颗写入口。槽负责「占位」:从 0 宽撑开,时间轴/相册跟着往左让位(而不是整块跳一下),
+   同时用负 margin 抵消 .site-nav 的 gap,收起时不留下空洞;按钮自己再带一点缩放过冲,做出吸附感。 */
+.header-write-slot {
+  display: inline-flex; align-items: center; overflow: hidden;
+  max-width: 0; margin-left: -14px; margin-right: -14px;
+  transition: max-width var(--motion-standard-duration) var(--motion-ease), margin var(--motion-standard-duration) var(--motion-ease);
+}
+.header-write-slot[hidden] { display: none; }
+.header-write-slot.header-write-presence-present { max-width: 150px; margin-left: 0; margin-right: 0; }
+.header-write { min-height: 32px; padding: 6px 14px; opacity: 0; transform: scale(.82); transition: opacity var(--motion-fast-duration) var(--motion-ease), transform var(--motion-spring-duration) var(--spring-bounce); }
+.header-write-slot.header-write-presence-present .header-write { opacity: 1; transform: none; }
 .write-trigger:hover { opacity: .9; }
 .write-trigger:active { transform: scale(.96); }
 
@@ -810,7 +833,42 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 }
 .composer-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 28px; }
 .composer-grab { display: none; }
+/* 移动端抓取条:热区 88×28,视觉只是一根小横条;只在窄屏出现,桌面不启用鼠标拖动。 */
+.composer-grab::before {
+  content: ''; position: absolute; left: 50%; top: 9px; transform: translateX(-50%);
+  width: 36px; height: 5px; border-radius: var(--radius-pill); background: var(--separator-strong);
+  transition: background var(--motion-fast-duration) var(--motion-ease);
+}
+.composer-grab:hover::before, .composer-grab:focus-visible::before { background: var(--accent); }
 .composer-body .compose { margin: 0; padding: 0; border: 0; background: none; box-shadow: none; }
+/* 容器变形(桌面 + 移动端):变形层只画表面(位置+尺寸+圆角),面板内容按进度淡入 —— 见 js/sheet-motion.js。
+   表面必须留在变形层上,面板本体静止,否则面板随内容改高时两者会错位。 */
+.composer-morph {
+  position: absolute; z-index: 0; pointer-events: none;
+  background: var(--accent);
+  will-change: left, top, width, height;
+}
+/* 纸面:只在展开的最后一段凝出来(收回去时最先化掉),仍是实心表面 */
+.composer-morph::before {
+  content: ''; position: absolute; inset: 0; border-radius: inherit;
+  background: var(--surface); box-shadow: var(--shadow-pop);
+  opacity: var(--morph-paper, 0);
+}
+/* 液态玻璃:滑行期间的表面。半透明 + 斜掠高光 + 内侧亮边 + 柔和投影,
+   底下的正文一路透过来;底色的深浅走 --morph-glass,进出由 --morph-glass-opacity 驱动。 */
+.composer-morph::after {
+  content: ''; position: absolute; inset: 0; border-radius: inherit;
+  background: linear-gradient(150deg, var(--morph-sheen), rgba(255, 255, 255, 0) 46%), var(--morph-glass);
+  box-shadow: var(--glass-rim), var(--glass-shadow);
+  opacity: var(--morph-glass-opacity, 0);
+}
+.composer-overlay.morph > .composer-dialog { z-index: 1; background: transparent; box-shadow: none; }
+.composer-overlay.morph > .composer-dialog > * {
+  opacity: var(--morph-content, 1);
+  translate: 0 var(--morph-shift, 0px);
+}
+/* 变形期间触发元素由变形层顶替,收回原位后再交还 */
+.composer-origin-hidden { opacity: 0 !important; }
 .composer-close, .avatar-crop-close {
   position: absolute; top: 12px; right: 14px; z-index: 2;
   width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%;
@@ -998,14 +1056,24 @@ body.modal-open .to-top { visibility: hidden; }
   position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 30;
   display: none; align-items: center; gap: 4px; transform: translateX(-50%);
   padding: 6px; border-radius: var(--radius-pill);
+  /* 比其它玻璃层更透、更糊:底下的正文要明显在走,才像液态玻璃 */
   background: var(--material-dock);
-  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: saturate(190%) blur(28px); backdrop-filter: saturate(190%) blur(28px);
   box-shadow: var(--glass-rim), var(--glass-shadow);
 }
+/* 液面:两个伪元素画斜掠高光与底部积光。z-index:-1 让它们压在自身底色之上、
+   内容之下(负 z-index 后代绘制在元素背景之后、常规子元素之前),标签与图标不被冲淡。 */
+.mobile-nav::before, .mobile-nav::after {
+  content: ''; position: absolute; inset: 0; z-index: -1;
+  border-radius: inherit; pointer-events: none;
+}
+.mobile-nav::before { background: linear-gradient(150deg, var(--dock-sheen), rgba(255, 255, 255, 0) 46%); }
+.mobile-nav::after { background: radial-gradient(130% 96% at 50% 122%, var(--dock-glow), rgba(255, 255, 255, 0) 62%); }
+/* 底色更透之后标签不能再走 muted:玻璃压到深色内容上时对比度会掉到 AA 以下 */
 .mobile-nav a {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
   min-width: 62px; padding: 6px 10px; border-radius: var(--radius-pill);
-  color: var(--muted); font-size: 10px; font-weight: 500;
+  color: var(--ink); font-size: 10px; font-weight: 500;
   transition: background var(--motion-fast-duration) var(--motion-ease), color var(--motion-fast-duration) var(--motion-ease);
 }
 .mobile-nav a.active { color: var(--accent-deep); }
@@ -1017,12 +1085,15 @@ body.modal-open .to-top { visibility: hidden; }
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 559px) {
+  .composer-overlay, .avatar-crop-overlay { padding: 10px; }
   .container { padding-left: 16px; padding-right: 16px; }
   .header-inner { padding: 8px 16px; gap: 10px; }
   .site-nav { gap: 10px; }
   .nav-segments a { padding: 4px 12px; }
   .page-heading, .journal-heading { flex-direction: column; align-items: flex-start; gap: 14px; padding: 26px 0 16px; }
   .journal-heading-actions { padding-bottom: 0; }
+  /* 移动端写入口只留 Dock 里那颗,标题旁与顶栏都不再出现 */
+  .journal-heading-actions, .header-write-slot { display: none; }
   .post { padding: 20px 0; }
   .gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   /* 触屏热区:不动视觉尺寸,只把可点区域撑到 40px 以上 */
@@ -1041,8 +1112,14 @@ body.modal-open .to-top { visibility: hidden; }
   .compose-actions { gap: 8px; }
   .compose-actions .public-opts { flex-basis: 100%; }
   .preview-item { width: 78px; height: 78px; }
-  .composer-body { padding: 22px 18px; }
-  .composer-dialog { border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+  .composer-body { padding: 26px 18px 18px; }
+  /* 写作面板铺满窄屏并给足高度:四角都圆角,操作栏沉底,输入区跟着变大。 */
+  .composer-dialog { width: 100%; min-height: min(560px, 100%); border-radius: var(--radius-lg); }
+  .composer-grab { display: block; position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 88px; height: 28px; padding: 0; border: 0; background: none; touch-action: none; }
+  .compose textarea { min-height: 168px; }
+  .composer-body { display: flex; }
+  .composer-body .compose { display: flex; flex-direction: column; width: 100%; }
+  .composer-body .compose-actions { margin-top: auto; }
   /* 窄屏标题与草稿状态分两行:并排会把「已保存到此浏览器」挤成三行 */
   .compose-heading { flex-direction: column; align-items: flex-start; gap: 2px; font-size: 20px; padding-right: 34px; }
   .draft-save-state { font-size: 11px; }
@@ -1063,20 +1140,22 @@ body.modal-open .to-top { visibility: hidden; }
   .site-heart .icon { animation: none; }
 }
 @media (prefers-reduced-transparency: reduce) {
-  :root { --glass-surface: #fffafb; --material-header: #fffafb; --material-dock: #fffafb; --material-divider: #fffafb; }
-  [data-theme="dark"] { --glass-surface: #141216; --material-header: #000; --material-dock: #141216; --material-divider: #000; }
+  :root { --glass-surface: #fffafb; --material-header: #fffafb; --material-dock: #fffafb; --material-divider: #fffafb; --dock-sheen: rgba(255, 255, 255, 0); --dock-glow: rgba(255, 255, 255, 0); }
+  [data-theme="dark"] { --glass-surface: #141216; --material-header: #000; --material-dock: #141216; --material-divider: #000; --dock-sheen: rgba(255, 255, 255, 0); --dock-glow: rgba(255, 255, 255, 0); }
   .site-header::before, .mobile-nav, .dropdown, .post-menu, .toast, .archive-bubble, .to-top, .date-divider, .gallery-month-heading {
     -webkit-backdrop-filter: none; backdrop-filter: none;
   }
   .lightbox { background: rgba(0, 0, 0, .97); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .composer-overlay, .avatar-crop-overlay { -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :root, [data-theme="dark"] { --morph-glass: var(--surface); --morph-sheen: rgba(255, 255, 255, 0); }
 }
 @media (prefers-contrast: more) {
-  :root { --separator: rgba(60, 60, 67, .34); --separator-strong: rgba(60, 60, 67, .5); --text: #1d1d1f; --muted: #4a4a4f; }
-  [data-theme="dark"] { --separator: rgba(235, 235, 245, .4); --separator-strong: rgba(235, 235, 245, .62); --text: #fff; --muted: #d2d2d7; }
+  :root { --separator: rgba(60, 60, 67, .34); --separator-strong: rgba(60, 60, 67, .5); --text: #1d1d1f; --muted: #4a4a4f; --material-dock: var(--surface); --dock-sheen: rgba(255, 255, 255, 0); --dock-glow: rgba(255, 255, 255, 0); --morph-glass: var(--surface); --morph-sheen: rgba(255, 255, 255, 0); }
+  [data-theme="dark"] { --separator: rgba(235, 235, 245, .4); --separator-strong: rgba(235, 235, 245, .62); --text: #fff; --muted: #d2d2d7; --material-dock: var(--surface); --dock-sheen: rgba(255, 255, 255, 0); --dock-glow: rgba(255, 255, 255, 0); --morph-glass: var(--surface); --morph-sheen: rgba(255, 255, 255, 0); }
   .site-header::before { opacity: 1; }
 }
 @supports not (backdrop-filter: blur(1px)) {
+  :root { --dock-sheen: rgba(255, 255, 255, 0); --dock-glow: rgba(255, 255, 255, 0); }
   .site-header::before, .mobile-nav, .dropdown, .post-menu, .toast, .archive-bubble, .to-top, .date-divider, .gallery-month-heading { background: var(--surface); }
   [data-theme="dark"] .site-header::before { background: var(--surface); }
 }

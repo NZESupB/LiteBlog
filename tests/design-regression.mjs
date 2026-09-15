@@ -146,6 +146,16 @@ try {
     const body = await (await request(asset)).text()
     assert.ok(!/autoplay\s*=/.test(body), `${asset} 不应自行自动播放`)
   }
+  // 顶栏写入口:槽负责撑开占位、按钮负责吸附缩放,三处文件名/类名要能对上(app.js 的 watchHeaderWrite)
+  assert.ok(shell.includes('id="headerWriteSlot"'), 'headerWriteSlot')
+  assert.ok(shell.includes('id="headerWrite"'), 'headerWrite')
+  const styles = await (await request('/style.css')).text()
+  assert.ok(styles.includes('.header-write-slot'), '顶栏写入口槽样式')
+  assert.ok(styles.includes('.header-write-slot[hidden]'), '顶栏写入口要能被 hidden 收起')
+  assert.ok(styles.includes('--spring-bounce'), '吸附曲线')
+  const appJs = await (await request('/app.js')).text()
+  assert.ok(appJs.includes('watchHeaderWrite'), '顶栏写入口的显隐逻辑')
+  assert.ok(appJs.includes("className: 'header-write-presence'"), '顶栏写入口的 presence 类名')
   console.log('通过：登录、图文发布、读取、相册、归档、私密边界、页面资源、灯箱外壳与主题。')
 } finally {
   db?.close()

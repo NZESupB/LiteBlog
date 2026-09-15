@@ -25,6 +25,10 @@
           <a href="#/" data-nav="timeline">时间轴</a>
           <a href="#/gallery" data-nav="gallery">相册</a>
         </div>
+        <!-- 桌面端滚过标题后接手写入口;移动端的入口在 Dock 里,这颗在窄屏不出现(app.js 控制槽的显隐) -->
+        <span class="header-write-slot" id="headerWriteSlot" hidden>
+          <button class="write-trigger header-write" id="headerWrite" type="button">写日常</button>
+        </span>
         <span id="userArea"></span>
       </nav>
     </div>

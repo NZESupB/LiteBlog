@@ -336,8 +336,10 @@ function openComposerModal(post = null, source = null) {
   overlay.onclick = (event) => { if (event.target === overlay) closeModal() }
   document.body.appendChild(overlay)
   const dialog = $('.composer-dialog', overlay)
-  if (trigger) {
-    const triggerRect = trigger.getBoundingClientRect()
+  // 触发元素的矩形先量好:桌面端拿它当缩放原点,移动端拿它当容器变形的起点。
+  // 必须在 body 加 modal-open(隐藏滚动条)之前量,否则坐标会偏。
+  const triggerRect = trigger ? trigger.getBoundingClientRect() : null
+  if (triggerRect) {
     const dialogRect = dialog.getBoundingClientRect()
     if (dialogRect.width && dialogRect.height) {
       dialog.style.transformOrigin = `${triggerRect.left + triggerRect.width / 2 - dialogRect.left}px ${triggerRect.top + triggerRect.height / 2 - dialogRect.top}px`
@@ -347,7 +349,7 @@ function openComposerModal(post = null, source = null) {
   for (const { node } of background) node.inert = true
   activeComposerModal = { close: closeModal, overlay }
   disposeViewport = attachComposerViewport(overlay)
-  motion = attachSheetMotion(dialog, overlay, grabHandle, finishClose)
+  motion = attachSheetMotion(dialog, overlay, grabHandle, finishClose, { origin: trigger })
   document.addEventListener('keydown', onKeydown)
   requestAnimationFrame(() => { if (overlay.isConnected) $('textarea', card)?.focus({ preventScroll: true }) })
 }
@@ -374,6 +376,20 @@ function observeViewport(target, onChange, options) {
   timelineObservers.push(observer)
 }
 
+// 桌面端:页面往下滚、标题里的「写日常」离开视口后,入口交给顶栏那颗按钮,
+// 不必滚回顶部才能写。窄屏不做(顶栏那颗被 CSS 藏起来,入口在 Dock)。
+function watchHeaderWrite(source) {
+  const slot = $('#headerWriteSlot')
+  const headerWrite = $('#headerWrite')
+  if (!slot || !headerWrite) return
+  headerWrite.onclick = (event) => openComposerModal(null, event.currentTarget)
+  // 顶栏是 sticky 的:标题那颗被顶栏盖住(或滚出视口)时,就把入口交出去
+  const headerHeight = Math.round($('.site-header').getBoundingClientRect().height)
+  observeViewport(source, (visible) => {
+    animatePresence(slot, !visible, { className: 'header-write-presence', duration: 240 })
+  }, { rootMargin: `-${headerHeight + 8}px 0px 0px 0px` })
+}
+
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
   activeComposerModal?.close?.(true)
@@ -384,6 +400,8 @@ function clearMain() {
   revealObserver.disconnect()
   for (const observer of timelineObservers) observer.disconnect()
   timelineObservers = []
+  // 顶栏的写入口不在 main 里,切页时要显式收起,否则会留在别的页面上
+  animatePresence($('#headerWriteSlot'), false, { className: 'header-write-presence', immediate: true })
   main.innerHTML = ''
   main.className = 'container'
   if (hasRenderedView) {
@@ -1573,7 +1591,9 @@ async function renderTimeline(month = null) {
   main.classList.add('timeline-page')
   const heading = el(`<div class="journal-heading"><div><h1>日常手记</h1><p class="journal-subtitle">把普通的一天，留给以后再看。<span class="journal-count"></span></p></div><div class="journal-heading-actions">${site.user ? `<button class="write-trigger" type="button">${icon('pen-line')}<span>写日常</span></button>` : ''}</div></div>`)
   main.appendChild(heading)
-  $('.write-trigger', heading)?.addEventListener('click', (event) => openComposerModal(null, event.currentTarget))
+  const writeInHeading = $('.write-trigger', heading)
+  writeInHeading?.addEventListener('click', (event) => openComposerModal(null, event.currentTarget))
+  if (writeInHeading) watchHeaderWrite(writeInHeading)
 
   // 归档导航只在跨月时才有意义,单月站点不渲染
   const { months, total } = await api(`/api/posts/archive?tz=${tzOffset()}`).catch(() => ({ months: [] }))

@@ -58,6 +58,10 @@ assert.match(css, /--motion-standard-duration/)
 assert.match(css, /\.menu-presence-closing/)
 assert.match(css, /\.page-enter/)
 assert.doesNotMatch(css, /@keyframes pop/)
+// 容器变形:类名由 js/sheet-motion.js 写入,样式必须和它对得上
+assert.match(css, /\.composer-morph\s*\{/)
+assert.match(css, /\.composer-overlay\.morph\s*>\s*\.composer-dialog/)
+assert.match(css, /\.composer-origin-hidden\s*\{/)
 assert.match(css, /\.comment-reply-state\[hidden\] \{ display: none; \}/)
 assert.match(css, /\.comment-form\[hidden\] \{ display: none; \}/)
 assert.match(css, /@keyframes day-progress-flow/)
@@ -108,7 +112,9 @@ let nextFrame = 0
 let reduced = false
 const frames = new Map()
 const fakeWindow = new EventTarget()
-fakeWindow.matchMedia = (query) => ({ get matches() { return query.includes('reduced-motion') ? reduced : true } })
+// narrow = 窄屏(移动端);容器变形在移动端与桌面端都要生效,所以两档各测一遍
+let narrow = true
+fakeWindow.matchMedia = (query) => ({ get matches() { return query.includes('reduced-motion') ? reduced : query.includes('max-width') ? narrow : true } })
 globalThis.window = fakeWindow
 globalThis.performance = { now: () => time }
 globalThis.requestAnimationFrame = (callback) => { const id = ++nextFrame; frames.set(id, callback); return id }
@@ -136,6 +142,66 @@ function panel() {
   }
   return { motion, dialog, send, get closed() { return closed } }
 }
+// 容器变形需要更完整的替身:遮罩层、触发元素、变形层都要能量几何并记录样式
+function morphPanel() {
+  const previousDocument = globalThis.document
+  const previousComputedStyle = globalThis.getComputedStyle
+  const handle = new EventTarget()
+  handle.setPointerCapture = () => {}
+  handle.releasePointerCapture = () => {}
+  const dialogRect = { left: 20, top: 199, width: 350, height: 446 }
+  const dialog = { offsetHeight: 446, style: {}, getBoundingClientRect: () => dialogRect }
+  const overlayStyles = new Map()
+  const overlayClasses = new Set()
+  const appended = []
+  const overlay = {
+    style: { setProperty: (key, value) => overlayStyles.set(key, value) },
+    classList: {
+      toggle: (name, on) => { if (on) overlayClasses.add(name); else overlayClasses.delete(name) },
+      remove: (name) => overlayClasses.delete(name),
+      contains: (name) => overlayClasses.has(name),
+    },
+    appendChild: (node) => appended.push(node),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 390, height: 844 }),
+  }
+  const morphStyles = new Map()
+  const morph = {
+    className: '',
+    style: { setProperty: (key, value) => morphStyles.set(key, value) },
+    setAttribute: () => {},
+  }
+  const originRect = { left: 180, top: 772, width: 96, height: 50 }
+  const originClasses = new Set()
+  const origin = {
+    isConnected: true,
+    getBoundingClientRect: () => originRect,
+    classList: {
+      toggle: (name, on) => { if (on) originClasses.add(name); else originClasses.delete(name) },
+      remove: (name) => originClasses.delete(name),
+      contains: (name) => originClasses.has(name),
+    },
+  }
+  globalThis.document = { createElement: () => morph }
+  globalThis.getComputedStyle = (node) => node === origin
+    ? { backgroundColor: 'rgb(184, 73, 107)' }
+    : { borderTopLeftRadius: '22px', borderTopRightRadius: '22px', borderBottomRightRadius: '0px', borderBottomLeftRadius: '0px' }
+  let closed = false
+  const motion = attachSheetMotion(dialog, overlay, handle, () => { closed = true; motion.dispose() }, { origin })
+  return {
+    motion, dialog, morph, morphStyles, overlayStyles, overlayClasses, appended,
+    fillAlpha: () => {
+      const match = /rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)/.exec(morph.style.background || '')
+      return match && match[4] !== undefined ? Number(match[4]) : 1
+    },
+    get closed() { return closed },
+    pillHidden: () => originClasses.has('composer-origin-hidden'),
+    restore() {
+      globalThis.document = previousDocument
+      globalThis.getComputedStyle = previousComputedStyle
+    },
+  }
+}
+
 function presenceNode() {
   const names = new Set()
   return {
@@ -170,6 +236,31 @@ try {
   assert.ok(Math.abs(controller.getValue() + 36) < .001, '重定向最终到达新目标')
   assert.ok(controllerRests.includes(-36), '重定向完成回调只在目标稳定后触发')
   assert.ok(controllerUpdates.some((update) => update.target === 120), '控制器持续报告目标与速度')
+  // 软调整:布局重排时换目标/挪位置,不能打断正在跑的帧,也不能丢速度
+  const soft = createSpringController({ value: 0, response: .3 })
+  soft.retarget(120)
+  advance(6)
+  const softBefore = { value: soft.getValue(), velocity: soft.getVelocity() }
+  assert.equal(soft.isAnimating(), true)
+  soft.adjust(80, 0)
+  assert.equal(soft.getValue(), 80, '软调整把位置挪到新进度')
+  assert.equal(soft.getTarget(), 0, '软调整换掉目标')
+  assert.ok(Math.abs(soft.getVelocity() - softBefore.velocity) < 1e-9, '软调整保留当前速度')
+  assert.equal(soft.isAnimating(), true, '软调整不打断正在跑的帧')
+  advance(90)
+  assert.ok(Math.abs(soft.getValue()) < .5, '软调整后照常收敛')
+  soft.dispose()
+
+  const paced = createSpringController({ value: 0, response: .6 })
+  paced.retarget(100)
+  advance(12)
+  const slowValue = paced.getValue()
+  paced.setResponse(.25)
+  paced.set(0, 0)
+  paced.retarget(100)
+  advance(12)
+  assert.ok(paced.getValue() > slowValue + 10, 'setResponse 之后按新节奏收敛')
+  paced.dispose()
   controller.dispose()
 
   const presence = presenceNode()
@@ -223,7 +314,101 @@ try {
   first.motion.close()
   advance()
   assert.equal(first.closed, true)
+
+  // 容器变形:移动端面板从触发元素长出来,关闭时收回同一处
+  const morphing = morphPanel()
+  try {
+    assert.equal(morphing.appended[0], morphing.morph, '变形层挂在遮罩层里')
+    assert.equal(morphing.overlayClasses.has('morph'), true, '起点由变形层接管表面')
+    assert.equal(morphing.morph.style.left, '180px')
+    assert.equal(morphing.morph.style.top, '772px')
+    assert.equal(morphing.morph.style.width, '96px')
+    assert.equal(morphing.morph.style.height, '50px')
+    assert.equal(morphing.morph.style.borderRadius, '25px 25px 25px 25px', '起点四角收成胶囊')
+    assert.equal(morphing.overlayStyles.get('--morph-content'), '0', '起点不显示面板内容')
+    assert.equal(morphing.pillHidden(), true, '变形期间触发元素由变形层顶替')
+    assert.equal(morphing.morphStyles.get('--morph-glass-opacity'), '0', '起点还是触发元素的实色,不是玻璃')
+    assert.equal(morphing.fillAlpha(), 1)
+    advance(4)
+    assert.equal(morphing.morph.style.display, '', '展开过程中变形层可见')
+    assert.ok(parseFloat(morphing.morph.style.width) > 96, '展开过程中尺寸向面板靠拢')
+    assert.ok(parseFloat(morphing.morph.style.top) < 772, '展开过程中向面板位置移动')
+    assert.equal(morphing.pillHidden(), true, '展开过程中触发元素仍然被顶替')
+    assert.ok(Number(morphing.morphStyles.get('--morph-glass-opacity')) > 0, '滑行期间是液态玻璃')
+    assert.equal(morphing.morphStyles.get('--morph-paper'), '0', '滑行期间还没凝成纸面')
+    assert.ok(morphing.fillAlpha() < 1, '玻璃阶段触发元素的实色要让位')
+    advance(90)
+    assert.equal(morphing.pillHidden(), false, '落地后交还触发元素')
+    assert.equal(morphing.overlayClasses.has('morph'), false, '静止后表面还给面板本体')
+    assert.equal(morphing.morph.style.display, 'none', '静止后变形层收起来')
+    assert.equal(morphing.morphStyles.get('--morph-paper'), '1', '最后一段才凝成纸面')
+    assert.equal(morphing.morphStyles.get('--morph-glass-opacity'), '0', '纸面凝出后玻璃退场')
+    morphing.motion.close()
+    advance(4)
+    assert.equal(morphing.overlayClasses.has('morph'), true, '关闭时重新接管表面')
+    assert.ok(parseFloat(morphing.morph.style.top) > 300, '关闭途中向触发元素收回')
+    assert.ok(Number(morphing.morphStyles.get('--morph-glass-opacity')) > 0, '缩回去同样是液态玻璃')
+    assert.equal(morphing.pillHidden(), true)
+    advance(90)
+    assert.equal(morphing.closed, true, '收回原位后收尾')
+    assert.equal(morphing.morph.style.left, '180px')
+    assert.equal(morphing.morph.style.top, '772px', '最终落到触发元素原位')
+    assert.equal(morphing.morph.style.borderRadius, '25px 25px 25px 25px')
+    assert.equal(morphing.morphStyles.get('--morph-glass-opacity'), '0', '回到实色胶囊')
+    assert.equal(morphing.fillAlpha(), 1)
+  } finally {
+    morphing.restore()
+  }
+
+  // 桌面端走同一条变形路径(不是只有窄屏才播)
+  narrow = false
+  const widePanel = morphPanel()
+  try {
+    assert.equal(widePanel.overlayClasses.has('morph'), true, '桌面端同样从触发元素长出来')
+    assert.equal(widePanel.morph.style.left, '180px')
+    assert.equal(widePanel.morph.style.width, '96px')
+    widePanel.motion.close()
+    advance(90)
+    assert.equal(widePanel.closed, true, '桌面端也能收回触发元素')
+    assert.equal(widePanel.morph.style.top, '772px')
+  } finally {
+    widePanel.restore()
+  }
+  narrow = true
+
+  // 输入法一起一落会改面板几何:重新量完继续动画,不能跳到终点、也不能直接收尾
+  const resized = morphPanel()
+  try {
+    advance(3)
+    const midWidth = parseFloat(resized.morph.style.width)
+    fakeWindow.dispatchEvent(new Event('resize'))
+    assert.equal(resized.morph.style.display, '', '重排后变形层还在')
+    assert.ok(parseFloat(resized.morph.style.width) >= midWidth, '重排把入场动画接着往下走')
+    assert.ok(parseFloat(resized.morph.style.width) < 350, '重排没有把入场动画直接跳到终点')
+    advance(60)
+    assert.equal(resized.morph.style.display, 'none', '重排后照常落地')
+    resized.motion.close()
+    advance(3)
+    fakeWindow.dispatchEvent(new Event('resize'))
+    assert.equal(resized.closed, false, '收起途中重排不能直接收尾')
+    assert.equal(resized.morph.style.display, '', '收起途中重排仍看得见变形层')
+    advance(90)
+    assert.equal(resized.closed, true, '重排后照常收回触发元素')
+    assert.equal(resized.morph.style.top, '772px')
+  } finally {
+    resized.restore()
+  }
+
   reduced = true
+  const stillMorph = morphPanel()
+  try {
+    assert.equal(stillMorph.overlayClasses.has('morph'), false, '减少动态时不播变形')
+    assert.equal(stillMorph.morph.style.display, 'none', '减少动态时变形层保持收起')
+    stillMorph.motion.close()
+    assert.equal(stillMorph.closed, true, '减少动态立即收回')
+  } finally {
+    stillMorph.restore()
+  }
   const second = panel()
   advance(1)
   assert.equal(second.dialog.style.transform, 'none')
@@ -235,4 +420,4 @@ try {
 } finally {
   Object.assign(globalThis, original)
 }
-console.log('通过：外观三档恢复、旧值回落、跨页同步、明暗对比度、弹簧连续性、取消手势、反向中断与减少动态。')
+console.log('通过：外观三档恢复、旧值回落、跨页同步、明暗对比度、弹簧连续性(含换挡)、取消手势、反向中断、容器变形、键盘重排与减少动态。')
