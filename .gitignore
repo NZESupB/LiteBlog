@@ -4,6 +4,9 @@ node_modules/
 # 运行数据(SQLite + 上传图片,Docker 卷挂载点)
 data/
 
+# 本地实例配置(server/config.js 读取;部署机可用 Compose 环境变量替代)
+config.json
+
 # 定时备份输出(tools/backup.mjs)
 backups/
 
@@ -21,11 +24,13 @@ Thumbs.db
 # 代理工具配置与项目 skill,只留在本地,不进仓库
 .claude/
 .agents/
+.codex/
+.workbuddy/
 
 # 部署机本地复制模板后生成,不得被上传覆盖
 docker-compose.yml
 
-# 本地临时目录：参考素材(动画/视频片段)、验证输出，都不进仓库
+# 本地临时目录
 tmp/
 
 # 本地临时验证输出
