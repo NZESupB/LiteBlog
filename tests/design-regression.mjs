@@ -155,7 +155,13 @@ try {
   assert.ok(styles.includes('--spring-bounce'), '吸附曲线')
   const appJs = await (await request('/app.js')).text()
   assert.ok(appJs.includes('watchHeaderWrite'), '顶栏写入口的显隐逻辑')
+  assert.ok(appJs.includes('attachInlineInputViewport'), '评论输入框跟随键盘')
+  assert.ok(appJs.includes('closeEmojiPanel'), '切页时关闭触屏表情盘')
   assert.ok(appJs.includes("className: 'header-write-presence'"), '顶栏写入口的 presence 类名')
+  const toolbarJs = await (await request('/vendor/md-toolbar.js')).text()
+  assert.ok(toolbarJs.includes('emoji-panel-tray'), '触屏底部表情盘')
+  assert.ok(toolbarJs.includes('emoji-panel-popover'), '鼠标锚定表情浮层')
+  assert.ok(toolbarJs.includes('keyboardInset'), '底部表情盘跟随键盘位移')
   console.log('通过：登录、图文发布、读取、相册、归档、私密边界、页面资源、灯箱外壳与主题。')
 } finally {
   db?.close()

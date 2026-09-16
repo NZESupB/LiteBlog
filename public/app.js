@@ -1,8 +1,8 @@
 // 前端逻辑:hash 路由 + 时间轴 / 相册 / 登录 / 账号 / 设置视图
-import { attachMdToolbar, attachEmojiButton } from '/vendor/md-toolbar.js'
+import { attachMdToolbar, attachEmojiButton, closeEmojiPanel } from '/vendor/md-toolbar.js'
 import { icon } from '/vendor/icons.js'
 import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
-import { attachComposerViewport } from '/js/composer-viewport.js'
+import { attachComposerViewport, attachInlineInputViewport } from '/js/composer-viewport.js'
 import { api, streamSse, uploadWithProgress, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
 import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/inline-video.js'
@@ -22,6 +22,7 @@ function withinEditWindow(createdAt) {
   return Number.isFinite(time) && Date.now() - time <= EDIT_WINDOW_MS
 }
 let activePostMenu = null
+let activeInlineComposerCleanup = null
 let serviceWorkerRegistration = null
 const SERVICE_WORKER_READY_TIMEOUT_MS = 5000
 let dayProgressTimer = null
@@ -393,6 +394,9 @@ function watchHeaderWrite(source) {
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
   activeComposerModal?.close?.(true)
+  activeInlineComposerCleanup?.()
+  activeInlineComposerCleanup = null
+  closeEmojiPanel(true)
   stopInlineVideo()
   closeLightbox(true)
   closePostMenu(true)
@@ -1302,6 +1306,8 @@ function renderComments(p) {
 
   function openComposer(comment = null) {
     if (!form || !input) return
+    activeInlineComposerCleanup?.()
+    activeInlineComposerCleanup = attachInlineInputViewport(form, input)
     setReplyTarget(comment)
     animatePresence(wrap, true, { className: 'panel-presence', duration: 200 })
     animatePresence(form, true, { className: 'panel-presence', duration: 180 })
@@ -1378,7 +1384,7 @@ function renderComments(p) {
   if (site.user) {
     form = $('.comment-form', wrap)
     replyState = el('<div class="comment-reply-state" hidden><span class="comment-reply-target"></span><button class="comment-reply-cancel" type="button" title="取消回复" aria-label="取消回复">&times;</button></div>')
-    input = el('<input class="comment-input" placeholder="写条评论…" maxlength="500" />')
+    input = el(`<input class="comment-input" type="text" name="comment-${p.id}" aria-label="评论内容" placeholder="写条评论…" maxlength="500" />`)
     const emojiBtn = el(`<button class="emoji-toggle" type="button" title="表情" aria-label="插入表情">${icon('smile')}</button>`)
     attachEmojiButton(emojiBtn, input)
     const btn = el('<button class="btn tiny">评论</button>')

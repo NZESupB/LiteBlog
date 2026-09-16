@@ -604,13 +604,19 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .comment-actions button:hover { color: var(--accent-deep); }
 .comment-form[hidden] { display: none; }
 .comment-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 14px; }
+.comment-form.keyboard-open { margin-bottom: var(--comment-keyboard-space, 0px); }
+.comments.panel-presence { transform: none; transition: opacity var(--motion-standard-duration) var(--motion-ease); }
+.comments.panel-presence-present { opacity: 1; transform: none; }
+.comments.panel-presence-closing { opacity: 0; transform: none; pointer-events: none; }
+.comment-form.panel-presence { transform: translateY(4px); transition: opacity 180ms var(--motion-ease), transform 180ms var(--motion-ease); }
+.comment-form.panel-presence-present { opacity: 1; transform: none; }
+.comment-form.panel-presence-closing { opacity: 0; transform: translateY(4px); pointer-events: none; }
 .comment-input { flex: 1; min-height: 38px; resize: none; padding: 9px 12px; border-radius: var(--radius-lg); }
 .comment-form .emoji-toggle, .emoji-btn {
   display: flex; align-items: center; justify-content: center; width: 36px; height: 36px;
   flex-shrink: 0; padding: 0; border: 0; border-radius: 50%; background: var(--fill); color: var(--muted);
   transition: background var(--motion-fast-duration) var(--motion-ease), color var(--motion-fast-duration) var(--motion-ease);
 }
-.comment-form .emoji-toggle:hover, .emoji-btn:hover { background: var(--fill-strong); color: var(--ink); }
 .comment-reply-state[hidden] { display: none; }
 .comment-reply-state { flex: 0 0 100%; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 7px 6px 12px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--accent-deep); font-size: var(--fs-caption); }
 .comment-reply-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -627,9 +633,47 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
   0%, 100% { background: transparent; }
   22% { background: var(--accent-soft); }
 }
-.emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; padding: 6px; }
-.emoji-grid button { height: 34px; border: 0; border-radius: var(--radius-sm); background: none; font-size: var(--fs-headline); transition: background var(--motion-fast-duration) var(--motion-ease), transform var(--motion-standard-duration) var(--spring); }
-.emoji-grid button:hover { background: var(--accent-soft); transform: scale(1.16); }
+/* 表情选择器:鼠标设备是锚定浮层,触屏设备是底部表情盘。两者都不参与输入区布局。 */
+.emoji-panel { position: fixed; z-index: 80; pointer-events: none; }
+.emoji-panel[hidden] { display: none; }
+.emoji-panel-surface { pointer-events: auto; background: var(--surface); color: var(--ink); }
+.emoji-panel-head { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 4px 4px 8px; color: var(--muted); font-size: var(--fs-caption); }
+.emoji-panel-head strong { font-weight: 600; }
+.emoji-panel-close { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--muted); font-size: 18px; line-height: 1; }
+.emoji-grid { display: grid; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--separator-strong) transparent; }
+.emoji-grid button { min-width: 0; height: 40px; border: 0; border-radius: var(--radius-sm); background: none; font-size: var(--fs-headline); transition: background var(--motion-fast-duration) var(--motion-ease), transform var(--motion-fast-duration) var(--motion-ease); }
+.emoji-panel-popover { width: min(360px, calc(100vw - 16px)); opacity: 0; transform: translateY(4px) scale(.98); transition: opacity 140ms var(--motion-ease), transform 180ms var(--motion-ease); will-change: transform, opacity; }
+.emoji-panel-popover.emoji-panel-presence-present { opacity: 1; transform: none; }
+.emoji-panel-popover.emoji-panel-presence-closing { opacity: 0; transform: translateY(4px) scale(.98); pointer-events: none; }
+.emoji-panel-popover .emoji-panel-surface { padding: 8px; border-radius: var(--radius-lg); box-shadow: var(--shadow-pop); }
+.emoji-panel-popover .emoji-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); max-height: 232px; gap: 3px; padding: 2px; }
+
+@media (hover: none), (pointer: coarse) {
+  .emoji-panel-tray {
+    left: 0; right: 0; bottom: 0;
+    transform: translateY(calc(-1 * var(--emoji-keyboard-offset, 0px)));
+    transition: transform 80ms linear;
+  }
+  .emoji-panel-tray .emoji-panel-surface {
+    width: min(760px, 100%); max-height: min(38dvh, 320px); margin: 0 auto;
+    padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    box-shadow: 0 -18px 50px -20px rgba(40, 30, 35, .38);
+    transform: translateY(110%);
+    transition: transform 220ms var(--motion-ease);
+  }
+  .emoji-panel-tray.emoji-panel-presence-present .emoji-panel-surface { transform: none; }
+  .emoji-panel-tray.emoji-panel-presence-closing { pointer-events: none; }
+  .emoji-panel-tray.emoji-panel-presence-closing .emoji-panel-surface { transform: translateY(110%); transition-duration: 180ms; }
+  .emoji-panel-tray .emoji-grid { grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); max-height: min(32dvh, 268px); gap: 4px; padding: 2px 0; }
+  .emoji-panel-tray .emoji-grid button { height: 44px; }
+  body.emoji-tray-open .mobile-nav { opacity: 0; transform: translate(-50%, calc(100% + 24px)); pointer-events: none; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .comment-form .emoji-toggle:hover, .emoji-btn:hover { background: var(--fill-strong); color: var(--ink); }
+  .emoji-grid button:hover { background: var(--accent-soft); transform: scale(1.08); }
+}
 
 /* ---------- 归档导航(宽屏大纲 / 窄屏刻度) ---------- */
 .archive-outline, .archive-rail { display: none; }
@@ -1060,6 +1104,7 @@ body.modal-open .to-top { visibility: hidden; }
   background: var(--material-dock);
   -webkit-backdrop-filter: saturate(190%) blur(28px); backdrop-filter: saturate(190%) blur(28px);
   box-shadow: var(--glass-rim), var(--glass-shadow);
+  transition: opacity 180ms var(--motion-ease), transform 220ms var(--motion-ease);
 }
 /* 液面:两个伪元素画斜掠高光与底部积光。z-index:-1 让它们压在自身底色之上、
    内容之下(负 z-index 后代绘制在元素背景之后、常规子元素之前),标签与图标不被冲淡。 */
@@ -1132,6 +1177,42 @@ body.modal-open .to-top { visibility: hidden; }
 @media (max-width: 559px) { .mobile-nav { display: flex; } }
 @media (min-width: 560px) and (max-width: 1023px) { .mobile-nav { display: none; } }
 @media (max-width: 559px) { .site-nav .nav-segments { display: none; } }
+
+/* 触屏没有可靠的 hover:键盘/触控板之外的 iPad 不应保留上一次点按的浮起状态。
+   这里把桌面 hover 复位,再用 120ms 的独立 scale 给按压反馈,避免覆盖元素已有的 transform。 */
+@media (hover: none), (pointer: coarse) {
+  .avatar-btn:hover { transform: none; }
+  .bell-btn:hover { color: var(--muted); background: var(--fill); transform: none; }
+  .write-trigger:hover, .mobile-nav .mobile-compose:hover { opacity: 1; }
+  .dropdown-item:hover { background: none; color: var(--text); }
+  .dropdown-item:hover .icon { color: var(--muted); }
+  .bell-item:hover, .md-toolbar button:hover { background: none; }
+  .composer-close:hover, .avatar-crop-close:hover, .lb-close:hover { background: var(--fill); color: var(--muted); transform: none; }
+  .composer-grab:hover::before { background: var(--separator-strong); }
+  .editor-resize:hover::before { width: 34px; background: var(--separator-strong); }
+  .preview-item .remove:hover { background: rgba(20, 16, 18, .58); transform: none; }
+  .lb-btn:hover, .lb-live:hover { background: rgba(255, 255, 255, .14); }
+  .lb-close:hover, .lb-live:hover { transform: none; }
+  .lb-prev:hover, .lb-next:hover { transform: translateY(-50%); }
+  .settings-link:hover { opacity: 1; }
+
+  .nav-segments a, .link-btn, .avatar-btn, .bell-btn, .dropdown-item, .bell-item,
+  .comment-actions button, .comment-form .emoji-toggle, .emoji-grid button,
+  .account-back, .settings-link, .public-chip, .composer-close, .avatar-crop-close,
+  .md-toolbar button, .mobile-nav a, .lb-close, .lb-live, .reaction {
+    transition: scale 120ms var(--motion-ease);
+  }
+  .nav-segments a:active, .link-btn:active, .avatar-btn:active, .bell-btn:active,
+  .comment-actions button:active, .comment-form .emoji-toggle:active, .emoji-grid button:active,
+  .account-back:active, .public-chip:active, .composer-close:active, .avatar-crop-close:active,
+  .md-toolbar button:active, .mobile-nav a:active, .lb-close:active, .lb-live:active,
+  .reaction:active {
+    scale: .96;
+  }
+  .emoji-grid button:active { scale: .92; }
+  .dropdown-item:active, .bell-item:active { background: var(--accent-soft); }
+  .settings-link:active { opacity: .72; }
+}
 
 /* ---------- 无障碍与降低效果 ---------- */
 @media (prefers-reduced-motion: reduce) {
