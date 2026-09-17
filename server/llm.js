@@ -13,6 +13,8 @@ llmApp.get('/', requireAuth, (c) => {
   const shared = sharedLlmConfig()
   return c.json({
     mode: llmMode(me.id),
+    // 思考强度:中 middle / 高 high / 最高 max;留空表示请求不带该参数
+    thinking: llmThinking(me.id),
     shared: {
       baseUrl: shared.baseUrl,
       model: shared.model,
@@ -55,6 +57,8 @@ llmApp.put('/', requireAuth, async (c) => {
     if (String(body.apiKey ?? '').trim()) setUserSetting(me.id, 'llm_api_key', cfg.apiKey)
   }
   setUserSetting(me.id, 'llm_mode', cfg.mode)
+  // 只在客户端确实带了该字段时写入,避免旧客户端把已保存的值清空
+  if ('thinking' in body) setUserSetting(me.id, 'llm_thinking', normalizeThinking(body.thinking))
   return c.json({ ok: true })
 })
 
@@ -159,6 +163,7 @@ function sharedLlmConfig() {
 // 表单可带尚未保存的地址/密钥;留空时沿用对应来源中已保存的值。
 function draftLlmConfig(userId, body) {
   const mode = body.mode === 'custom' ? 'custom' : 'shared'
+  const savedThinking = llmThinking(userId)
   const saved = mode === 'custom'
     ? {
         baseUrl: getUserSetting(userId, 'llm_base_url', ''),
@@ -172,20 +177,40 @@ function draftLlmConfig(userId, body) {
   const baseUrl = String(mode === 'custom' ? body.baseUrl ?? '' : body.sharedBaseUrl ?? body.baseUrl ?? '').trim() || saved.baseUrl
   const apiKey = String(mode === 'custom' ? body.apiKey ?? '' : body.sharedApiKey ?? body.apiKey ?? '').trim() || saved.apiKey
   const model = String(body.model ?? '').trim() || saved.model
-  return { mode, baseUrl, model, apiKey }
+  const thinking = 'thinking' in body ? normalizeThinking(body.thinking) : savedThinking
+  return { mode, baseUrl, model, apiKey, thinking }
 }
 
 // 读取单一用户当前选择的配置, 不包含跨用户回退。
 function directLlmConfig(userId) {
+  const thinking = llmThinking(userId)
   if (llmMode(userId) === 'custom') {
     return {
       baseUrl: getUserSetting(userId, 'llm_base_url', ''),
       model: getUserSetting(userId, 'llm_model', ''),
       apiKey: getUserSetting(userId, 'llm_api_key', ''),
+      thinking,
     }
   }
   const shared = sharedLlmConfig()
-  return { ...shared, model: getUserSetting(userId, 'llm_shared_model', shared.model) }
+  return { ...shared, model: getUserSetting(userId, 'llm_shared_model', shared.model), thinking }
+}
+
+// 思考强度只认这三档,其它值一律当成「不指定」,不把任意字符串透传给上游
+const THINKING_LEVELS = ['middle', 'high', 'max']
+
+function normalizeThinking(value) {
+  const level = String(value ?? '').trim()
+  return THINKING_LEVELS.includes(level) ? level : ''
+}
+
+function llmThinking(userId) {
+  return normalizeThinking(userId ? getUserSetting(userId, 'llm_thinking', '') : '')
+}
+
+// 只有选了具体档位才带上 reasoning_effort;留空时不发该参数,由模型自行决定
+function thinkingParam(cfg) {
+  return cfg.thinking ? { reasoning_effort: cfg.thinking } : {}
 }
 
 // 当前用户未配置接口时, 回退到双人站点中另一方的当前生效配置。
@@ -226,6 +251,7 @@ async function llmChat(cfg, userText, isTest) {
       model: cfg.model || 'gpt-4o-mini',
       messages: [{ role: 'user', content: userText }],
       stream: false,
+      ...thinkingParam(cfg),
       ...(isTest ? { max_tokens: 10 } : {}),
     }),
   })
@@ -250,6 +276,7 @@ async function llmChatStream(cfg, userText) {
       model: cfg.model || 'gpt-4o-mini',
       messages: [{ role: 'user', content: userText }],
       stream: true,
+      ...thinkingParam(cfg),
     }),
   })
   if (!res.ok) {
@@ -289,8 +316,12 @@ function sseFromUpstream(upstream) {
               if (!payload || payload === '[DONE]') continue
               let json = null
               try { json = JSON.parse(payload) } catch { continue }
+              const piece = json?.choices?.[0]?.delta
+              // 思考模型的思维链(reasoning_content/reasoning)单独成帧:前端只拿它显示「思考中」进度,绝不并入正文
+              const reasoning = llmContentText(piece?.reasoning_content || piece?.reasoning)
+              if (reasoning) send({ reasoning })
               // 增量不能 trim,否则块间的换行与空格会被吞掉
-              const delta = llmContentText(json?.choices?.[0]?.delta?.content)
+              const delta = llmContentText(piece?.content)
               if (!delta) continue
               received = true
               send({ delta })

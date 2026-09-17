@@ -635,12 +635,26 @@ function createComposer(post, draftId, onDone, onCancel) {
     resultPane.textContent = ''
     polishResult = ''
     animatePresence(compare, true, { className: 'panel-presence', duration: 200 })
-    statusEl.textContent = '生成中…'
     polishAbort = new AbortController()
     setPolishState(true)
+    // 思考模型会先产出思维链,正文可能十几秒后才有。这段时间用秒数/思考字数报进度,
+    // 否则面板一片空白,看起来像是卡住了。
+    const startedAt = Date.now()
+    let thinkingChars = 0
+    let gotContent = false
+    const tick = () => {
+      if (gotContent) return
+      const seconds = Math.floor((Date.now() - startedAt) / 1000)
+      statusEl.textContent = thinkingChars ? `思考中…（${thinkingChars} 字）` : `思考中…${seconds}s`
+    }
+    tick()
+    const ticker = setInterval(tick, 500)
     try {
       await streamSse('/api/llm/polish', { text }, (evt) => {
+        // 思维链只用来表示「还在思考」,不并入结果也不是正文
+        if (evt.reasoning) { thinkingChars += evt.reasoning.length; tick(); return }
         if (!evt.delta) return
+        if (!gotContent) { gotContent = true; statusEl.textContent = '生成中…' }
         polishResult += evt.delta
         resultPane.textContent = polishResult
         resultPane.scrollTop = resultPane.scrollHeight
@@ -657,6 +671,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       errorLine.textContent = e.message
       if (!polishResult) animatePresence(compare, false, { className: 'panel-presence', duration: 200 })
     } finally {
+      clearInterval(ticker)
       polishAbort = null
       setPolishState(false)
     }
@@ -2248,7 +2263,7 @@ function appendSettingsItem(node) {
 
 // AI 优化与 AI 配图共用一张接口配置卡:共享 API 可各自选模型,也可使用独立 API。
 // 两个模块的接口同形(GET/PUT 配置、POST /models、POST /test),文案与额外状态行由调用方给出。
-async function createApiConfigCard({ key, title, intro, path, modelHint, extraStatus = '', testMessage }) {
+async function createApiConfigCard({ key, title, intro, path, modelHint, extraStatus = '', testMessage, thinking = false }) {
   let s
   try {
     s = await api(path)
@@ -2289,6 +2304,16 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
         <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="${s.custom.hasApiKey ? '已保存，留空表示不修改' : 'sk-…'}" /></label>
       </div>
       <datalist id="${listId}"></datalist>
+      ${thinking ? `
+      <label>思考强度
+        <select name="thinking">
+          <option value="">不指定(跟随模型默认)</option>
+          <option value="middle">中</option>
+          <option value="high">高</option>
+          <option value="max">最高</option>
+        </select>
+      </label>
+      <div class="storage-hint">选中后会随请求发送 <code>reasoning_effort</code>,值越高思考越久、结果越稳;模型不支持该参数时会直接报错。</div>` : ''}
       ${typeof extraStatus === 'function' ? extraStatus(s) : extraStatus}
       <div class="settings-actions">
         <span class="save-tip" hidden>已保存</span>
@@ -2299,6 +2324,8 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
       <div class="form-error" role="status" aria-live="polite"></div>
     </div>`)
   const err = $('.form-error', card)
+  const thinkingSelect = $('[name=thinking]', card)
+  if (thinkingSelect) thinkingSelect.value = s.thinking || ''
   const sharedWrap = $('.llm-shared', card)
   const customWrap = $('.llm-custom', card)
   const selectedMode = () => $('[name=mode]:checked', card).value
@@ -2318,9 +2345,11 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
   const currentPayload = () => {
     const mode = selectedMode()
     const model = modelInput(mode).value
-    return mode === 'shared'
+    const payload = mode === 'shared'
       ? { mode, model, sharedBaseUrl: $('[name=sharedBaseUrl]', card).value, sharedApiKey: $('[name=sharedApiKey]', card).value }
       : { mode, model, baseUrl: $('[name=baseUrl]', card).value, apiKey: $('[name=apiKey]', card).value }
+    if (thinkingSelect) payload.thinking = thinkingSelect.value
+    return payload
   }
 
   for (const fetchButton of card.querySelectorAll('.fetch-models')) fetchButton.onclick = async () => {
@@ -2382,6 +2411,7 @@ async function renderAiCards() {
     intro: '在发布框点「AI 优化」即可调用，凭据只存本服务器。',
     path: '/api/llm',
     modelHint: 'gpt-4o-mini',
+    thinking: true,
     testMessage: () => ({ text: '连接成功' }),
   }))
 
