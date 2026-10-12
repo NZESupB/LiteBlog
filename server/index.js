@@ -2,31 +2,27 @@
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { createHash, randomUUID, randomBytes } from 'node:crypto'
-import { createWriteStream, readFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
-import { Readable, Transform } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { AVATAR_DIR, TMP_DIR, db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
+import { AVATAR_DIR, db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { sessionMiddleware, requireAuth, createSession, clearSession } from './auth.js'
-import { LOCAL, WEBDAV, activeBackend, putImage, putFileFromTemp, getImage, openStream, deleteImage } from './storage.js'
+import { LOCAL, WEBDAV, activeBackend, putImage, getImage, openStream, deleteImage } from './storage.js'
 import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
 import * as webdav from './webdav.js'
 import { llmApp } from './llm.js'
 import { imageJobsApp, ensureDraft, draftOwnedBy, abandonDraft, cleanupDraftUploads } from './image-jobs.js'
 import { configValue } from './config.js'
+import { videoJobsApp } from './video-jobs.js'
 
 const PORT = Number(configValue('server.port', 3000)) || 3000
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MAX_AVATAR_BYTES = 10 * 1024 * 1024
-// 视频不转码原样上传,上限走配置(默认 200MB)
-const MAX_VIDEO_BYTES = Math.max(1, Math.trunc(Number(configValue('media.maxVideoBytes', 200 * 1024 * 1024)) || 200 * 1024 * 1024))
 const IMAGE_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' }
-const VIDEO_EXT = { 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm' }
 // 新格式 YYYYMMDD-HHMMSS-<hash8>,旧格式为 16 位内容哈希,两者都要能读
 const UPLOAD_NAME_RE = /^(?:[a-f0-9]{16}|\d{8}-\d{6}-[a-f0-9]{8}(?:-[a-zA-Z0-9-]+)?|ai-[a-zA-Z0-9-]+)\.(jpg|png|webp|gif|mp4|mov|webm)$/
 const MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm' }
@@ -477,119 +473,8 @@ app.post('/api/uploads', requireAuth, async (c) => {
   return c.json({ filename, url: `/uploads/${filename}` })
 })
 
-// 视频上传:原始字节流(不是 multipart),先流式落到 data/tmp 临时文件并边写边算 sha256、边校验上限,
-// 再转存到当前激活的存储后端。全程不把视频读进内存 —— 200MB 的片段读进内存会直接压垮最低配 VPS。
-// 服务器接收完成即先回 202;WebDAV 转存在后台继续,前端轮询状态,避免反向代理把长转存请求截成 504。
-const videoUploadJobs = new Map()
-const VIDEO_UPLOAD_RETENTION_MS = 60 * 60 * 1000
-function cleanupVideoUploadJobs() {
-  const now = Date.now()
-  for (const [id, job] of videoUploadJobs) {
-    if (job.status !== 'saving' && job.expiresAt <= now) videoUploadJobs.delete(id)
-  }
-}
-
-function videoUploadView(job) {
-  const view = { uploadId: job.id, status: job.status, size: job.size }
-  if (job.status === 'done' && job.filename) {
-    view.filename = job.filename
-    view.url = `/uploads/${job.filename}`
-  }
-  if (job.error) view.error = job.error
-  return view
-}
-
-async function persistVideoUpload(job) {
-  let storage = null
-  try {
-    storage = await putFileFromTemp(job.filename, job.tempPath, job.size, job.contentType, job.filename)
-    db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
-                storage_path = excluded.storage_path, created_at = datetime('now')`)
-      .run(job.filename, job.hash, storage, job.userId, job.draftId, job.filename)
-    await unlink(job.tempPath).catch(() => {})
-    job.storage = storage
-    job.status = 'done'
-    job.expiresAt = Date.now() + VIDEO_UPLOAD_RETENTION_MS
-  } catch (error) {
-    if (storage) await deleteImage(job.filename, storage, job.filename).catch(() => {})
-    await unlink(job.tempPath).catch(() => {})
-    job.status = 'failed'
-    job.error = error.message
-    job.expiresAt = Date.now() + VIDEO_UPLOAD_RETENTION_MS
-    console.warn(`转存视频 ${job.filename} 失败: ${error.message}`)
-  }
-}
-
-app.post('/api/uploads/video', requireAuth, async (c) => {
-  cleanupVideoUploadJobs()
-  const draftId = String(c.req.query('draftId') || '').trim() || null
-  if (draftId && !draftOwnedBy(c.get('user').id, draftId)) return c.json({ error: '草稿不存在或无权操作' }, 403)
-  const contentType = String(c.req.header('content-type') || '').split(';')[0].trim().toLowerCase()
-  const ext = VIDEO_EXT[contentType]
-  if (!ext) return c.json({ error: '不支持的视频格式,请上传 MP4 / MOV / WebM' }, 400)
-  if (Number(c.req.header('content-length') || 0) > MAX_VIDEO_BYTES) {
-    return c.json({ error: `单个视频不能超过 ${Math.round(MAX_VIDEO_BYTES / 1024 / 1024)}MB` }, 413)
-  }
-  if (!c.req.raw.body) return c.json({ error: '没有收到视频' }, 400)
-  await cleanupPendingUploads()
-
-  const tempPath = path.join(TMP_DIR, `${randomUUID()}.part`)
-  const hash = createHash('sha256')
-  let size = 0
-  let tooLarge = false
-  try {
-    await pipeline(
-      Readable.fromWeb(c.req.raw.body),
-      new Transform({
-        transform(chunk, _encoding, done) {
-          size += chunk.length
-          // 不信任客户端声明的 Content-Length:边写边校验,超限立刻中止并删除半截文件
-          if (size > MAX_VIDEO_BYTES) { tooLarge = true; done(new Error('VIDEO_TOO_LARGE')); return }
-          hash.update(chunk)
-          done(null, chunk)
-        },
-      }),
-      createWriteStream(tempPath),
-    )
-  } catch (e) {
-    await unlink(tempPath).catch(() => {})
-    if (tooLarge) return c.json({ error: `单个视频不能超过 ${Math.round(MAX_VIDEO_BYTES / 1024 / 1024)}MB` }, 413)
-    console.warn(`接收视频失败: ${e.message}`)
-    return c.json({ error: '视频上传中断,请重试' }, 400)
-  }
-  if (size === 0) {
-    await unlink(tempPath).catch(() => {})
-    return c.json({ error: '没有收到视频' }, 400)
-  }
-
-  // 视频不参与内容去重(文件名里放随机段),hash 仍记下来供以后排查与迁移使用
-  const digest = hash.digest('hex')
-  const filename = stampedName(randomBytes(8).toString('hex'), ext)
-  const id = randomUUID()
-  const job = {
-    id,
-    userId: c.get('user').id,
-    draftId,
-    filename,
-    tempPath,
-    size,
-    hash: digest,
-    contentType,
-    status: 'saving',
-    expiresAt: Date.now() + VIDEO_UPLOAD_RETENTION_MS,
-  }
-  videoUploadJobs.set(id, job)
-  void persistVideoUpload(job)
-  return c.json(videoUploadView(job), 202)
-})
-
-app.get('/api/uploads/video/:id', requireAuth, (c) => {
-  cleanupVideoUploadJobs()
-  const job = videoUploadJobs.get(c.req.param('id'))
-  if (!job || job.userId !== c.get('user').id) return c.json({ error: '上传任务不存在或已过期' }, 404)
-  return c.json(videoUploadView(job))
-})
+// 固定配置/初始化路径由视频子应用优先注册，接收后压缩与保存均在后台进行。
+app.route('/api/uploads/video', videoJobsApp)
 
 // 编辑框里点 × 撤掉还没发布的图:连带把网盘上的文件删掉。幂等
 app.delete('/api/uploads/:name', requireAuth, async (c) => {

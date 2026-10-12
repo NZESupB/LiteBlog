@@ -3,10 +3,11 @@ import { attachMdToolbar, attachEmojiButton, closeEmojiPanel } from '/vendor/md-
 import { icon } from '/vendor/icons.js'
 import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
 import { attachComposerViewport, attachInlineInputViewport } from '/js/composer-viewport.js'
-import { api, streamSse, uploadWithProgress, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
+import { api, streamSse, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
 import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/inline-video.js'
-import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration, videoContentType } from '/js/media.js'
+import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration } from '/js/media.js'
+import { uploadVideo, waitForVideoUpload, cancelVideoUpload, getVideoUploadConfig } from '/js/video-upload.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
@@ -694,6 +695,9 @@ function createComposer(post, draftId, onDone, onCancel) {
   if (post) textarea.value = post.content
   const keepImages = post ? post.images.map((img) => ({ ...img })) : [] // 保留的已有图片(已就绪,不显示处理动画)
   const newFiles = [] // 新增文件,含 _status: processing/uploading/done/error
+  const videoControllers = new Map()
+  const videoResults = el('<div class="storage-hint" aria-live="polite" hidden></div>')
+  previews.insertAdjacentElement('afterend', videoResults)
   const savedDraft = readComposeState(draftId) || {}
   let imageTask = null
   let imageJobId = savedDraft.imageJobId || ''
@@ -708,6 +712,8 @@ function createComposer(post, draftId, onDone, onCancel) {
       filename: file._name || '', jobId: file._jobId || '',
       kind: file._kind || 'image', poster: file._poster || '', duration: file._duration || null,
       motion: file._motion?._name || '', motionStatus: file._motion?._status || '',
+      videoJobId: file._videoJobId || '', videoResult: file._videoResult || null,
+      motionJobId: file._motion?._videoJobId || '', motionResult: file._motion?._videoResult || null,
     })),
     keep: keepImages.map((image) => image.id),
     imageJobId: imageTask?.id || savedDraft.imageJobId || '',
@@ -726,28 +732,44 @@ function createComposer(post, draftId, onDone, onCancel) {
   textarea.addEventListener('input', persistDraft)
   const draftReady = api('/api/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: draftId, postId: post?.id || null }) }).catch(() => null)
 
-  // 恢复已上传图片和 IndexedDB 中尚未处理完的原文件。
+  // 原视频不写入 IndexedDB；已完整接收的视频通过任务 ID 恢复后台轮询。
   ;(async () => {
+    await draftReady
+    if (disposed) return
     const restoredIds = new Set()
-    for (const saved of Array.isArray(savedDraft.files) ? savedDraft.files : []) {
-      if (!saved.filename) continue
+    const savedFiles = Array.isArray(savedDraft.files) ? savedDraft.files : []
+    function restoreMotion(file, saved) {
+      if (!saved?.motion && !saved?.motionJobId && !saved?.motionStatus) return
+      file._motion = { _id: newDraftId(), name: '实况视频', _status: saved.motion ? 'done' : 'uploading', _name: saved.motion || '', _videoJobId: saved.motionJobId || '', _videoResult: saved.motionResult || null }
+      if (!saved.motion) {
+        if (saved.motionJobId) runVideoTask(file._motion, null, false)
+        else { file._motion._status = 'error'; file._motion._errMsg = '实况视频尚未完整上传，请重新选择配对文件' }
+      }
+    }
+    for (const saved of savedFiles) {
       const kind = saved.kind || 'image'
-      // 视频的缩略图只能是它的封面帧;拿不到封面就留空,渲染成中性底而不是裂图
+      if (!saved.filename && kind !== 'video') continue
       const thumb = kind === 'video' ? saved.poster : saved.filename
       const file = {
-        _id: saved.id || newDraftId(), _name: saved.filename, _status: 'done', _jobId: saved.jobId || '',
-        name: saved.name, type: saved.type, _kind: kind, _poster: saved.poster || '',
-        _duration: saved.duration || null,
+        _id: saved.id || newDraftId(), _name: saved.filename || '', _status: saved.filename ? 'done' : 'uploading', _jobId: saved.jobId || '',
+        name: saved.name, type: saved.type, _kind: kind, _poster: saved.poster || '', _duration: saved.duration || null,
+        _videoJobId: saved.videoJobId || '', _videoResult: saved.videoResult || null,
         _url: thumb ? `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(thumb)}` : '',
       }
-      if (saved.motion) file._motion = { _id: newDraftId(), name: '', _status: 'done', _name: saved.motion }
       newFiles.push(file)
       restoredIds.add(file._id)
+      restoreMotion(file, saved)
+      if (kind === 'video' && !saved.filename) {
+        if (saved.videoJobId) runVideoTask(file, null, true)
+        else { file._status = 'error'; file._errMsg = '原视频尚未完整上传，请移除这项并重新选择视频' }
+      }
     }
     const blobs = await loadDraftFiles(draftId)
+    if (disposed) return
     for (const file of blobs) {
       if (restoredIds.has(file._id)) continue
       newFiles.push(file)
+      restoreMotion(file, savedFiles.find((saved) => saved.id === file._id))
       processFile(file)
     }
     renderPreviews()
@@ -884,6 +906,8 @@ function createComposer(post, draftId, onDone, onCancel) {
     imagePollTimer = null
     polishAbort?.abort()
     polishAbort = null
+    for (const controller of videoControllers.values()) controller.abort()
+    videoControllers.clear()
     // 关闭编辑器时，未加入发布内容的 AI 结果没有保留价值；运行中的任务也一并取消。
     if (imageJobId && !newFiles.some((file) => file._jobId === imageJobId)) {
       api(`/api/image-jobs/${encodeURIComponent(imageJobId)}`, { method: 'DELETE' }).catch(() => {})
@@ -893,30 +917,57 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
 
-  async function waitForVideoUpload(uploadId) {
-    const deadline = Date.now() + 30 * 60 * 1000
-    while (Date.now() < deadline) {
-      const state = await api(`/api/uploads/video/${encodeURIComponent(uploadId)}`)
-      if (state.status === 'done') return state
-      if (state.status === 'failed') throw new Error(state.error || '视频保存失败')
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+  async function runVideoTask(item, source, needsPoster) {
+    if (disposed || item._removed) return
+    const controller = new AbortController()
+    videoControllers.set(item, controller)
+    item._status = 'uploading'
+    let lastPaint = 0
+    const onState = (state) => {
+      if (disposed || item._removed) return
+      const newId = state.uploadId && item._videoJobId !== state.uploadId
+      if (state.uploadId) item._videoJobId = state.uploadId
+      item._progress = { ...state, loaded: state.loaded ?? state.received ?? 0 }
+      if (state.duration) item._duration = state.duration
+      if (newId) persistDraft()
+      const now = performance.now()
+      if (now - lastPaint < 100) return
+      lastPaint = now
+      renderPreviews()
+      updatePublishGuard()
     }
-    throw new Error('视频保存超时，请稍后在草稿中确认')
+    persistDraft()
+    renderPreviews()
+    updatePublishGuard()
+    try {
+      if (!(await draftReady)) throw new Error('草稿初始化失败，请重新打开编辑器')
+      const options = { draftId, needsPoster, signal: controller.signal, onState }
+      const result = source ? await uploadVideo(source, options) : await waitForVideoUpload(item._videoJobId, options)
+      if (disposed || item._removed) return
+      item._name = result.filename
+      item._duration = result.duration
+      item._videoResult = { originalSize: result.originalSize, size: result.size, message: result.message, codec: result.codec }
+      if (needsPoster && result.poster) {
+        for (const url of [item._url, item._posterUrl]) if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
+        item._poster = result.poster
+        item._posterUrl = ''
+        item._url = `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(result.poster)}`
+      }
+      item._status = 'done'
+      item._progress = null
+    } catch (error) {
+      if (disposed || item._removed) return
+      item._status = 'error'
+      item._errMsg = error.message || '视频处理失败'
+    } finally {
+      videoControllers.delete(item)
+      if (!disposed && !item._removed) { renderPreviews(); updatePublishGuard(); persistDraft() }
+    }
   }
 
-  async function uploadVideoFile(file, onProgress) {
-    const uploaded = await uploadWithProgress(`/api/uploads/video?draftId=${encodeURIComponent(draftId)}`, file, {
-      headers: { 'Content-Type': videoContentType(file) },
-      onProgress,
-    })
-    if (uploaded.status === 'saving' && uploaded.uploadId) return waitForVideoUpload(uploaded.uploadId)
-    if (uploaded.filename) return uploaded
-    throw new Error(uploaded.error || '视频上传没有返回结果')
-  }
-
-  // 视频不压缩不转码:先抽一帧做封面(列表只加载封面,不会为了显示格子去拉视频),
-  // 再把原文件按原始字节流上传。大文件刻意不写进 IndexedDB 草稿缓存 —— 手机浏览器配额撑不住 200MB 视频。
+  // 浏览器封面用于即时预览；不支持原件编码时仍上传，由服务端生成正式封面。
   async function processVideo(file) {
+    file._id ||= newDraftId()
     file._kind = 'video'
     file._status = 'processing'
     persistDraft()
@@ -924,70 +975,16 @@ function createComposer(post, draftId, onDone, onCancel) {
     updatePublishGuard()
     try {
       const { duration, poster } = await readVideoPoster(file)
+      if (disposed || file._removed) return
       file._duration = duration
-      if (poster) {
-        file._posterUrl = URL.createObjectURL(poster)
-        file._url = file._posterUrl
-        const form = new FormData()
-        form.append('image', poster)
-        form.append('draftId', draftId)
-        const uploaded = await api('/api/uploads', { method: 'POST', body: form })
-        file._poster = uploaded.filename
-      }
-      file._status = 'uploading'
-      file._progress = { loaded: 0, total: file.size, phase: 'uploading' }
-      renderPreviews()
-      let lastPaint = 0
-      const uploaded = await uploadVideoFile(file, ({ loaded, total }) => {
-        file._progress = { loaded, total: total || file.size, phase: 'uploading' }
-        const now = performance.now()
-        if (now - lastPaint < 100) return
-        lastPaint = now
-        renderPreviews()
-      })
-      file._progress = { loaded: uploaded.size || file.size, total: uploaded.size || file.size, phase: 'saving' }
-      renderPreviews()
-      file._name = uploaded.filename
-      file._status = 'done'
-      file._progress = null
-    } catch (e) {
-      file._status = 'error'
-      file._errMsg = e.message || '视频处理失败'
-    }
-    renderPreviews()
-    updatePublishGuard()
-    persistDraft()
+      if (poster) { file._posterUrl = URL.createObjectURL(poster); file._url = file._posterUrl }
+    } catch { /* 原件无法在浏览器解码时，正式探测与封面交由服务器处理。 */ }
+    if (!disposed && !file._removed) await runVideoTask(file, file, true)
   }
 
-  // 实况图的配对视频:跟着静帧一起传,发布时用文件名把两者挂在一起
   async function attachMotion(still, motionFile) {
     still._motion = { _id: newDraftId(), name: motionFile.name, _status: 'uploading' }
-    persistDraft()
-    renderPreviews()
-    updatePublishGuard()
-    try {
-      still._motion._progress = { loaded: 0, total: motionFile.size, phase: 'uploading' }
-      renderPreviews()
-      let lastPaint = 0
-      const uploaded = await uploadVideoFile(motionFile, ({ loaded, total }) => {
-        still._motion._progress = { loaded, total: total || motionFile.size, phase: 'uploading' }
-        const now = performance.now()
-        if (now - lastPaint < 100) return
-        lastPaint = now
-        renderPreviews()
-      })
-      still._motion._progress = { loaded: uploaded.size || motionFile.size, total: uploaded.size || motionFile.size, phase: 'saving' }
-      renderPreviews()
-      still._motion._name = uploaded.filename
-      still._motion._status = 'done'
-      still._motion._progress = null
-    } catch (e) {
-      still._motion._status = 'error'
-      still._motion._errMsg = e.message || '实况视频上传失败'
-    }
-    renderPreviews()
-    updatePublishGuard()
-    persistDraft()
+    await runVideoTask(still._motion, motionFile, false)
   }
 
   // 选完图立刻处理(HEIC 转码 + 压缩)并上传到存储后端,发布时只提交文件名
@@ -1024,15 +1021,18 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   function uploadProgressText(item) {
     const progress = item._progress
-    if (progress?.total > 0) {
-      const label = progress.phase === 'saving' ? '正在保存到 WebDAV' : '上传中'
-      return `${label} ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
+    const labels = { queued: '等待压缩', probing: '读取视频信息', compressing: '压缩中', remuxing: '优化视频封装', validating: '校验压缩结果', poster: '生成视频封面', saving: '保存中' }
+    if (progress && labels[progress.phase]) {
+      const label = progress.phase === 'saving' && progress.backend === 'webdav' ? '正在保存到 WebDAV' : labels[progress.phase]
+      return progress.phase === 'compressing' ? `${label} ${Math.floor(progress.progress || 0)}%` : label
     }
+    if (progress?.total > 0) return `上传中 ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
     return STATUS_TEXT[item._status] || '上传中'
   }
 
   function renderPreviews() {
     previews.innerHTML = ''
+    videoResults.replaceChildren()
     const rows = [
       ...keepImages.map((img) => [keepImages, img]),
       ...newFiles.map((f) => [newFiles, f]),
@@ -1071,6 +1071,13 @@ function createComposer(post, draftId, onDone, onCancel) {
         }
       }
       $('.remove', node).onclick = () => {
+        item._removed = true
+        if (item._motion) item._motion._removed = true
+        for (const video of [item, item._motion]) {
+          if (!video) continue
+          videoControllers.get(video)?.abort()
+          if (video._videoJobId) cancelVideoUpload(video._videoJobId).catch((error) => { errorLine.textContent = `取消视频失败：${error.message}` })
+        }
         for (const url of [item._url, item._posterUrl]) {
           if (url && url.startsWith('blob:')) URL.revokeObjectURL(url)
         }
@@ -1088,7 +1095,17 @@ function createComposer(post, draftId, onDone, onCancel) {
         persistDraft()
       }
       previews.appendChild(node)
+      for (const video of [item, item._motion]) {
+        const result = video?._videoResult
+        if (!result || video._status !== 'done') continue
+        const percent = result.originalSize > 0 ? (1 - result.size / result.originalSize) * 100 : 0
+        const change = percent >= 0 ? `节省 ${percent.toFixed(1)}%` : `增大 ${Math.abs(percent).toFixed(1)}%`
+        const line = el('<p></p>')
+        line.textContent = `${video.name || '视频'}：${formatBytes(result.originalSize)} → ${formatBytes(result.size)}，${change}。${result.message || ''}`
+        videoResults.appendChild(line)
+      }
     }
+    videoResults.hidden = videoResults.childElementCount === 0
   }
 
   // 发布守卫:任一媒体(含实况配对视频)还在处理或上传中则禁用发布
@@ -1097,7 +1114,7 @@ function createComposer(post, draftId, onDone, onCancel) {
     const pending = newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))
     const generating = imageTask && ['queued', 'running', 'uploading'].includes(imageTask.status)
     submitBtn.disabled = pending || generating
-    if (pending) submitBtn.textContent = '图片上传中…'
+    if (pending) submitBtn.textContent = '媒体处理中…'
     else if (generating) submitBtn.textContent = 'AI 配图生成中…'
     else submitBtn.textContent = post ? '保存' : '发布'
   }
@@ -1504,7 +1521,7 @@ function mediaTile(media) {
 function mediaTileAction(tile, media, photos) {
   const hit = $('.media-hit', tile)
   if (media.type === 'video') {
-    hit.onclick = () => playInlineVideo(tile, media, { onError: () => showToast('这个视频的编码浏览器放不了') })
+    hit.onclick = () => playInlineVideo(tile, media, { onError: () => showToast('浏览器或设备无法解码此视频，请尝试支持 HEVC 的浏览器或设备') })
     // 收起按钮是点击层的兄弟节点(不能套在按钮里),事件不会冒泡过去,得单独接
     $('.media-collapse', tile).onclick = () => stopInlineVideo()
     return hit
@@ -2177,6 +2194,53 @@ function renderSiteSettingsCard() {
 
 }
 
+async function renderVideoSettingsCard() {
+  const pageHash = location.hash
+  const pageHeader = $('.settings-subpage-header', main)
+  let config
+  try { config = await getVideoUploadConfig() }
+  catch (error) { if (location.hash === pageHash && main.contains(pageHeader)) appendSettingsItem(el(`<p class="form-error">${esc(error.message)}</p>`)); return }
+  if (location.hash !== pageHash || !main.contains(pageHeader)) return
+  const card = el(`<section class="settings-card video-settings">
+    <h2>视频压缩</h2>
+    <p class="storage-hint">上传后自动压缩为 H.265，优先节省存储空间。新设置用于之后上传的视频。</p>
+    <label class="row"><input name="videoEnabled" type="checkbox" ${config.enabled ? 'checked' : ''} /><span>自动压缩视频</span></label>
+    <label>每分钟目标体积（MiB）<input name="videoMiB" type="number" min="10" max="100" step="1" value="${config.mibPerMinute}" /></label>
+    <p class="storage-hint video-budget"></p>
+    <p class="storage-hint">1MiB = 1024² 字节。体积按时长计算，画面简单时会更小；这是参考预算，实际大小可能有小幅偏差。</p>
+    <p class="storage-hint">均衡档：保留原视频分辨率（包括 1080p / 4K），最高 ${esc(String(config.maxFps))}fps，低帧率视频保持原帧率；H.265 CRF ${esc(String(config.crf))} / ${esc(config.preset)}，AAC 128kbps。播放需要浏览器和设备支持 HEVC。</p>
+    <p class="storage-hint">同样的每分钟体积预算会对 4K / 60fps 视频施加更强的码率限制，可调大预算来保留更多画面细节。</p>
+    <div class="storage-status">视频工具：${config.available ? '已就绪' : esc(config.error)}；原文件上限 ${Math.round(config.maxBytes / 1024 / 1024)}MiB</div>
+    <div class="form-error" role="status"></div>
+    <div class="settings-actions"><span class="save-tip" hidden>已保存</span><button class="btn save" type="button">保存</button></div>
+  </section>`)
+  const input = $('[name=videoMiB]', card)
+  const enabled = $('[name=videoEnabled]', card)
+  const hint = $('.video-budget', card)
+  const update = () => {
+    input.disabled = !enabled.checked
+    const value = Number(input.value)
+    hint.textContent = enabled.checked && Number.isFinite(value) ? `参考体积：1分钟 ${value}MiB · 5分钟 ${value * 5}MiB · 10分钟 ${value * 10}MiB` : '关闭压缩后保存原视频。'
+    $('.save-tip', card).hidden = true
+  }
+  input.oninput = update
+  enabled.onchange = update
+  update()
+  $('.save', card).onclick = async () => {
+    const button = $('.save', card)
+    const error = $('.form-error', card)
+    error.textContent = ''
+    button.disabled = true
+    try {
+      if (!input.checkValidity()) throw new Error('每分钟目标体积应为 10–100MiB 的整数')
+      await api('/api/uploads/video/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled.checked, mibPerMinute: Number(input.value) }) })
+      $('.save-tip', card).hidden = false
+    } catch (e) { error.textContent = e.message }
+    finally { button.disabled = false }
+  }
+  appendSettingsItem(card)
+}
+
 function renderSettingsSection(kind) {
   if (!site.user) return renderLogin()
   clearMain()
@@ -2184,7 +2248,7 @@ function renderSettingsSection(kind) {
   const titles = { site: '站点设置', ai: 'AI 设置', storage: '图片存储' }
   const header = el(`<header class="account-page-header settings-subpage-header"><a class="account-back" href="#/settings" aria-label="返回设置" title="返回设置">${icon('arrow-left')}</a><h1 tabindex="-1">${titles[kind]}</h1></header>`)
   main.appendChild(header)
-  if (kind === 'site') renderSiteSettingsCard()
+  if (kind === 'site') { renderSiteSettingsCard(); renderVideoSettingsCard() }
   else if (kind === 'ai') renderAiCards()
   else renderStorageCard()
   $('h1', header).focus()

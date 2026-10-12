@@ -30,11 +30,12 @@ export async function putImage(filename, buf, contentType, relativePath = filena
 
 // 大文件(视频)转存:源是已经落盘的临时文件,全程不把内容读进内存。
 // WebDAV 侧带 Content-Length 上传 —— 分块 PUT 在部分网盘(坚果云等)上不可靠。
-export async function putFileFromTemp(filename, tempPath, size, contentType, relativePath = filename, forcedBackend = null) {
+export async function putFileFromTemp(filename, tempPath, size, contentType, relativePath = filename, forcedBackend = null, signal = undefined) {
+  signal?.throwIfAborted()
   const backend = forcedBackend || activeBackend()
   if (backend === WEBDAV) {
     if (!webdav.isConnected()) throw new Error('存储已设为 WebDAV,但尚未配置凭据')
-    await webdav.putFile(filename, tempPath, size, contentType, relativePath)
+    await webdav.putFile(filename, tempPath, size, contentType, relativePath, undefined, signal)
     return WEBDAV
   }
   const localPath = path.join(UPLOAD_DIR, relativePath || filename)

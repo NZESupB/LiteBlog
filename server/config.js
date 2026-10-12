@@ -36,6 +36,14 @@ const ENV_KEYS = {
   'ai.llm.apiKey': 'LLM_API_KEY',
   'push.vapidSubject': 'VAPID_SUBJECT',
   'media.maxVideoBytes': 'MAX_VIDEO_BYTES',
+  'media.videoCompression': 'VIDEO_COMPRESSION',
+  'media.videoMiBPerMinute': 'VIDEO_MIB_PER_MINUTE',
+  'media.videoCrf': 'VIDEO_CRF',
+  'media.videoPreset': 'VIDEO_PRESET',
+  'media.videoThreads': 'VIDEO_THREADS',
+  'media.videoMaxJobs': 'VIDEO_MAX_JOBS',
+  'media.ffmpegPath': 'FFMPEG_PATH',
+  'media.ffprobePath': 'FFPROBE_PATH',
 }
 
 export function configValue(pathName, fallback = '') {

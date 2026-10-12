@@ -7,6 +7,7 @@ import { requireAuth } from './auth.js'
 import { WEBDAV, deleteImage, getImage, putImage } from './storage.js'
 import * as webdav from './webdav.js'
 import { configValue } from './config.js'
+import { cancelDraftVideoJobs } from './video-jobs.js'
 
 export const imageJobsApp = new Hono()
 
@@ -101,6 +102,7 @@ function imageReferenced(filename) {
 // 已挂到动态上的文件会被 images 引用,不会被误删。
 export async function cleanupDraftUploads(userId, draftId) {
   if (!draftId) return 0
+  await cancelDraftVideoJobs(userId, draftId)
   const pending = db.prepare('SELECT filename, storage, storage_path FROM pending_uploads WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
   const jobs = db.prepare('SELECT id, status, filename, storage, storage_path FROM image_jobs WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
   const unusedJobs = jobs.filter((job) => !job.filename || !imageReferenced(job.filename))

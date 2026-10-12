@@ -4,7 +4,7 @@ const AVATAR_COLORS = ['#e8747c', '#7ca9e8', '#8ec9a0', '#c99be0', '#e8b06e']
 export async function api(path, opts = {}) {
   const res = await fetch(path, opts)
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || data.message || `请求失败 (${res.status})`)
+  if (!res.ok) throw Object.assign(new Error(data.error || data.message || `请求失败 (${res.status})`), { status: res.status })
   return data
 }
 
@@ -52,7 +52,7 @@ export async function streamSse(path, body, onEvent, signal) {
 }
 
 // 原始字节上传:XMLHttpRequest 的 upload.progress 才能拿浏览器到服务器的实时字节数。
-export function uploadWithProgress(path, body, { headers = {}, onProgress, signal } = {}) {
+export function uploadWithProgress(path, body, { headers = {}, onProgress, signal, timeout = 0 } = {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     let settled = false
@@ -70,6 +70,7 @@ export function uploadWithProgress(path, body, { headers = {}, onProgress, signa
     }
     signal?.addEventListener('abort', abort, { once: true })
     xhr.open('POST', path)
+    xhr.timeout = timeout
     for (const [key, value] of Object.entries(headers)) xhr.setRequestHeader(key, value)
     xhr.upload.onprogress = (event) => {
       onProgress?.({
@@ -81,9 +82,10 @@ export function uploadWithProgress(path, body, { headers = {}, onProgress, signa
       let data = {}
       try { data = JSON.parse(xhr.responseText || '{}') } catch {}
       if (xhr.status >= 200 && xhr.status < 300) finish(resolve, data)
-      else finish(reject, new Error(data.error || data.message || `上传失败 (${xhr.status})`))
+      else finish(reject, Object.assign(new Error(data.error || data.message || `上传失败 (${xhr.status})`), { status: xhr.status }))
     }
     xhr.onerror = () => finish(reject, new Error('上传连接中断，请重试'))
+    xhr.ontimeout = () => finish(reject, Object.assign(new Error('上传连接超时，请重试'), { status: 408 }))
     xhr.onabort = () => finish(reject, new DOMException('上传已取消', 'AbortError'))
     xhr.send(body)
   })

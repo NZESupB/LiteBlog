@@ -36,7 +36,7 @@ function itemUrl(relativePath, folder = config().folder) {
 const madeDirs = new Set()
 
 // 逐段 MKCOL 建 folder 目录;已存在的段(405/409)忽略,真失败才抛
-async function ensureFolder(relativePath = '', folder = config().folder) {
+async function ensureFolder(relativePath = '', folder = config().folder, signal = undefined) {
   const { url } = config()
   const base = url.replace(/\/+$/, '')
   const segs = [...pathSegments(folder), ...pathSegments(relativePath).slice(0, -1)]
@@ -46,7 +46,7 @@ async function ensureFolder(relativePath = '', folder = config().folder) {
   for (const seg of segs) {
     cur = `${cur}/${encodeURIComponent(seg)}`
     if (madeDirs.has(cur)) continue
-    const res = await fetch(cur, { method: 'MKCOL', headers: { Authorization: authHeader() } })
+    const res = await fetch(cur, { method: 'MKCOL', headers: { Authorization: authHeader() }, signal })
     if (!res.ok && res.status !== 405 && res.status !== 409 && res.status !== 301) {
       const text = await res.text().catch(() => '')
       throw new Error(`WebDAV 建目录失败 (${res.status}): ${text.slice(0, 200)}`)
@@ -76,13 +76,14 @@ export async function putImage(filename, buf, contentType, relativePath = filena
 
 // 大文件上传:从临时文件流式 PUT,带 Content-Length。部分网盘只接受带长度的 PUT,
 // 用 ReadableStream 分块上传会失败,所以这里显式给出长度而不是 chunked。
-export async function putFile(filename, tempPath, size, contentType, relativePath = filename, folder = config().folder) {
-  await ensureFolder(relativePath, folder)
+export async function putFile(filename, tempPath, size, contentType, relativePath = filename, folder = config().folder, signal = undefined) {
+  await ensureFolder(relativePath, folder, signal)
   const res = await fetch(itemUrl(relativePath, folder), {
     method: 'PUT',
     headers: { Authorization: authHeader(), 'Content-Type': contentType, 'Content-Length': String(size) },
     body: createReadStream(tempPath),
     duplex: 'half',
+    signal,
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')

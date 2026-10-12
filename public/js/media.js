@@ -1,5 +1,5 @@
 // 媒体采集工具:判定图片/视频、按文件名主干配对实况图、抽视频封面帧与读时长。
-// 只在浏览器里跑(依赖 createImageBitmap / <video> / canvas),服务端不做任何转码。
+// 浏览器抽帧仅用于即时预览；正式视频与封面由服务端处理。
 
 const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm'])
 const VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v'])
@@ -98,7 +98,8 @@ export function formatDuration(seconds) {
 
 function seekTo(video, time) {
   return new Promise((resolve) => {
-    const done = () => { video.removeEventListener('seeked', done); video.removeEventListener('error', done); resolve() }
+    const timer = setTimeout(done, 5000)
+    function done() { clearTimeout(timer); video.removeEventListener('seeked', done); video.removeEventListener('error', done); resolve() }
     video.addEventListener('seeked', done)
     video.addEventListener('error', done)
     try { video.currentTime = time } catch { done() }
@@ -107,8 +108,11 @@ function seekTo(video, time) {
 
 function loadMetadata(video, url) {
   return new Promise((resolve, reject) => {
-    const fail = () => reject(new Error('无法读取视频信息,请确认格式为 MP4 / MOV / WebM'))
-    video.addEventListener('loadedmetadata', () => resolve(), { once: true })
+    const cleanup = () => { clearTimeout(timer); video.removeEventListener('loadedmetadata', loaded); video.removeEventListener('error', fail) }
+    const loaded = () => { cleanup(); resolve() }
+    const fail = () => { cleanup(); reject(new Error('浏览器无法读取原视频，将由服务器生成封面')) }
+    const timer = setTimeout(fail, 10000)
+    video.addEventListener('loadedmetadata', loaded, { once: true })
     video.addEventListener('error', fail, { once: true })
     video.src = url
     video.load?.()
