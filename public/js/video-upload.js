@@ -32,7 +32,7 @@ export async function cancelVideoUpload(id) {
   try { return await api(`/api/uploads/video/${encodeURIComponent(id)}`, { method: 'DELETE' }) }
   catch (error) { if (error.status !== 404) throw error }
 }
-export async function waitForVideoUpload(id, { signal, onState } = {}) {
+export async function waitForVideoUpload(id, { signal, onState, onDecision } = {}) {
   const url = `/api/uploads/video/${encodeURIComponent(id)}`
   const deadline = Date.now() + 6 * 60 * 60 * 1000
   while (Date.now() < deadline) {
@@ -41,6 +41,12 @@ export async function waitForVideoUpload(id, { signal, onState } = {}) {
     if (state.status === 'done' && state.filename) return state
     if (state.status === 'failed') throw new Error(state.error || '视频压缩或保存失败')
     if (state.status === 'cancelled') throw new Error('视频任务已取消，请重新选择视频')
+    // 原件已完整接收：先让用户决定是否压缩；没有决策入口时按默认压缩继续。
+    if (state.status === 'awaiting') {
+      const choice = onDecision ? await onDecision(state) : 'compress'
+      await retry(() => api(`${url}/decision`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keepOriginal: choice === 'original' }) }), signal)
+    }
     if (state.status === 'receiving') {
       if (state.total > 0 && state.received === state.total) await retry(() => api(`${url}/complete`, { method: 'POST', signal }), signal)
       else throw new Error('原视频尚未完整上传，请移除这项并重新选择视频')
@@ -49,7 +55,7 @@ export async function waitForVideoUpload(id, { signal, onState } = {}) {
   }
   throw new Error('视频仍在后台处理，请稍后重新打开草稿查看')
 }
-export async function uploadVideo(file, { draftId, needsPoster = true, signal, onState } = {}) {
+export async function uploadVideo(file, { draftId, needsPoster = true, signal, onState, onDecision } = {}) {
   const config = await getVideoUploadConfig(signal)
   if (!config.available) throw new Error(config.error || '视频处理工具不可用')
   if (file.size > config.maxBytes) throw new Error(`原视频不能超过 ${Math.round(config.maxBytes / 1024 / 1024)}MiB`)
@@ -85,5 +91,5 @@ export async function uploadVideo(file, { draftId, needsPoster = true, signal, o
     onState?.(state)
   }
   // 离开页面/网络中断不发送 DELETE；明确移除媒体才取消，未完整接收的任务由服务器过期清理。
-  return state.status === 'done' ? state : waitForVideoUpload(id, { signal, onState })
+  return state.status === 'done' ? state : waitForVideoUpload(id, { signal, onState, onDecision })
 }

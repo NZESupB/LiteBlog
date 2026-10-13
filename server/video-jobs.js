@@ -18,7 +18,7 @@ const MiB = 1024 * 1024
 const CHUNK_BYTES = 8 * MiB
 const RETENTION_MS = 60 * 60 * 1000
 const MAX_FRAME_RATE = 60
-const ACTIVE = new Set(['receiving', 'queued', 'compressing', 'saving'])
+const ACTIVE = new Set(['receiving', 'awaiting', 'queued', 'compressing', 'saving'])
 const TYPES = { 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm', 'video/x-m4v': '.mp4' }
 const PRESETS = new Set(['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow'])
 const jobs = new Map()
@@ -32,6 +32,8 @@ function numberConfig(key, fallback, min, max) {
 const MAX_BYTES = Math.trunc(numberConfig('media.maxVideoBytes', 2 * 1024 * MiB, 1, Number.MAX_SAFE_INTEGER))
 const THREADS = Math.trunc(numberConfig('media.videoThreads', 2, 1, 16))
 const MAX_JOBS = Math.trunc(numberConfig('media.videoMaxJobs', 8, 1, 32))
+const DECISION_MINUTES = Math.trunc(numberConfig('media.videoDecisionMinutes', 15, 1, 60))
+const DECISION_WINDOW_MS = DECISION_MINUTES * 60 * 1000
 const CRF = numberConfig('media.videoCrf', 26, 0, 51)
 const PRESET = String(configValue('media.videoPreset', 'fast'))
 if (!PRESETS.has(PRESET)) throw new Error('media.videoPreset 配置无效')
@@ -84,7 +86,7 @@ function command(program, args, { signal, timeout = 30000, onOutput } = {}) {
 
 async function initialize() {
   // 浏览器离开不会终止任务；服务器重启造成的中断须明确记录，不能一直显示处理中。
-  for (const row of db.prepare("SELECT * FROM video_jobs WHERE status IN ('receiving', 'queued', 'compressing', 'saving')").all()) {
+  for (const row of db.prepare("SELECT * FROM video_jobs WHERE status IN ('receiving', 'awaiting', 'queued', 'compressing', 'saving')").all()) {
     const job = restoreJob(row)
     job.status = job.phase = 'failed'
     job.error = '服务器重启中断了视频处理，请重新选择视频'
@@ -148,6 +150,7 @@ function view(job) {
     originalSize: job.received, total: job.total, progress: job.progress || 0,
     size: job.size || 0, duration: job.duration || null, budgetBytes: job.budgetBytes || 0,
     message: job.message || '', backend: job.backend,
+    decision: job.decision || '', decisionDeadline: job.awaitingDeadline || null, decisionMinutes: DECISION_MINUTES,
     name: job.name || '', needsPoster: job.needsPoster,
     createdAt: job.createdAt, queuedAt: job.queuedAt || null, startedAt: job.startedAt || null, finishedAt: job.finishedAt || null,
     elapsedMs: job.startedAt ? Math.max(0, end - job.startedAt) : 0,
@@ -232,13 +235,21 @@ async function cleanup() {
 async function performCleanup() {
   const now = Date.now()
   for (const [id, job] of jobs) {
+    // 等待确认的任务不按过期处理：超过等待窗口就按默认档位继续压缩，不能停在等待上。
+    if (job.status === 'awaiting') {
+      if (job.awaitingDeadline > now) continue
+      queue(job, 'timeout')
+      continue
+    }
     if (job.expiresAt > now) continue
     if (job.status === 'receiving') await cancel(job)
     if (!ACTIVE.has(job.status)) jobs.delete(id)
   }
-  db.prepare(`DELETE FROM video_jobs WHERE updated_at < ? AND status NOT IN ('receiving', 'queued', 'compressing', 'saving')
+  db.prepare(`DELETE FROM video_jobs WHERE updated_at < ? AND status NOT IN ('receiving', 'queued', 'compressing', 'saving', 'awaiting')
     AND NOT EXISTS (SELECT 1 FROM drafts WHERE drafts.id = video_jobs.draft_id AND drafts.user_id = video_jobs.user_id AND drafts.status = 'active')`)
     .run(now - RETENTION_MS)
+  // 等待超时在这里入队，若那一刻 drain 刚好在收尾就会被漏掉；每次清理都补一次触发（drain 自身在运行时直接返回）。
+  void drain().catch((error) => console.warn(`视频队列执行失败：${error.message}`))
 }
 const cleanupTimer = setInterval(() => cleanup().catch((error) => console.warn(`清理视频任务失败：${error.message}`)), 60000)
 cleanupTimer.unref()
@@ -477,7 +488,7 @@ async function processJob(job) {
         finalInfo = info
         job.message = '原文件更小，且已符合 HEVC 播放要求，已保留原文件'
       }
-    } else job.message = '自动压缩已关闭，已保留原视频'
+    } else job.message = job.decision === 'original' ? '已按你的选择保留原始视频，未压缩' : '自动压缩已关闭，已保留原视频'
     job.duration = finalInfo.duration
     assertActive(job)
     job.filename = filename(job.settings.enabled ? '.mp4' : TYPES[job.contentType], job.storageTime)
@@ -544,22 +555,37 @@ async function drain() {
     }
   } finally { running = false; release() }
 }
+// 入队由确认结果决定；decision 记录来源（original / compress / timeout），只用于说明文案与排查。
+function queue(job, decision) {
+  if (decision) job.decision = decision
+  job.awaitingDeadline = null
+  job.status = 'queued'
+  job.phase = 'queued'
+  job.queuedAt ||= Date.now()
+  persistJob(job)
+  void drain().catch((error) => console.warn(`视频队列执行失败：${error.message}`))
+}
 function complete(job) {
   assertActive(job)
   if (job.status !== 'receiving') return // complete 可重复提交。
   if (job.busy || job.received <= 0 || (job.total !== null && job.received !== job.total)) throw fail('视频尚未完整接收', 409)
   job.total = job.received
-  job.status = 'queued'
-  job.queuedAt = Date.now()
-  persistJob(job)
-  void drain().catch((error) => console.warn(`视频队列执行失败：${error.message}`))
+  // 原件完整落盘后先等用户决定是否压缩：只有开启压缩才需要这一步。
+  if (job.settings.enabled) {
+    job.status = 'awaiting'
+    job.phase = 'awaiting'
+    job.awaitingDeadline = Date.now() + DECISION_WINDOW_MS
+    persistJob(job)
+    return
+  }
+  queue(job)
 }
 
 export const videoJobsApp = new Hono()
 videoJobsApp.use('*', requireAuth)
 videoJobsApp.use('*', async (_c, next) => { await tools; await next() })
 videoJobsApp.onError((error, c) => c.json({ error: error.name === 'AbortError' ? '视频上传已取消' : error.message }, error.status || 500))
-videoJobsApp.get('/config', async (c) => c.json({ ...settings(), ...(await tools), maxBytes: MAX_BYTES, chunkBytes: CHUNK_BYTES, codec: 'hevc', crf: CRF, preset: PRESET, threads: THREADS, maxFps: MAX_FRAME_RATE, resolution: 'original' }))
+videoJobsApp.get('/config', async (c) => c.json({ ...settings(), ...(await tools), maxBytes: MAX_BYTES, chunkBytes: CHUNK_BYTES, codec: 'hevc', crf: CRF, preset: PRESET, threads: THREADS, maxFps: MAX_FRAME_RATE, resolution: 'original', decisionMinutes: DECISION_MINUTES }))
 videoJobsApp.put('/config', async (c) => {
   const body = await c.req.json().catch(() => null)
   if (!body || typeof body.enabled !== 'boolean' || !Number.isFinite(body.mibPerMinute) || body.mibPerMinute < 10 || body.mibPerMinute > 100) throw fail('请设置压缩开关及 10–100MiB 的每分钟目标体积')
@@ -580,7 +606,8 @@ videoJobsApp.post('/', async (c) => {
   try {
     await receive(job, c.req.raw, 0, MAX_BYTES)
     complete(job)
-    return c.json({ ...view(job), status: 'saving', size: job.received }, 202)
+    // 老前端只认 saving（历史约定）；等待确认时如实上报 awaiting。
+    return c.json({ ...view(job), status: job.status === 'awaiting' ? 'awaiting' : 'saving', size: job.received }, 202)
   } catch (error) { await cancel(job); throw error }
 })
 videoJobsApp.use('/:id/*', async (c, next) => {
@@ -602,6 +629,20 @@ videoJobsApp.post('/:id/chunk', async (c) => {
   return c.json(view(job))
 })
 videoJobsApp.post('/:id/complete', (c) => { const job = c.get('videoJob'); complete(job); return c.json(view(job), 202) })
+// 上传完整后由用户决定是否压缩；响应丢失或双标签页重复提交按幂等返回当前状态。
+videoJobsApp.post('/:id/decision', async (c) => {
+  const job = c.get('videoJob')
+  const body = await c.req.json().catch(() => null)
+  if (!body || typeof body.keepOriginal !== 'boolean') throw fail('请选择保留原片或继续压缩')
+  if (job.status !== 'awaiting') {
+    if (job.decision) return c.json(view(job))
+    throw fail('任务当前不需要确认压缩', 409)
+  }
+  assertActive(job)
+  if (body.keepOriginal) job.settings = { ...job.settings, enabled: false }
+  queue(job, body.keepOriginal ? 'original' : 'compress')
+  return c.json(view(job), 202)
+})
 videoJobsApp.delete('/:id', async (c) => {
   const job = findJob(c.req.param('id'), c.get('user').id)
   if (!job || job.userId !== c.get('user').id) throw fail('上传任务不存在或已过期', 404)

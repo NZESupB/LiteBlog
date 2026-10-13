@@ -927,6 +927,7 @@ function createComposer(post, draftId, onDone, onCancel) {
     polishAbort = null
     for (const controller of videoControllers.values()) controller.abort()
     videoControllers.clear()
+    for (const video of [...videoDecisions.keys()]) settleVideoDecision(video, 'compress')
     // 关闭编辑器时，未加入发布内容的 AI 结果没有保留价值；运行中的任务也一并取消。
     if (imageJobId && !newFiles.some((file) => file._jobId === imageJobId)) {
       api(`/api/image-jobs/${encodeURIComponent(imageJobId)}`, { method: 'DELETE' }).catch(() => {})
@@ -935,6 +936,25 @@ function createComposer(post, draftId, onDone, onCancel) {
   card.dispose = dispose
 
   const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
+
+  // 上传完整后由用户决定是否压缩：等待期间的按钮挂在 _decision 上，移除、丢弃或关闭编辑器都要放行。
+  const videoDecisions = new Map()
+  function askVideoDecision(item, state) {
+    return new Promise((resolve) => {
+      videoDecisions.set(item, resolve)
+      item._decision = { deadline: Number(state.decisionDeadline) || 0, bytes: state.originalSize || 0 }
+      renderPreviews()
+      updatePublishGuard()
+    })
+  }
+  function settleVideoDecision(item, choice) {
+    const resolve = videoDecisions.get(item)
+    if (!resolve) return
+    videoDecisions.delete(item)
+    item._decision = null
+    resolve(choice)
+    if (!disposed) renderPreviews()
+  }
 
   function applyVideoResult(item, result, needsPoster) {
     item._name = result.filename
@@ -949,6 +969,8 @@ function createComposer(post, draftId, onDone, onCancel) {
     }
     item._status = 'done'
     item._progress = null
+    item._decision = null
+    videoDecisions.delete(item)
   }
   async function runVideoTask(item, source, needsPoster) {
     if (disposed || item._removed) return
@@ -974,7 +996,7 @@ function createComposer(post, draftId, onDone, onCancel) {
     updatePublishGuard()
     try {
       if (!(await draftReady)) throw new Error('草稿初始化失败，请重新打开编辑器')
-      const options = { draftId, needsPoster, signal: controller.signal, onState }
+      const options = { draftId, needsPoster, signal: controller.signal, onState, onDecision: (state) => askVideoDecision(item, state) }
       const result = source ? await uploadVideo(source, options) : await waitForVideoUpload(item._videoJobId, options)
       if (disposed || item._removed) return
       applyVideoResult(item, result, needsPoster)
@@ -1044,7 +1066,7 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   function uploadProgressText(item) {
     const progress = item._progress
-    const labels = { queued: '等待压缩', probing: '读取视频信息', compressing: '压缩中', remuxing: '优化视频封装', validating: '校验压缩结果', poster: '生成视频封面', saving: '保存中' }
+    const labels = { queued: '等待压缩', awaiting: '等待确认是否压缩', probing: '读取视频信息', compressing: '压缩中', remuxing: '优化视频封装', validating: '校验压缩结果', poster: '生成视频封面', saving: '保存中' }
     if (progress && labels[progress.phase]) {
       const label = progress.phase === 'saving' && progress.backend === 'webdav' ? '正在保存到 WebDAV' : labels[progress.phase]
       if (['compressing', 'remuxing'].includes(progress.phase)) {
@@ -1084,14 +1106,14 @@ function createComposer(post, draftId, onDone, onCancel) {
         if (item._status === 'error') {
           overlay.textContent = item._errMsg || '失败'
         } else {
-          overlay.appendChild(el('<span class="spinner"></span>'))
+          if (item._progress?.status !== 'awaiting') overlay.appendChild(el('<span class="spinner"></span>'))
           overlay.appendChild(el(`<span>${uploadProgressText(item)}</span>`))
         }
         node.appendChild(overlay)
       } else if (item._status === 'done') {
         if (item._motion?._status === 'uploading') {
           const overlay = el('<div class="upload-overlay"></div>')
-          overlay.appendChild(el('<span class="spinner"></span>'))
+          if (item._motion._progress?.status !== 'awaiting') overlay.appendChild(el('<span class="spinner"></span>'))
           overlay.appendChild(el(`<span>${uploadProgressText(item._motion)}</span>`))
           node.appendChild(overlay)
         } else {
@@ -1104,6 +1126,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         for (const video of [item, item._motion]) {
           if (!video) continue
           videoControllers.get(video)?.abort()
+          settleVideoDecision(video, 'compress')
           if (video._videoJobId) cancelVideoUpload(video._videoJobId).catch((error) => { errorLine.textContent = `取消视频失败：${error.message}` })
         }
         for (const url of [item._url, item._posterUrl]) {
@@ -1125,7 +1148,18 @@ function createComposer(post, draftId, onDone, onCancel) {
       previews.appendChild(node)
       for (const video of [item, item._motion]) {
         const result = video?._videoResult
-        if (video?._progress && ['queued', 'probing', 'compressing', 'remuxing', 'validating', 'poster', 'saving'].includes(video._progress.phase)) {
+        if (video?._decision) {
+          // 原件已完整上传，等用户决定是否压缩：超过窗口未选择由服务端按默认档位继续。
+          const line = el('<p></p>')
+          const minutes = video._decision.deadline > 0 ? Math.max(1, Math.ceil((video._decision.deadline - Date.now()) / 60000)) : null
+          line.textContent = `${video.name || '视频'}：原件已上传完（${formatBytes(video._decision.bytes)}）。保留原片可跳过压缩；约 ${minutes ?? '十几'} 分钟后没选择会按默认档位压缩。`
+          const keep = el('<button class="btn btn-ghost" type="button">保留原片</button>')
+          const compress = el('<button class="btn btn-ghost" type="button">压缩</button>')
+          keep.onclick = () => settleVideoDecision(video, 'original')
+          compress.onclick = () => settleVideoDecision(video, 'compress')
+          line.append(' ', keep, ' ', compress)
+          videoResults.appendChild(line)
+        } else if (video?._progress && ['queued', 'probing', 'compressing', 'remuxing', 'validating', 'poster', 'saving'].includes(video._progress.phase)) {
           const line = el('<p></p>')
           line.textContent = `${video.name || '视频'}：${uploadProgressText(video)}。可离开页面，视频会继续处理。`
           videoResults.appendChild(line)
@@ -1148,7 +1182,9 @@ function createComposer(post, draftId, onDone, onCancel) {
     const pending = newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))
     const generating = imageTask && ['queued', 'running', 'uploading'].includes(imageTask.status)
     submitBtn.disabled = pending || generating
-    if (pending) submitBtn.textContent = '媒体处理中…'
+    const waiting = [...videoDecisions.keys()].some((video) => video._decision)
+    if (waiting) submitBtn.textContent = '等待视频确认…'
+    else if (pending) submitBtn.textContent = '媒体处理中…'
     else if (generating) submitBtn.textContent = 'AI 配图生成中…'
     else submitBtn.textContent = post ? '保存' : '发布'
   }
@@ -2238,6 +2274,7 @@ async function renderVideoSettingsCard() {
   const card = el(`<section class="settings-card video-settings">
     <h2>视频压缩</h2>
     <p class="storage-hint">上传后自动压缩为 H.265，优先节省存储空间。新设置用于之后上传的视频。</p>
+    <p class="storage-hint">原件完整上传后会先问一次是否保留原片：选「保留原片」直接保存原件、跳过压缩（原片可能是 MOV / WebM 或非 HEVC 编码，部分浏览器不能内嵌播放）；${esc(String(config.decisionMinutes))} 分钟内没做选择会按默认档位继续压缩。</p>
     <label class="row"><input name="videoEnabled" type="checkbox" ${config.enabled ? 'checked' : ''} /><span>自动压缩视频</span></label>
     <label>每分钟目标体积（MiB）<input name="videoMiB" type="number" min="10" max="100" step="1" value="${config.mibPerMinute}" /></label>
     <p class="storage-hint video-budget"></p>

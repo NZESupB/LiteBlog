@@ -38,6 +38,7 @@ const ENV_KEYS = {
   'push.vapidSubject': 'VAPID_SUBJECT',
   'media.maxVideoBytes': 'MAX_VIDEO_BYTES',
   'media.videoCompression': 'VIDEO_COMPRESSION',
+  'media.videoDecisionMinutes': 'VIDEO_DECISION_MINUTES',
   'media.videoMiBPerMinute': 'VIDEO_MIB_PER_MINUTE',
   'media.videoCrf': 'VIDEO_CRF',
   'media.videoPreset': 'VIDEO_PRESET',
