@@ -21,6 +21,12 @@ async function retry(task, signal) {
     }
   }
 }
+export function formatVideoElapsed(milliseconds) {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1000))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor(seconds % 3600 / 60)
+  return `${hours ? `${hours}小时` : ''}${minutes ? `${minutes}分` : ''}${seconds % 60}秒`
+}
 export const getVideoUploadConfig = (signal) => api('/api/uploads/video/config', { signal })
 export async function cancelVideoUpload(id) {
   try { return await api(`/api/uploads/video/${encodeURIComponent(id)}`, { method: 'DELETE' }) }
@@ -49,39 +55,35 @@ export async function uploadVideo(file, { draftId, needsPoster = true, signal, o
   if (file.size > config.maxBytes) throw new Error(`原视频不能超过 ${Math.round(config.maxBytes / 1024 / 1024)}MiB`)
   const initialized = await api('/api/uploads/video/init', {
     method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ draftId, contentType: videoContentType(file), size: file.size, needsPoster }),
+    body: JSON.stringify({ draftId, contentType: videoContentType(file), size: file.size, needsPoster, name: file.name }),
   })
   const id = initialized.uploadId
   const url = `/api/uploads/video/${encodeURIComponent(id)}`
   onState?.(initialized)
-  let submitted = false
-  try {
-    let offset = 0
-    while (offset < file.size) {
-      const start = offset
-      const end = Math.min(file.size, start + config.chunkBytes)
-      const result = await retry(() => uploadWithProgress(`${url}/chunk?offset=${start}`, file.slice(start, end), {
-        headers: { 'Content-Type': 'application/octet-stream' }, signal, timeout: 120000,
-        onProgress: ({ loaded }) => onState?.({ uploadId: id, status: 'receiving', phase: 'uploading', loaded: start + loaded, total: file.size }),
-      }), signal).catch(async (error) => {
-        if (!retryable(error)) throw error
-        const state = await retry(() => api(url, { signal }), signal)
-        // 只接受本分片完整落盘，不能把局部进度当作成功而跳过字节。
-        if (state.status === 'receiving' && state.received === end) return state
-        throw error
-      })
-      if (result.received !== end) throw new Error('服务器分片进度不一致，请重新上传')
-      offset = end
-      onState?.(result)
-    }
-    // complete 可重复调用；即使响应丢失，保留已接收任务供草稿恢复。
-    submitted = true
-    const state = await retry(() => api(`${url}/complete`, { method: 'POST', signal }), signal)
+  let offset = 0
+  let state = initialized
+  while (offset < file.size) {
+    const start = offset
+    const end = Math.min(file.size, start + config.chunkBytes)
+    state = await retry(() => uploadWithProgress(`${url}/chunk?offset=${start}`, file.slice(start, end), {
+      headers: { 'Content-Type': 'application/octet-stream' }, signal, timeout: 120000,
+      onProgress: ({ loaded }) => onState?.({ uploadId: id, status: 'receiving', phase: 'uploading', loaded: start + loaded, total: file.size }),
+    }), signal).catch(async (error) => {
+      if (!retryable(error)) throw error
+      const received = await retry(() => api(url, { signal }), signal)
+      // 最后分片可能已自动入队；响应丢失时仍只接受本分片完整落盘。
+      if (received.received === end) return received
+      throw error
+    })
+    if (state.received !== end) throw new Error('服务器分片进度不一致，请重新上传')
+    offset = end
     onState?.(state)
-    return await waitForVideoUpload(id, { signal, onState })
-  } catch (error) {
-    // 关闭编辑器只停止已提交任务的轮询；移除媒体由调用方显式取消。
-    if (!submitted) await cancelVideoUpload(id).catch((e) => console.warn(`取消未完成视频上传失败：${e.message}`))
-    throw error
   }
+  // 兼容尚未自动入队的服务器；新服务器不需要第二个请求才能开始压缩。
+  if (state.status === 'receiving') {
+    state = await retry(() => api(`${url}/complete`, { method: 'POST', signal }), signal)
+    onState?.(state)
+  }
+  // 离开页面/网络中断不发送 DELETE；明确移除媒体才取消，未完整接收的任务由服务器过期清理。
+  return state.status === 'done' ? state : waitForVideoUpload(id, { signal, onState })
 }

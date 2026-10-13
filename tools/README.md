@@ -1,126 +1,49 @@
-# 数据库备份与恢复
+# 服务内数据库备份与恢复
 
-`tools/backup.py` 把 SQLite 数据库（`blog.db`）备份到与图片存储一致的 **WebDAV** 目录，远端只保留最新一份；也支持从 WebDAV 或本地文件恢复。
+登录后打开「设置 → 备份与恢复」。备份、每日调度和导入恢复都由 Node 服务完成，无需 Python 或外部定时脚本。
 
-- 仅用 Python 标准库（`sqlite3` / `urllib` / `xml`），**无第三方依赖**
-- 要求 **Python 3.9+**
-- 备份使用 SQLite backup API 获取在线一致快照，不依赖手动 checkpoint
+## 备份
 
-## 一、命令用法
+- 点击「立即备份」生成 SQLite 在线一致快照，包含 WAL 中已提交的数据；服务继续提供正常读写。
+- 自动备份默认开启，每天北京时间（`Asia/Shanghai`）03:30 执行，可在页面修改每日时间或关闭自动备份。
+- 服务重启后补执行当天错过的备份；当天手动成功后不再重复定时备份。定时失败记录原因，当天不无限重试，可手动重试，下一天继续执行。
+- 共用「图片存储」中的 WebDAV 地址、账号、密码和目录。即使新媒体选择本地存储，配置完整的 WebDAV 仍用于数据库备份。未配置时显示待配置，不影响服务启动。
+- 文件名为 `blog-backup-YYYYMMDD-HHMMSS.db`。新文件上传成功后才清理旧备份，只保留最新一份；其他数据库或媒体文件不删除。
+- 上次执行时间、成功/失败、文件名和清理警告可在页面查看。备份开始后可离开页面，服务会继续完成任务。
 
-在项目根目录执行（`DATA_DIR` 默认定位到项目根的 `data/`，与启动时所在目录无关）：
+## 导入 .db 恢复
 
-```bash
-# 备份到 WebDAV，远端只保留最新一份 db
-/usr/bin/python3 tools/backup.py
+1. 先完成或取消视频上传、压缩、AI 配图等任务。
+2. 在「备份与恢复」页面选择一个本站 SQLite `.db` 文件，点击「导入并恢复」。无需 WebDAV 连接，也不接受服务器文件路径。
+3. 阅读并确认整体覆盖提示。导入会替换当前数据库中的账号、密码、动态、评论、草稿、通知订阅、站点设置和个人设置，不合并数据。
+4. 服务验证文件头、完整性、核心表与字段、外键关联及兼容迁移。校验失败或任务忙碌时，当前数据库不变。
+5. 服务短暂进入维护状态，等待旧请求与回调结束，在 `data/backups/before-restore-<时间>-<随机标识>.db` 保留当前库的一致副本，再安全切换。成功后无需手动重启，所有旧登录失效，请用导入库中的账号重新登录。
 
-# 列出 WebDAV 上的备份
-/usr/bin/python3 tools/backup.py list
+文件上限默认 256MiB。可通过 `config.json` 的 `backup.maxImportBytes` 或环境变量 `BACKUP_MAX_IMPORT_BYTES` 调整字节上限（修改运行配置后重启）。反向代理也需允许对应请求大小，例如 Nginx 默认小请求限制会阻止较大的数据库上传。
 
-# 从 WebDAV 恢复（默认最新；也可指定备份名）
-/usr/bin/python3 tools/backup.py restore
-/usr/bin/python3 tools/backup.py restore blog-backup-20260828-163000.db
+**媒体文件不包含在 `.db` 中。** 本地 `data/uploads/`、`data/avatars/` 与 WebDAV 文件保留原位；导入数据库只有文件引用，缺失文件需要另行补回。完整灾备仍需单独备份媒体。运行配置文件中的密钥也不随数据库恢复。
 
-# 直接用本地 db 文件恢复（无需 WebDAV 配置）
-/usr/bin/python3 tools/backup.py restore /path/to/backup.db
-```
+恢复失败时回退原库。若切换中途进程退出，下次启动根据 `data/.restore-state.json` 处理未提交切换；若回退也失败，服务保持维护状态并返回明确错误。恢复前数据库副本保留供人工下载后再次导入，不会自动上传或自动删除。
 
-> 恢复前请先停掉服务：Docker 用 `docker compose stop`，裸机停掉 `node server/index.js`。
-> 恢复时现有数据会整体改名留底（`data.before-restore-<时间戳>`），不会直接删除。
+## HTTP 接口
 
-## 二、WebDAV 配置来源
+接口均要求登录 Cookie，写操作须来自本站。自动化调用可以省略浏览器来源头，使用已登录 Cookie；跨站来源会被拒绝。
 
-脚本读取 `settings` 表里的 `webdav_url / webdav_username / webdav_password / webdav_folder`（与站点「图片存储 WebDAV」共用同一套）。落库为空时回退到环境变量：
+| 接口 | 输入 | 返回 |
+| --- | --- | --- |
+| `GET /api/backups` | 无 | 定时设置、WebDAV 就绪状态、上次结果、当前操作、下次时间、导入上限 |
+| `PUT /api/backups/config` | JSON `{ "enabled": true, "time": "03:30" }` | 保存后的配置与状态 |
+| `POST /api/backups` | 无 | `202`，备份已开始，后续查询 GET 获取结果 |
+| `POST /api/backups/restore` | multipart，`file` 为 `.db` 文件，`confirm` 为 `true` | 成功返回 `ok`、`requiresLogin`、`safetyBackup` |
 
-| 环境变量            | 说明                       | 默认            |
-| ------------------- | -------------------------- | --------------- |
-| `WEBDAV_URL`      | WebDAV 地址，以`/` 结尾  | —              |
-| `WEBDAV_USERNAME` | 用户名                     | —              |
-| `WEBDAV_PASSWORD` | 密码                       | —              |
-| `WEBDAV_FOLDER`   | 备份目录（与图片存储一致） | `images`      |
-| `DATA_DIR`        | 本地数据目录               | 项目根`data/` |
+文件校验问题返回 `400`，超限返回 `413`，任务冲突返回 `409`，实际切换期间其他请求返回 `503`。没有远端备份列表、WebDAV 恢复或任意服务器路径导入接口。
 
-> 备份文件名形如 `blog-backup-20260828-163000.db`，与图片命名不冲突。每次备份后会自动删除远端更早的 db 备份。
+## 从旧脚本迁移
 
-## 三、定时任务
+`tools/backup.py` 已移除。升级部署时，请移除宿主机原先调用该脚本的 crontab 条目；使用 systemd timer 的部署应停用原 `blog-backup.timer`，例如 `sudo systemctl disable --now blog-backup.timer`。不要让旧实例或已保存的脚本副本继续操作同一个备份目录。
 
-用 `crontab` 每天定时备份。先确认 Python 路径与版本（部署机为 `/usr/bin/python3`，要求 ≥3.9）：
+WebDAV 连接配置与已有备份文件可继续使用，无需复制新的凭据或安装依赖。
 
-```bash
-/usr/bin/python3 --version
-```
+## 其他工具
 
-编辑定时任务：
-
-```bash
-crontab -e
-```
-
-加入一行（每天凌晨 3:30，日志追加到 `backups/cron.log`；首次运行会自动创建日志目录）：
-
-```cron
-30 3 * * * cd /data/LiteBlog && mkdir -p backups && /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
-```
-
-> 把 `/data/LiteBlog` 换成实际部署路径。cron 环境变量精简，若配置未落库，建议在 crontab 顶部显式导出 WebDAV 凭据：
->
-> ```cron
-> WEBDAV_URL=https://dav.jianguoyun.com/dav/
-> WEBDAV_USERNAME=你的账号
-> WEBDAV_PASSWORD=你的密码
-> WEBDAV_FOLDER=images
-> 30 3 * * * cd /data/LiteBlog && mkdir -p backups && /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
-> ```
-
-**Docker 部署**：在宿主机跑 cron，`DATA_DIR` 指向挂载卷路径即可：
-
-```cron
-30 3 * * * cd /data/LiteBlog && mkdir -p backups && DATA_DIR=/data/LiteBlog/data /usr/bin/python3 tools/backup.py >> backups/cron.log 2>&1
-```
-
-**systemd timer 替代方案**（可选，日志更规范）：
-
-```ini
-# /etc/systemd/system/blog-backup.service
-[Unit]
-Description=Couple blog database backup
-
-[Service]
-Type=oneshot
-WorkingDirectory=/data/LiteBlog
-ExecStart=/usr/bin/python3 tools/backup.py
-```
-
-```ini
-# /etc/systemd/system/blog-backup.timer
-[Unit]
-Description=Run blog backup daily
-
-[Timer]
-OnCalendar=*-*-* 03:30:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-```bash
-sudo systemctl enable --now blog-backup.timer
-sudo systemctl list-timers blog-backup.timer
-```
-
-## 四、恢复场景速查
-
-| 场景                              | 命令                                                                        |
-| --------------------------------- | --------------------------------------------------------------------------- |
-| 数据损坏，从 WebDAV 恢复最新      | 停服 →`/usr/bin/python3 tools/backup.py restore` → 启动                 |
-| 恢复指定某次备份                  | 停服 →`/usr/bin/python3 tools/backup.py restore blog-backup-<时间戳>.db` |
-| 手上有一份本地 db 备份            | 停服 →`/usr/bin/python3 tools/backup.py restore /path/backup.db`         |
-| 原`data/` 已删除，且要读 WebDAV | 用环境变量`WEBDAV_*` 提供连接信息后 `restore`                           |
-
-## 五、注意事项
-
-1. **图片不随 db 备份**：图片本就在 WebDAV 同一目录（WebDAV 存储时），恢复时无需处理；若用本地存储，图片在 `data/uploads/`，请自行另行备份。
-2. **恢复前必须停服**：运行中的进程会继续写旧库，可能把 WAL 写回导致恢复失效。
-3. **先试跑验证**：首次使用建议手动跑一次 `/usr/bin/python3 tools/backup.py` 和 `list`，确认 WebDAV 连通与凭据正确，再挂定时任务。
-4. **WebDAV 侧的可靠性**：远端只保留一份最新 db，若担心坚果云等自身的可靠性，可在网盘开启回收站/版本历史。
+`tools/export-mysql.mjs` 仍为独立只读导出工具，未来迁库时可运行 `node tools/export-mysql.mjs`；它不是备份调度或恢复入口。

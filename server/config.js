@@ -28,6 +28,7 @@ const ENV_KEYS = {
   'storage.webdav.username': 'WEBDAV_USERNAME',
   'storage.webdav.password': 'WEBDAV_PASSWORD',
   'storage.webdav.folder': 'WEBDAV_FOLDER',
+  'backup.maxImportBytes': 'BACKUP_MAX_IMPORT_BYTES',
   'ai.image.baseUrl': 'IMAGE_API_BASE_URL',
   'ai.image.model': 'IMAGE_MODEL',
   'ai.image.apiKey': 'IMAGE_API_KEY',

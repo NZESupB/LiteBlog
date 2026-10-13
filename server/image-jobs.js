@@ -8,6 +8,7 @@ import { WEBDAV, deleteImage, getImage, putImage } from './storage.js'
 import * as webdav from './webdav.js'
 import { configValue } from './config.js'
 import { cancelDraftVideoJobs } from './video-jobs.js'
+import { enterOperation } from './maintenance.js'
 
 export const imageJobsApp = new Hono()
 
@@ -101,6 +102,11 @@ function imageReferenced(filename) {
 // 草稿结束(发布或丢弃)后,清掉用户没有采用的待引用文件。
 // 已挂到动态上的文件会被 images 引用,不会被误删。
 export async function cleanupDraftUploads(userId, draftId) {
+  const release = enterOperation('media')
+  try { return await performDraftCleanup(userId, draftId) } finally { release() }
+}
+
+async function performDraftCleanup(userId, draftId) {
   if (!draftId) return 0
   await cancelDraftVideoJobs(userId, draftId)
   const pending = db.prepare('SELECT filename, storage, storage_path FROM pending_uploads WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
@@ -290,7 +296,10 @@ async function runJob(id) {
 }
 
 function startJob(row) {
-  queueMicrotask(() => runJob(row.id).catch((error) => updateJob(row.id, { status: 'failed', error: error.message || 'AI 配图失败' })))
+  const release = enterOperation('media')
+  queueMicrotask(() => runJob(row.id)
+    .catch((error) => updateJob(row.id, { status: 'failed', error: error.message || 'AI 配图失败' }))
+    .finally(release))
 }
 
 // 进程重启时不能假装这些任务仍在执行,让用户明确重试。

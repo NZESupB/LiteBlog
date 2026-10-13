@@ -7,7 +7,8 @@ import { api, streamSse, formatBytes, el, esc, setFormMessage, avatarColor, pars
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
 import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/inline-video.js'
 import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration } from '/js/media.js'
-import { uploadVideo, waitForVideoUpload, cancelVideoUpload, getVideoUploadConfig } from '/js/video-upload.js'
+import { uploadVideo, waitForVideoUpload, cancelVideoUpload, getVideoUploadConfig, formatVideoElapsed } from '/js/video-upload.js'
+import { createBackupSettings } from '/js/backup-settings.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
@@ -24,6 +25,7 @@ function withinEditWindow(createdAt) {
 }
 let activePostMenu = null
 let activeInlineComposerCleanup = null
+let activeSettingsCleanup = null
 let serviceWorkerRegistration = null
 const SERVICE_WORKER_READY_TIMEOUT_MS = 5000
 let dayProgressTimer = null
@@ -394,6 +396,8 @@ function watchHeaderWrite(source) {
 
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
+  activeSettingsCleanup?.()
+  activeSettingsCleanup = null
   activeComposerModal?.close?.(true)
   activeInlineComposerCleanup?.()
   activeInlineComposerCleanup = null
@@ -525,7 +529,6 @@ function createComposer(post, draftId, onDone, onCancel) {
         <span class="md-sep"></span>
         <button data-md="emoji" title="表情" type="button">${icon('smile')}</button>
         <span class="ai-tools" role="group" aria-label="AI 工具">
-          <span class="ai-tools-label">AI 工具</span>
           <button class="md-polish" title="AI 优化正文" type="button">${icon('sparkles')}<span>AI 优化</span></button>
           <button class="md-image" title="根据正文生成配图" type="button">${icon('image')}<span>AI 配图</span></button>
         </span>
@@ -719,6 +722,7 @@ function createComposer(post, draftId, onDone, onCancel) {
     imageJobId: imageTask?.id || savedDraft.imageJobId || '',
   })
   const persistDraft = () => { if (!disposed) saveComposeState(draftId, draftState()) }
+  window.addEventListener('pagehide', persistDraft)
   const savedKeep = new Set(Array.isArray(savedDraft.keep) ? savedDraft.keep : keepImages.map((image) => image.id))
   if (post) {
     for (let i = keepImages.length - 1; i >= 0; i--) if (!savedKeep.has(keepImages[i].id)) keepImages.splice(i, 1)
@@ -736,15 +740,18 @@ function createComposer(post, draftId, onDone, onCancel) {
   ;(async () => {
     await draftReady
     if (disposed) return
+    const snapshot = await api(`/api/drafts/${encodeURIComponent(draftId)}`)
+    if (disposed) return
+    const serverJobs = new Map((snapshot.videoJobs || []).map((job) => [job.uploadId, job]))
     const restoredIds = new Set()
     const savedFiles = Array.isArray(savedDraft.files) ? savedDraft.files : []
     function restoreMotion(file, saved) {
       if (!saved?.motion && !saved?.motionJobId && !saved?.motionStatus) return
       file._motion = { _id: newDraftId(), name: '实况视频', _status: saved.motion ? 'done' : 'uploading', _name: saved.motion || '', _videoJobId: saved.motionJobId || '', _videoResult: saved.motionResult || null }
-      if (!saved.motion) {
-        if (saved.motionJobId) runVideoTask(file._motion, null, false)
-        else { file._motion._status = 'error'; file._motion._errMsg = '实况视频尚未完整上传，请重新选择配对文件' }
-      }
+      const state = serverJobs.get(saved.motionJobId)
+      if (state?.status === 'done') applyVideoResult(file._motion, state, false)
+      else if (saved.motionJobId && (!saved.motion || state)) runVideoTask(file._motion, null, false)
+      else if (!saved.motion) { file._motion._status = 'error'; file._motion._errMsg = '实况视频尚未完整上传，请重新选择配对文件' }
     }
     for (const saved of savedFiles) {
       const kind = saved.kind || 'image'
@@ -759,10 +766,21 @@ function createComposer(post, draftId, onDone, onCancel) {
       newFiles.push(file)
       restoredIds.add(file._id)
       restoreMotion(file, saved)
-      if (kind === 'video' && !saved.filename) {
-        if (saved.videoJobId) runVideoTask(file, null, true)
-        else { file._status = 'error'; file._errMsg = '原视频尚未完整上传，请移除这项并重新选择视频' }
+      if (kind === 'video') {
+        const state = serverJobs.get(saved.videoJobId)
+        if (state?.status === 'done') applyVideoResult(file, state, true)
+        else if (saved.videoJobId && (!saved.filename || state)) runVideoTask(file, null, true)
+        else if (!saved.filename) { file._status = 'error'; file._errMsg = '原视频尚未完整上传，请移除这项并重新选择视频' }
       }
+    }
+    const restoredJobs = new Set(newFiles.flatMap((file) => [file._videoJobId, file._motion?._videoJobId]).filter(Boolean))
+    for (const state of serverJobs.values()) {
+      if (!state.needsPoster || restoredJobs.has(state.uploadId) || state.status === 'cancelled'
+        || keepImages.some((image) => image.filename === state.filename)) continue
+      const file = { _id: newDraftId(), _kind: 'video', _videoJobId: state.uploadId, name: state.name || '视频', _status: 'uploading' }
+      newFiles.push(file)
+      if (state.status === 'done') applyVideoResult(file, state, true)
+      else runVideoTask(file, null, true)
     }
     const blobs = await loadDraftFiles(draftId)
     if (disposed) return
@@ -775,7 +793,7 @@ function createComposer(post, draftId, onDone, onCancel) {
     renderPreviews()
     updatePublishGuard()
     persistDraft()
-  })()
+  })().catch((error) => { if (!disposed) errorLine.textContent = `恢复草稿失败：${error.message}` })
 
   function formatElapsed(startedAt) {
     const start = startedAt ? parseTime(startedAt).getTime() : Date.now()
@@ -901,6 +919,7 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   const dispose = () => {
     if (disposed) return
+    window.removeEventListener('pagehide', persistDraft)
     disposed = true
     clearInterval(imagePollTimer)
     imagePollTimer = null
@@ -917,6 +936,20 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
 
+  function applyVideoResult(item, result, needsPoster) {
+    item._name = result.filename
+    item._duration = result.duration
+    item._videoResult = { originalSize: result.originalSize, size: result.size, message: result.message, codec: result.codec,
+      totalElapsedMs: result.totalElapsedMs, elapsedMs: result.elapsedMs }
+    if (needsPoster && result.poster) {
+      for (const url of [item._url, item._posterUrl]) if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
+      item._poster = result.poster
+      item._posterUrl = ''
+      item._url = `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(result.poster)}`
+    }
+    item._status = 'done'
+    item._progress = null
+  }
   async function runVideoTask(item, source, needsPoster) {
     if (disposed || item._removed) return
     const controller = new AbortController()
@@ -944,17 +977,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       const options = { draftId, needsPoster, signal: controller.signal, onState }
       const result = source ? await uploadVideo(source, options) : await waitForVideoUpload(item._videoJobId, options)
       if (disposed || item._removed) return
-      item._name = result.filename
-      item._duration = result.duration
-      item._videoResult = { originalSize: result.originalSize, size: result.size, message: result.message, codec: result.codec }
-      if (needsPoster && result.poster) {
-        for (const url of [item._url, item._posterUrl]) if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
-        item._poster = result.poster
-        item._posterUrl = ''
-        item._url = `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(result.poster)}`
-      }
-      item._status = 'done'
-      item._progress = null
+      applyVideoResult(item, result, needsPoster)
     } catch (error) {
       if (disposed || item._removed) return
       item._status = 'error'
@@ -1024,7 +1047,12 @@ function createComposer(post, draftId, onDone, onCancel) {
     const labels = { queued: '等待压缩', probing: '读取视频信息', compressing: '压缩中', remuxing: '优化视频封装', validating: '校验压缩结果', poster: '生成视频封面', saving: '保存中' }
     if (progress && labels[progress.phase]) {
       const label = progress.phase === 'saving' && progress.backend === 'webdav' ? '正在保存到 WebDAV' : labels[progress.phase]
-      return progress.phase === 'compressing' ? `${label} ${Math.floor(progress.progress || 0)}%` : label
+      if (['compressing', 'remuxing'].includes(progress.phase)) {
+        const estimate = Number.isFinite(progress.estimatedRemainingMs)
+          ? `预计剩余约 ${formatVideoElapsed(progress.estimatedRemainingMs)}` : '预计时间计算中…'
+        return `${label} ${Math.floor(progress.progress || 0)}% · ${estimate}`
+      }
+      return label
     }
     if (progress?.total > 0) return `上传中 ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
     return STATUS_TEXT[item._status] || '上传中'
@@ -1097,11 +1125,17 @@ function createComposer(post, draftId, onDone, onCancel) {
       previews.appendChild(node)
       for (const video of [item, item._motion]) {
         const result = video?._videoResult
+        if (video?._progress && ['queued', 'probing', 'compressing', 'remuxing', 'validating', 'poster', 'saving'].includes(video._progress.phase)) {
+          const line = el('<p></p>')
+          line.textContent = `${video.name || '视频'}：${uploadProgressText(video)}。可离开页面，视频会继续处理。`
+          videoResults.appendChild(line)
+        }
         if (!result || video._status !== 'done') continue
         const percent = result.originalSize > 0 ? (1 - result.size / result.originalSize) * 100 : 0
         const change = percent >= 0 ? `节省 ${percent.toFixed(1)}%` : `增大 ${Math.abs(percent).toFixed(1)}%`
         const line = el('<p></p>')
-        line.textContent = `${video.name || '视频'}：${formatBytes(result.originalSize)} → ${formatBytes(result.size)}，${change}。${result.message || ''}`
+        const elapsed = Number.isFinite(result.totalElapsedMs) ? ` · 总计用时 ${formatVideoElapsed(result.totalElapsedMs)}` : ''
+        line.textContent = `${video.name || '视频'}：${formatBytes(result.originalSize)} → ${formatBytes(result.size)}，${change}${elapsed}。${result.message || ''}`
         videoResults.appendChild(line)
       }
     }
@@ -2245,11 +2279,12 @@ function renderSettingsSection(kind) {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
-  const titles = { site: '站点设置', ai: 'AI 设置', storage: '图片存储' }
+  const titles = { site: '站点设置', ai: 'AI 设置', storage: '图片存储', backup: '备份与恢复' }
   const header = el(`<header class="account-page-header settings-subpage-header"><a class="account-back" href="#/settings" aria-label="返回设置" title="返回设置">${icon('arrow-left')}</a><h1 tabindex="-1">${titles[kind]}</h1></header>`)
   main.appendChild(header)
   if (kind === 'site') { renderSiteSettingsCard(); renderVideoSettingsCard() }
   else if (kind === 'ai') renderAiCards()
+  else if (kind === 'backup') renderBackupCard()
   else renderStorageCard()
   $('h1', header).focus()
 }
@@ -2305,6 +2340,7 @@ function renderSettings() {
     ['#/settings/site', 'settings', '站点设置', '站名、纪念日和访客可见范围'],
     ['#/settings/ai', 'sparkles', 'AI 设置', '配置 AI 优化与 AI 配图的接口、模型和连接测试'],
     ['#/settings/storage', 'image', '图片存储', '选择本地磁盘或 WebDAV'],
+    ['#/settings/backup', 'settings', '备份与恢复', '自动备份到 WebDAV，导入数据库恢复'],
   ]
   for (const [href, iconName, title, description] of sections) {
     main.appendChild(el(`<a class="settings-link settings-card" href="${href}"><span class="settings-link-icon">${icon(iconName)}</span><span class="settings-link-copy"><strong>${title}</strong><small>${description}</small></span><span class="settings-link-arrow">${icon('arrow-right')}</span></a>`))
@@ -2323,6 +2359,33 @@ function renderSettings() {
 
 function appendSettingsItem(node) {
   main.appendChild(node)
+}
+
+function renderBackupCard() {
+  const view = createBackupSettings(async ({ safetyBackup }) => {
+    try {
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith(`compose-draft:${location.origin}:`) || key.startsWith(`compose-draft-id:${location.origin}:`)) localStorage.removeItem(key)
+      }
+      for (const key of Object.keys(sessionStorage)) if (key.startsWith('compose-draft:')) sessionStorage.removeItem(key)
+    } catch { /* 浏览器可能禁用本地存储，服务端恢复结果仍然有效。 */ }
+    try {
+      const database = await draftFileDb()
+      if (database) await new Promise((resolve, reject) => {
+        const transaction = database.transaction('files', 'readwrite')
+        transaction.objectStore('files').clear()
+        transaction.oncomplete = resolve
+        transaction.onerror = transaction.onabort = () => reject(transaction.error)
+      })
+    } catch { /* 缓存不可访问时继续重新登录，旧任务引用已在服务端失效。 */ }
+    const notice = `数据库已恢复，请使用导入库中的账号重新登录。恢复前副本：${safetyBackup}`
+    try { sessionStorage.setItem('database-restore-notice', notice) } catch { window.alert(notice) }
+    site.user = null
+    location.hash = '#/login'
+    location.reload()
+  })
+  appendSettingsItem(view.node)
+  activeSettingsCleanup = view.dispose
 }
 
 // AI 优化与 AI 配图共用一张接口配置卡:共享 API 可各自选模型,也可使用独立 API。
@@ -2882,7 +2945,7 @@ function route() {
   })
   if (hash === '#/login') return site.user ? (location.hash = '#/') : renderLogin()
   if (hash === '#/account') return renderAccount()
-  const settingsMatch = hash.match(/^#\/settings\/(site|ai|storage)$/)
+  const settingsMatch = hash.match(/^#\/settings\/(site|ai|storage|backup)$/)
   if (settingsMatch) return renderSettingsSection(settingsMatch[1])
   if (hash === '#/settings') return renderSettings()
   const postMatch = hash.match(/^#\/post\/(\d+)(?:\?comment=(\d+))?$/)
@@ -2944,6 +3007,15 @@ async function init() {
     openComposerModal(null, event.currentTarget)
   }
   route()
+  try {
+    const notice = sessionStorage.getItem('database-restore-notice')
+    if (notice) {
+      const message = el('<p class="storage-hint" role="status"></p>')
+      message.textContent = notice
+      main.prepend(message)
+      sessionStorage.removeItem('database-restore-notice')
+    }
+  } catch { /* 浏览器未启用会话存储时仍可正常登录。 */ }
   if (site.user) autoEnablePush()
 }
 

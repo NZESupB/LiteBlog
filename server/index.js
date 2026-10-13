@@ -9,13 +9,16 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { AVATAR_DIR, db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { sessionMiddleware, requireAuth, createSession, clearSession } from './auth.js'
-import { LOCAL, WEBDAV, activeBackend, putImage, getImage, openStream, deleteImage } from './storage.js'
+import { LOCAL, WEBDAV, activeBackend, putImage, getImage, openStream, deleteImage, reserveMediaName, releaseMediaName, storeNewMedia } from './storage.js'
 import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
 import * as webdav from './webdav.js'
 import { llmApp } from './llm.js'
 import { imageJobsApp, ensureDraft, draftOwnedBy, abandonDraft, cleanupDraftUploads } from './image-jobs.js'
 import { configValue } from './config.js'
-import { videoJobsApp } from './video-jobs.js'
+import { videoJobsApp, draftVideoJobs } from './video-jobs.js'
+import { mediaDateParts } from './media-path.js'
+import { maintenanceMiddleware } from './maintenance.js'
+import { backupsApp, startBackupScheduler, stopBackupScheduler } from './backup.js'
 
 const PORT = Number(configValue('server.port', 3000)) || 3000
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
@@ -30,14 +33,11 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm'])
 const isVideoName = (name) => VIDEO_EXTENSIONS.has(path.extname(String(name)).toLowerCase())
 const AVATAR_MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }
 const AVATAR_NAME_RE = /^avatar-\d+-\d+-[a-f0-9]{12}\.(jpg|png|webp)$/
-// 网盘里按时间查找方便:文件名带日期。用 Intl 取东八区,不依赖容器 tzdata
-const FILE_TZ_FORMAT = new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'Asia/Shanghai', hourCycle: 'h23',
-  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-})
 
 export const app = new Hono()
+app.use('*', maintenanceMiddleware)
 app.use('*', sessionMiddleware)
+app.route('/api/backups', backupsApp)
 
 // 站点配置:数据库可后台修改,config.json 作为初始值
 function siteConfig() {
@@ -360,12 +360,13 @@ app.post('/api/drafts', requireAuth, async (c) => {
   return c.json({ id: draftId })
 })
 
-app.get('/api/drafts/:id', requireAuth, (c) => {
+app.get('/api/drafts/:id', requireAuth, async (c) => {
   const draft = db.prepare('SELECT * FROM drafts WHERE id = ? AND user_id = ?').get(c.req.param('id'), c.get('user').id)
   if (!draft) return c.json({ error: '草稿不存在' }, 404)
   const pending = db.prepare('SELECT filename, hash, storage, draft_id, storage_path, created_at FROM pending_uploads WHERE draft_id = ? AND user_id = ? ORDER BY created_at, filename').all(draft.id, c.get('user').id)
   const jobs = db.prepare('SELECT id, status, filename, storage, storage_path, mime, error, created_at, updated_at, finished_at FROM image_jobs WHERE draft_id = ? AND user_id = ? ORDER BY created_at DESC').all(draft.id, c.get('user').id)
-  return c.json({ draft, pending, jobs })
+  const videoJobs = await draftVideoJobs(c.get('user').id, draft.id)
+  return c.json({ draft, pending, jobs, videoJobs })
 })
 
 app.delete('/api/drafts/:id', requireAuth, async (c) => {
@@ -387,8 +388,8 @@ app.get('/api/drafts/:id/preview/:name', requireAuth, async (c) => {
   }
 })
 
-function stampedName(hash, ext, unique = false) {
-  const p = Object.fromEntries(FILE_TZ_FORMAT.formatToParts(new Date()).map((x) => [x.type, x.value]))
+function stampedName(hash, ext, unique = false, time = Date.now()) {
+  const p = mediaDateParts(time)
   return `${p.year}${p.month}${p.day}-${p.hour}${p.minute}${p.second}-${hash.slice(0, 8)}${unique ? `-${randomUUID().slice(0, 8)}` : ''}${ext}`
 }
 
@@ -424,6 +425,8 @@ async function cleanupPendingUploads() {
 }
 
 app.post('/api/uploads', requireAuth, async (c) => {
+  const startedAt = Date.now()
+  const backend = activeBackend()
   await cleanupPendingUploads()
   const form = await c.req.formData()
   const file = form.get('image')
@@ -452,25 +455,38 @@ app.post('/api/uploads', requireAuth, async (c) => {
     if (!pendingAtName || sameDraft) exist = ownedImage
   }
 
-  const filename = exist ? exist.filename : stampedName(hash, ext, Boolean(
-    ownedImage
-      || db.prepare('SELECT 1 FROM images WHERE hash = ? LIMIT 1').get(hash)
-      || db.prepare('SELECT 1 FROM pending_uploads WHERE hash = ? LIMIT 1').get(hash),
-  ))
-  let storage = exist ? exist.storage : null
-  if (!exist) {
-    try {
-      storage = await putImage(filename, buf, MIME_BY_EXT[ext], filename)
-    } catch (e) {
-      console.warn(`上传图片 ${filename} 失败: ${e.message}`)
-      return c.json({ error: e.message }, 502)
+  let filename = exist?.filename
+  const storage = exist?.storage || backend
+  let storagePath = exist ? (exist.storage_path || filename) : null
+  try {
+    if (!exist) {
+      const unique = Boolean(ownedImage
+        || db.prepare('SELECT 1 FROM images WHERE hash = ? LIMIT 1').get(hash)
+        || db.prepare('SELECT 1 FROM pending_uploads WHERE hash = ? LIMIT 1').get(hash))
+      filename = reserveMediaName((attempt) => stampedName(hash, ext, unique || attempt > 0, startedAt))
+      storagePath = await storeNewMedia(filename, storage, startedAt,
+        (relativePath, options) => putImage(filename, buf, MIME_BY_EXT[ext], relativePath, storage, options))
     }
+    // 新文件不使用 UPSERT 覆盖归属；只有已验证的复用记录更新草稿信息。
+    if (exist) {
+      db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
+        storage_path = excluded.storage_path, created_at = datetime('now')`)
+        .run(filename, hash, storage, userId, draftId, storagePath)
+    } else {
+      db.prepare('INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(filename, hash, storage, userId, draftId, storagePath)
+    }
+    return c.json({ filename, url: `/uploads/${filename}` })
+  } catch (error) {
+    if (!exist && storagePath && !isReferenced(filename)) {
+      await deleteImage(filename, storage, storagePath).catch((e) => console.warn(`清理上传图片失败: ${e.message}`))
+    }
+    console.warn(`上传图片 ${filename || ''} 失败: ${error.message}`)
+    return c.json({ error: error.message }, 502)
+  } finally {
+    if (!exist) releaseMediaName(filename)
   }
-  db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
-              storage_path = excluded.storage_path, created_at = datetime('now')`)
-    .run(filename, hash, storage, userId, draftId, exist?.storage_path || filename)
-  return c.json({ filename, url: `/uploads/${filename}` })
 })
 
 // 固定配置/初始化路径由视频子应用优先注册，接收后压缩与保存均在后台进行。
@@ -1013,6 +1029,8 @@ app.get('/manifest.webmanifest', (c) => {
 app.use('*', serveStatic({ root: './public' }))
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  startBackupScheduler()
+  process.once('exit', stopBackupScheduler)
   serve({ fetch: app.fetch, port: PORT }, () => {
     console.log(`${siteConfig().title} 已启动: http://localhost:${PORT}`)
   })
