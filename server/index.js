@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { AVATAR_DIR, db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
+import { AVATAR_DIR, db, closeDatabase, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { sessionMiddleware, requireAuth, createSession, clearSession } from './auth.js'
 import { LOCAL, WEBDAV, activeBackend, putImage, getImage, openStream, deleteImage, reserveMediaName, releaseMediaName, storeNewMedia } from './storage.js'
 import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
@@ -15,7 +15,7 @@ import * as webdav from './webdav.js'
 import { llmApp } from './llm.js'
 import { imageJobsApp, ensureDraft, draftOwnedBy, abandonDraft, cleanupDraftUploads } from './image-jobs.js'
 import { configValue } from './config.js'
-import { videoJobsApp, draftVideoJobs } from './video-jobs.js'
+import { videoJobsApp, draftVideoJobs, stopVideoJobs, assertVideoUploadSelected, cleanupPublishedVideoVersions } from './video-jobs.js'
 import { mediaDateParts } from './media-path.js'
 import { maintenanceMiddleware } from './maintenance.js'
 import { backupsApp, startBackupScheduler, stopBackupScheduler } from './backup.js'
@@ -514,6 +514,7 @@ function lookupUploadable(name, userId, draftId = null) {
       FROM images i JOIN posts p ON p.id = i.post_id
       WHERE i.filename = ? AND p.user_id = ? LIMIT 1`).get(name, userId)
   if (!row) throw new Error('媒体不存在或已过期,请重新上传')
+  assertVideoUploadSelected(userId, name)
   return row
 }
 
@@ -582,7 +583,7 @@ app.post('/api/posts', requireAuth, async (c) => {
   try {
     claimed = claimUploads(names, c.get('user').id, draftId)
   } catch (e) {
-    return c.json({ error: e.message }, 400)
+    return c.json({ error: e.message }, e.status || 400)
   }
   const publicText = body.publicText ? 1 : 0
   const publicImages = body.publicImages ? 1 : 0
@@ -601,6 +602,7 @@ app.post('/api/posts', requireAuth, async (c) => {
     db.exec('ROLLBACK')
     throw e
   }
+  await cleanupPublishedVideoVersions(c.get('user').id, claimed.flatMap((media) => [media.filename, media.motion?.filename].filter(Boolean))).catch((e) => console.warn(`清理未采用视频版本失败: ${e.message}`))
   if (draftId) await cleanupDraftUploads(c.get('user').id, draftId).catch((e) => console.warn(`清理未采用草稿媒体失败: ${e.message}`))
   return c.json({ id: Number(postId) })
 })
@@ -638,7 +640,7 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
   try {
     claimed = claimUploads(names, c.get('user').id, draftId)
   } catch (e) {
-    return c.json({ error: e.message }, 400)
+    return c.json({ error: e.message }, e.status || 400)
   }
 
   const removed = existing.filter((img) => !keep.includes(img.id))
@@ -658,6 +660,7 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
     throw e
   }
   for (const img of removed) await removeMediaFiles(img)
+  await cleanupPublishedVideoVersions(c.get('user').id, claimed.flatMap((media) => [media.filename, media.motion?.filename].filter(Boolean))).catch((e) => console.warn(`清理未采用视频版本失败: ${e.message}`))
   if (draftId) await cleanupDraftUploads(c.get('user').id, draftId).catch((e) => console.warn(`清理未采用草稿媒体失败: ${e.message}`))
   return c.json({ ok: true })
 })
@@ -1031,7 +1034,22 @@ app.use('*', serveStatic({ root: './public' }))
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   startBackupScheduler()
   process.once('exit', stopBackupScheduler)
-  serve({ fetch: app.fetch, port: PORT }, () => {
+  const server = serve({ fetch: app.fetch, port: PORT }, () => {
     console.log(`${siteConfig().title} 已启动: http://localhost:${PORT}`)
   })
+  let shutdownStarted = false
+  const shutdown = async () => {
+    if (shutdownStarted) return
+    shutdownStarted = true
+    stopBackupScheduler()
+    const closed = new Promise((resolve) => server.close(resolve))
+    try {
+      await stopVideoJobs()
+      server.closeAllConnections()
+      await closed
+      closeDatabase()
+    } catch (error) { console.error(`服务停止失败：${error.message}`); process.exitCode = 1 }
+  }
+  process.once('SIGTERM', shutdown)
+  process.once('SIGINT', shutdown)
 }

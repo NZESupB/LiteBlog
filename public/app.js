@@ -7,7 +7,7 @@ import { api, streamSse, formatBytes, el, esc, setFormMessage, avatarColor, pars
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
 import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/inline-video.js'
 import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration } from '/js/media.js'
-import { uploadVideo, waitForVideoUpload, cancelVideoUpload, getVideoUploadConfig, formatVideoElapsed } from '/js/video-upload.js'
+import { uploadVideo, waitForVideoUpload, cancelVideoUpload, retryVideoUpload, selectVideoVariant, getVideoUploadConfig, formatVideoElapsed, formatVideoBytes } from '/js/video-upload.js'
 import { createBackupSettings } from '/js/backup-settings.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
@@ -716,7 +716,9 @@ function createComposer(post, draftId, onDone, onCancel) {
       kind: file._kind || 'image', poster: file._poster || '', duration: file._duration || null,
       motion: file._motion?._name || '', motionStatus: file._motion?._status || '',
       videoJobId: file._videoJobId || '', videoResult: file._videoResult || null,
+      clientUploadId: file._clientUploadId || '', fingerprint: file._fingerprint || '',
       motionJobId: file._motion?._videoJobId || '', motionResult: file._motion?._videoResult || null,
+      motionClientUploadId: file._motion?._clientUploadId || '', motionFingerprint: file._motion?._fingerprint || '',
     })),
     keep: keepImages.map((image) => image.id),
     imageJobId: imageTask?.id || savedDraft.imageJobId || '',
@@ -748,10 +750,11 @@ function createComposer(post, draftId, onDone, onCancel) {
     function restoreMotion(file, saved) {
       if (!saved?.motion && !saved?.motionJobId && !saved?.motionStatus) return
       file._motion = { _id: newDraftId(), name: '实况视频', _status: saved.motion ? 'done' : 'uploading', _name: saved.motion || '', _videoJobId: saved.motionJobId || '', _videoResult: saved.motionResult || null }
+      file._motion._clientUploadId = saved.motionClientUploadId || ''; file._motion._fingerprint = saved.motionFingerprint || ''
       const state = serverJobs.get(saved.motionJobId)
       if (state?.status === 'done') applyVideoResult(file._motion, state, false)
       else if (saved.motionJobId && (!saved.motion || state)) runVideoTask(file._motion, null, false)
-      else if (!saved.motion) { file._motion._status = 'error'; file._motion._errMsg = '实况视频尚未完整上传，请重新选择配对文件' }
+      else if (!saved.motion) { file._motion._status = 'error'; file._motion._needsFile = true; file._motion._errMsg = '选择原始配对视频继续上传' }
     }
     for (const saved of savedFiles) {
       const kind = saved.kind || 'image'
@@ -761,6 +764,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         _id: saved.id || newDraftId(), _name: saved.filename || '', _status: saved.filename ? 'done' : 'uploading', _jobId: saved.jobId || '',
         name: saved.name, type: saved.type, _kind: kind, _poster: saved.poster || '', _duration: saved.duration || null,
         _videoJobId: saved.videoJobId || '', _videoResult: saved.videoResult || null,
+        _clientUploadId: saved.clientUploadId || '', _fingerprint: saved.fingerprint || '',
         _url: thumb ? `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(thumb)}` : '',
       }
       newFiles.push(file)
@@ -770,7 +774,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         const state = serverJobs.get(saved.videoJobId)
         if (state?.status === 'done') applyVideoResult(file, state, true)
         else if (saved.videoJobId && (!saved.filename || state)) runVideoTask(file, null, true)
-        else if (!saved.filename) { file._status = 'error'; file._errMsg = '原视频尚未完整上传，请移除这项并重新选择视频' }
+        else if (!saved.filename) { file._status = 'error'; file._needsFile = true; file._errMsg = '选择原始视频继续上传' }
       }
     }
     const restoredJobs = new Set(newFiles.flatMap((file) => [file._videoJobId, file._motion?._videoJobId]).filter(Boolean))
@@ -927,7 +931,6 @@ function createComposer(post, draftId, onDone, onCancel) {
     polishAbort = null
     for (const controller of videoControllers.values()) controller.abort()
     videoControllers.clear()
-    for (const video of [...videoDecisions.keys()]) settleVideoDecision(video, 'compress')
     // 关闭编辑器时，未加入发布内容的 AI 结果没有保留价值；运行中的任务也一并取消。
     if (imageJobId && !newFiles.some((file) => file._jobId === imageJobId)) {
       api(`/api/image-jobs/${encodeURIComponent(imageJobId)}`, { method: 'DELETE' }).catch(() => {})
@@ -937,30 +940,11 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
 
-  // 上传完整后由用户决定是否压缩：等待期间的按钮挂在 _decision 上，移除、丢弃或关闭编辑器都要放行。
-  const videoDecisions = new Map()
-  function askVideoDecision(item, state) {
-    return new Promise((resolve) => {
-      videoDecisions.set(item, resolve)
-      item._decision = { deadline: Number(state.decisionDeadline) || 0, bytes: state.originalSize || 0 }
-      renderPreviews()
-      updatePublishGuard()
-    })
-  }
-  function settleVideoDecision(item, choice) {
-    const resolve = videoDecisions.get(item)
-    if (!resolve) return
-    videoDecisions.delete(item)
-    item._decision = null
-    resolve(choice)
-    if (!disposed) renderPreviews()
-  }
 
   function applyVideoResult(item, result, needsPoster) {
     item._name = result.filename
     item._duration = result.duration
-    item._videoResult = { originalSize: result.originalSize, size: result.size, message: result.message, codec: result.codec,
-      totalElapsedMs: result.totalElapsedMs, elapsedMs: result.elapsedMs }
+    item._videoResult = result
     if (needsPoster && result.poster) {
       for (const url of [item._url, item._posterUrl]) if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
       item._poster = result.poster
@@ -969,22 +953,26 @@ function createComposer(post, draftId, onDone, onCancel) {
     }
     item._status = 'done'
     item._progress = null
-    item._decision = null
-    videoDecisions.delete(item)
+    item._needsFile = false; item._canRetry = false; item._errMsg = ''
   }
   async function runVideoTask(item, source, needsPoster) {
     if (disposed || item._removed) return
     const controller = new AbortController()
     videoControllers.set(item, controller)
     item._status = 'uploading'
+    item._needsFile = false; item._canRetry = false; item._errMsg = ''
     let lastPaint = 0
     const onState = (state) => {
       if (disposed || item._removed) return
       const newId = state.uploadId && item._videoJobId !== state.uploadId
       if (state.uploadId) item._videoJobId = state.uploadId
+      const identityChanged = (state.clientUploadId && state.clientUploadId !== item._clientUploadId) || (state.fingerprint && state.fingerprint !== item._fingerprint)
+      if (state.clientUploadId) item._clientUploadId = state.clientUploadId
+      if (state.fingerprint) item._fingerprint = state.fingerprint
+      if (state.variants?.original) item._videoResult = state
       item._progress = { ...state, loaded: state.loaded ?? state.received ?? 0 }
       if (state.duration) item._duration = state.duration
-      if (newId) persistDraft()
+      if (newId || identityChanged) persistDraft()
       const now = performance.now()
       if (now - lastPaint < 100) return
       lastPaint = now
@@ -996,7 +984,7 @@ function createComposer(post, draftId, onDone, onCancel) {
     updatePublishGuard()
     try {
       if (!(await draftReady)) throw new Error('草稿初始化失败，请重新打开编辑器')
-      const options = { draftId, needsPoster, signal: controller.signal, onState, onDecision: (state) => askVideoDecision(item, state) }
+      const options = { draftId, needsPoster, signal: controller.signal, onState, uploadId: item._videoJobId || '', clientUploadId: item._clientUploadId || '', fingerprint: item._fingerprint || '' }
       const result = source ? await uploadVideo(source, options) : await waitForVideoUpload(item._videoJobId, options)
       if (disposed || item._removed) return
       applyVideoResult(item, result, needsPoster)
@@ -1004,6 +992,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       if (disposed || item._removed) return
       item._status = 'error'
       item._errMsg = error.message || '视频处理失败'
+      item._needsFile = Boolean(error.needsFile); item._canRetry = Boolean(error.canRetry)
     } finally {
       videoControllers.delete(item)
       if (!disposed && !item._removed) { renderPreviews(); updatePublishGuard(); persistDraft() }
@@ -1066,7 +1055,7 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   function uploadProgressText(item) {
     const progress = item._progress
-    const labels = { queued: '等待压缩', awaiting: '等待确认是否压缩', probing: '读取视频信息', compressing: '压缩中', remuxing: '优化视频封装', validating: '校验压缩结果', poster: '生成视频封面', saving: '保存中' }
+    const labels = { hashing: '校验原文件', connection: '等待网络恢复', receiving: '接收原文件', queued: '原件已接收，等待处理', verifying_source: '验证原文件', saving_original: '保存原文件', probing: '读取视频信息', planning: '建立检查点', audio: '处理音轨', merging: '合并视频', comparing: '对比两份版本', saving_compressed: '保存压缩版本', compressing: '压缩中', remuxing: '优化视频封装', validating: '校验压缩结果', poster: '生成视频封面', registering: '登记视频结果', saving: '保存中', waiting: '处理已暂停' }
     if (progress && labels[progress.phase]) {
       const label = progress.phase === 'saving' && progress.backend === 'webdav' ? '正在保存到 WebDAV' : labels[progress.phase]
       if (['compressing', 'remuxing'].includes(progress.phase)) {
@@ -1106,14 +1095,14 @@ function createComposer(post, draftId, onDone, onCancel) {
         if (item._status === 'error') {
           overlay.textContent = item._errMsg || '失败'
         } else {
-          if (item._progress?.status !== 'awaiting') overlay.appendChild(el('<span class="spinner"></span>'))
+          overlay.appendChild(el('<span class="spinner"></span>'))
           overlay.appendChild(el(`<span>${uploadProgressText(item)}</span>`))
         }
         node.appendChild(overlay)
       } else if (item._status === 'done') {
         if (item._motion?._status === 'uploading') {
           const overlay = el('<div class="upload-overlay"></div>')
-          if (item._motion._progress?.status !== 'awaiting') overlay.appendChild(el('<span class="spinner"></span>'))
+          overlay.appendChild(el('<span class="spinner"></span>'))
           overlay.appendChild(el(`<span>${uploadProgressText(item._motion)}</span>`))
           node.appendChild(overlay)
         } else {
@@ -1126,7 +1115,6 @@ function createComposer(post, draftId, onDone, onCancel) {
         for (const video of [item, item._motion]) {
           if (!video) continue
           videoControllers.get(video)?.abort()
-          settleVideoDecision(video, 'compress')
           if (video._videoJobId) cancelVideoUpload(video._videoJobId).catch((error) => { errorLine.textContent = `取消视频失败：${error.message}` })
         }
         for (const url of [item._url, item._posterUrl]) {
@@ -1148,28 +1136,56 @@ function createComposer(post, draftId, onDone, onCancel) {
       previews.appendChild(node)
       for (const video of [item, item._motion]) {
         const result = video?._videoResult
-        if (video?._decision) {
-          // 原件已完整上传，等用户决定是否压缩：超过窗口未选择由服务端按默认档位继续。
+        if (video?._progress && video._status === 'uploading') {
           const line = el('<p></p>')
-          const minutes = video._decision.deadline > 0 ? Math.max(1, Math.ceil((video._decision.deadline - Date.now()) / 60000)) : null
-          line.textContent = `${video.name || '视频'}：原件已上传完（${formatBytes(video._decision.bytes)}）。保留原片可跳过压缩；约 ${minutes ?? '十几'} 分钟后没选择会按默认档位压缩。`
-          const keep = el('<button class="btn btn-ghost" type="button">保留原片</button>')
-          const compress = el('<button class="btn btn-ghost" type="button">压缩</button>')
-          keep.onclick = () => settleVideoDecision(video, 'original')
-          compress.onclick = () => settleVideoDecision(video, 'compress')
-          line.append(' ', keep, ' ', compress)
-          videoResults.appendChild(line)
-        } else if (video?._progress && ['queued', 'probing', 'compressing', 'remuxing', 'validating', 'poster', 'saving'].includes(video._progress.phase)) {
-          const line = el('<p></p>')
-          line.textContent = `${video.name || '视频'}：${uploadProgressText(video)}。可离开页面，视频会继续处理。`
+          line.textContent = `${video.name || '视频'}：${uploadProgressText(video)}。原件上传后会先保存，后台继续处理。`
           videoResults.appendChild(line)
         }
-        if (!result || video._status !== 'done') continue
-        const percent = result.originalSize > 0 ? (1 - result.size / result.originalSize) * 100 : 0
-        const change = percent >= 0 ? `节省 ${percent.toFixed(1)}%` : `增大 ${Math.abs(percent).toFixed(1)}%`
-        const line = el('<p></p>')
-        const elapsed = Number.isFinite(result.totalElapsedMs) ? ` · 总计用时 ${formatVideoElapsed(result.totalElapsedMs)}` : ''
-        line.textContent = `${video.name || '视频'}：${formatBytes(result.originalSize)} → ${formatBytes(result.size)}，${change}${elapsed}。${result.message || ''}`
+        if (video?._needsFile || video?._canRetry) {
+          const line = el('<p></p>'), button = el('<button class="btn btn-ghost" type="button"></button>')
+          button.textContent = video._needsFile ? '选择原件续传' : '从检查点重试'
+          button.onclick = async () => {
+            if (video._needsFile) {
+              const input = document.createElement('input'); input.type = 'file'; input.accept = 'video/*,.mov,.mp4,.webm'
+              input.onchange = () => { if (input.files[0]) runVideoTask(video, input.files[0], video === item && kind === 'video') }
+              input.click()
+            } else {
+              button.disabled = true
+              try { await retryVideoUpload(video._videoJobId); runVideoTask(video, null, video === item && kind === 'video') }
+              catch (error) { errorLine.textContent = error.message; button.disabled = false }
+            }
+          }
+          line.append(button); videoResults.appendChild(line)
+        }
+        if (!result || !['done', 'error', 'selecting'].includes(video._status)) continue
+        const line = el('<div class="video-comparison"></div>')
+        const summary = el('<p></p>')
+        summary.textContent = `${video.name || '视频'}：${result.message || ''}${Number.isFinite(result.totalElapsedMs) ? ` · 总计 ${formatVideoElapsed(result.totalElapsedMs)}` : ''}`
+        line.append(summary)
+        for (const [variant, label] of [['original', '原文件'], ['compressed', '压缩版本']]) {
+          const version = result.variants?.[variant]
+          if (!version) continue
+          const row = el('<p></p>')
+          row.textContent = `${label}：${formatVideoBytes(version.size)} · ${version.codec || '待探测'} · ${version.width || '?'}×${version.height || '?'} · ${Number(version.rate || 0).toFixed(2)}fps · ${version.bitDepth || '?'}bit · ${version.hdr ? 'HDR' : 'SDR'}${result.recommendedVariant === variant ? ' · 推荐' : ''}`
+          if (result.canSelect && version.available !== false && version.codec) {
+            const choose = el('<button class="btn btn-ghost" type="button"></button>')
+            choose.textContent = result.selectedVariant === variant && video._status === 'done' ? '已采用' : `采用${label}`
+            choose.disabled = video._status === 'selecting' || (result.selectedVariant === variant && video._status === 'done')
+            choose.onclick = async () => {
+              video._status = 'selecting'; renderPreviews(); updatePublishGuard()
+              try { const chosen = await selectVideoVariant(video._videoJobId, variant); if (disposed || video._removed) return; applyVideoResult(video, chosen, video === item && kind === 'video') }
+              catch (error) { if (!disposed && !video._removed) { video._status = result.status === 'failed' ? 'error' : 'done'; errorLine.textContent = error.message } }
+              finally { if (!disposed && !video._removed) { renderPreviews(); updatePublishGuard(); persistDraft() } }
+            }
+            row.append(' ', choose)
+          }
+          line.append(row)
+        }
+        if (result.comparison?.compressed) {
+          const details = el('<p></p>'), saved = result.comparison.savingPercent
+          details.textContent = `${saved >= 0 ? '节省' : '增大'} ${Math.abs(saved).toFixed(1)}% · 压缩后/原件 ${(result.comparison.compressionRatio * 100).toFixed(1)}%。${result.comparison.changes.join('；')}`
+          line.append(details)
+        }
         videoResults.appendChild(line)
       }
     }
@@ -1177,13 +1193,13 @@ function createComposer(post, draftId, onDone, onCancel) {
   }
 
   // 发布守卫:任一媒体(含实况配对视频)还在处理或上传中则禁用发布
-  const MEDIA_PENDING = ['processing', 'uploading']
+  const MEDIA_PENDING = ['processing', 'uploading', 'selecting']
+  const videoUnresolved = () => newFiles.some((file) => (file._kind === 'video' && file._status === 'error') || file._motion?._status === 'error')
   function updatePublishGuard() {
     const pending = newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))
     const generating = imageTask && ['queued', 'running', 'uploading'].includes(imageTask.status)
-    submitBtn.disabled = pending || generating
-    const waiting = [...videoDecisions.keys()].some((video) => video._decision)
-    if (waiting) submitBtn.textContent = '等待视频确认…'
+    submitBtn.disabled = pending || generating || videoUnresolved()
+    if (videoUnresolved()) submitBtn.textContent = '请处理或移除失败视频'
     else if (pending) submitBtn.textContent = '媒体处理中…'
     else if (generating) submitBtn.textContent = 'AI 配图生成中…'
     else submitBtn.textContent = post ? '保存' : '发布'
@@ -1227,7 +1243,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       errorLine.textContent = '写点什么或传张图吧'
       return
     }
-    if (newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))) return
+    if (videoUnresolved() || newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))) return
     submitBtn.disabled = true
     submitBtn.textContent = '发布中…'
     errorLine.textContent = ''
@@ -2273,38 +2289,24 @@ async function renderVideoSettingsCard() {
   if (location.hash !== pageHash || !main.contains(pageHeader)) return
   const card = el(`<section class="settings-card video-settings">
     <h2>视频压缩</h2>
-    <p class="storage-hint">上传后自动压缩为 H.265，优先节省存储空间。新设置用于之后上传的视频。</p>
-    <p class="storage-hint">原件完整上传后会先问一次是否保留原片：选「保留原片」直接保存原件、跳过压缩（原片可能是 MOV / WebM 或非 HEVC 编码，部分浏览器不能内嵌播放）；${esc(String(config.decisionMinutes))} 分钟内没做选择会按默认档位继续压缩。</p>
+    <p class="storage-hint">默认先保存原文件，再由后台自动压缩。完成后对比体积和规格，推荐版本自动采用；发布前仍可切换，未采用版本在发布或丢弃草稿时清理。</p>
     <label class="row"><input name="videoEnabled" type="checkbox" ${config.enabled ? 'checked' : ''} /><span>自动压缩视频</span></label>
-    <label>每分钟目标体积（MiB）<input name="videoMiB" type="number" min="10" max="100" step="1" value="${config.mibPerMinute}" /></label>
-    <p class="storage-hint video-budget"></p>
-    <p class="storage-hint">1MiB = 1024² 字节。体积按时长计算，画面简单时会更小；这是参考预算，实际大小可能有小幅偏差。</p>
-    <p class="storage-hint">均衡档：保留原视频分辨率（包括 1080p / 4K），最高 ${esc(String(config.maxFps))}fps，低帧率视频保持原帧率；H.265 CRF ${esc(String(config.crf))} / ${esc(config.preset)}，AAC 128kbps。播放需要浏览器和设备支持 HEVC。</p>
-    <p class="storage-hint">同样的每分钟体积预算会对 4K / 60fps 视频施加更强的码率限制，可调大预算来保留更多画面细节。</p>
+    <p class="storage-hint">固定档位：1080p 30/60fps 为 25/35MB 每分钟；4K 30/60fps 为 85/120MB。1MB = 1,000,000 字节；预算包含音轨，实际体积随内容变化。</p>
+    <p class="storage-hint">保留分辨率与最高 ${esc(String(config.maxFps))}fps，不补低帧率；软件编码使用 Main10、CRF21/22、fast，硬件编码使用独立参数；音轨为 AAC 128kbps。播放需要设备支持 HEVC；压缩属于有损处理，不承诺画质无损。</p>
+    <p class="storage-hint">上传中断后重新选择同一原文件可续传；后台任务按检查点恢复。关闭压缩则直接采用原件。</p>
     <div class="storage-status">视频工具：${config.available ? '已就绪' : esc(config.error)}；原文件上限 ${Math.round(config.maxBytes / 1024 / 1024)}MiB</div>
     <div class="form-error" role="status"></div>
     <div class="settings-actions"><span class="save-tip" hidden>已保存</span><button class="btn save" type="button">保存</button></div>
   </section>`)
-  const input = $('[name=videoMiB]', card)
   const enabled = $('[name=videoEnabled]', card)
-  const hint = $('.video-budget', card)
-  const update = () => {
-    input.disabled = !enabled.checked
-    const value = Number(input.value)
-    hint.textContent = enabled.checked && Number.isFinite(value) ? `参考体积：1分钟 ${value}MiB · 5分钟 ${value * 5}MiB · 10分钟 ${value * 10}MiB` : '关闭压缩后保存原视频。'
-    $('.save-tip', card).hidden = true
-  }
-  input.oninput = update
-  enabled.onchange = update
-  update()
+  enabled.onchange = () => { $('.save-tip', card).hidden = true }
   $('.save', card).onclick = async () => {
     const button = $('.save', card)
     const error = $('.form-error', card)
     error.textContent = ''
     button.disabled = true
     try {
-      if (!input.checkValidity()) throw new Error('每分钟目标体积应为 10–100MiB 的整数')
-      await api('/api/uploads/video/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled.checked, mibPerMinute: Number(input.value) }) })
+      await api('/api/uploads/video/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled.checked }) })
       $('.save-tip', card).hidden = false
     } catch (e) { error.textContent = e.message }
     finally { button.disabled = false }

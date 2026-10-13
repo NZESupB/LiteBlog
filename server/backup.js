@@ -147,7 +147,7 @@ export function startBackupScheduler(delay = 1000) {
 function assertNoMediaJobs() {
   if (hasMediaOperations() || videoJobsBusy()
     || db.prepare("SELECT 1 FROM image_jobs WHERE status IN ('queued', 'running', 'uploading') LIMIT 1").get()
-    || db.prepare("SELECT 1 FROM video_jobs WHERE status IN ('receiving', 'queued', 'compressing', 'saving') LIMIT 1").get()) {
+    || db.prepare("SELECT 1 FROM video_jobs WHERE status IN ('receiving', 'awaiting', 'queued', 'compressing', 'saving', 'comparing') LIMIT 1").get()) {
     throw fail('仍有上传、视频处理、AI 配图或媒体清理任务，请先完成或取消后再恢复', 409)
   }
 }
@@ -183,11 +183,12 @@ export function validateImport(filename) {
     for (const row of connection.prepare('SELECT id, status, snapshot FROM video_jobs').all()) {
       const state = JSON.parse(row.snapshot)
       if (!state || typeof state !== 'object' || Array.isArray(state)) throw fail('导入库视频任务记录无效')
-      if (['receiving', 'queued', 'compressing', 'saving'].includes(row.status)) {
-        Object.assign(state, { status: 'failed', phase: 'failed', error: '数据库恢复中断了视频处理，请重新选择视频', finishedAt: now, estimatedRemainingMs: null })
+      if (['receiving', 'awaiting', 'queued', 'compressing', 'saving', 'comparing'].includes(row.status)) {
+        Object.assign(state, { status: 'failed', phase: 'failed', retryable: false, error: '数据库恢复中断了视频处理，请重新选择视频', finishedAt: now, estimatedRemainingMs: null })
         connection.prepare("UPDATE video_jobs SET status = 'failed', snapshot = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(state), now, row.id)
       }
     }
+    connection.exec('DELETE FROM video_chunks; DELETE FROM video_artifacts; DELETE FROM video_upload_keys;')
     connection.prepare("UPDATE image_jobs SET status = 'failed', error = '数据库恢复中断了配图，请点击重试', updated_at = datetime('now') WHERE status IN ('queued', 'running', 'uploading')").run()
     connection.prepare("INSERT INTO settings (key, value) VALUES ('session_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(randomUUID())
     // 快照中的调度结果属于旧数据库；恢复后从新状态开始，避免立即覆盖远端备份。

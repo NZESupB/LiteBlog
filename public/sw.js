@@ -1,4 +1,4 @@
-const CACHE_NAME = 'couple-blog-shell-v14'
+const CACHE_NAME = 'couple-blog-shell-v15'
 const SHELL = [
   '/',
   '/index.html',
@@ -17,6 +17,7 @@ const SHELL = [
   '/js/composer-viewport.js',
   '/js/media.js',
   '/js/video-upload.js',
+  '/js/video-fingerprint-worker.js',
   '/js/lightbox.js',
   '/icons/icon-192.png',
   '/icons/icon-512.png',

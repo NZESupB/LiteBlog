@@ -1,9 +1,10 @@
 // 图片/视频存储后端:本地磁盘与 WebDAV 同接口,按每个文件记录的 storage 取用
 import { readFile, writeFile, unlink, mkdir, stat, rename, copyFile, link } from 'node:fs/promises'
 import { createReadStream, constants } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { Readable } from 'node:stream'
 import path from 'node:path'
-import { UPLOAD_DIR, db, getSetting } from './db.js'
+import { UPLOAD_DIR, db, getSetting, syncFile } from './db.js'
 import * as webdav from './webdav.js'
 import { configValue } from './config.js'
 import { conflictMediaPath, datedMediaPath } from './media-path.js'
@@ -90,7 +91,22 @@ export async function putFileFromTemp(filename, tempPath, size, contentType, rel
       await unlink(tempPath)
     }
   }
+  syncFile(localPath)
+  syncFile(path.dirname(localPath))
   return LOCAL
+}
+
+export async function verifyStoredFile(filename, backend, relativePath, size, hash, signal) {
+  signal?.throwIfAborted()
+  if (backend === WEBDAV) return webdav.verifyFile(relativePath || filename, size, hash, signal)
+  const target = path.join(UPLOAD_DIR, relativePath || filename)
+  try {
+    if ((await stat(target)).size !== size) return false
+    const digest = createHash('sha256')
+    let received = 0
+    for await (const chunk of createReadStream(target, { signal })) { received += chunk.length; digest.update(chunk) }
+    return received === size && digest.digest('hex') === hash
+  } catch (error) { if (error.code === 'ENOENT') return false; throw error }
 }
 
 export async function getImage(filename, backend, relativePath = filename) {

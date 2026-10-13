@@ -145,6 +145,25 @@ db.exec(`
     updated_at   INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_video_jobs_draft ON video_jobs(user_id, draft_id, created_at);
+  CREATE TABLE IF NOT EXISTS video_chunks (
+    job_id TEXT NOT NULL REFERENCES video_jobs(id) ON DELETE CASCADE,
+    offset INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (job_id, offset)
+  );
+  CREATE TABLE IF NOT EXISTS video_artifacts (
+    job_id TEXT NOT NULL REFERENCES video_jobs(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    PRIMARY KEY (job_id, name)
+  );
+  CREATE TABLE IF NOT EXISTS video_upload_keys (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    job_id TEXT NOT NULL UNIQUE REFERENCES video_jobs(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, client_id)
+  );
 `)
 
 // 旧库迁移:早期 users.name 同时承担登录账号和显示名称,先复制为 username

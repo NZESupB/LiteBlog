@@ -1,5 +1,6 @@
 // WebDAV(坚果云等)媒体存储后端:Basic Auth,PUT/GET/DELETE + 按需建目录
 import { createReadStream } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { getSetting } from './db.js'
 import { configValue } from './config.js'
 
@@ -121,6 +122,20 @@ export async function putImage(filename, buf, contentType, relativePath = filena
 // 视频以可重建的文件流上传，显式携带长度，目录缓存失效重试时重新打开源文件。
 export async function putFile(filename, tempPath, size, contentType, relativePath = filename, folder = config().folder, signal = undefined, options = {}) {
   await upload(relativePath, folder, contentType, () => createReadStream(tempPath), { ...options, signal, size })
+}
+
+export async function verifyFile(relativePath, size, hash, signal) {
+  const response = await fetch(itemUrl(relativePath), { headers: { Authorization: authHeader() }, signal })
+  if (response.status === 404) { await response.body?.cancel(); return false }
+  if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error(`WebDAV 内容校验失败 (${response.status})`) }
+  const digest = createHash('sha256')
+  let received = 0
+  for await (const chunk of response.body) {
+    received += chunk.length
+    if (received > size) { await response.body.cancel().catch(() => {}); return false }
+    digest.update(chunk)
+  }
+  return received === size && digest.digest('hex') === hash
 }
 
 // 视频读取:透传 Range,上游回 206 时原样把 Content-Range 交给调用方。
