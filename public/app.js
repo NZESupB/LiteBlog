@@ -9,6 +9,7 @@ import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/
 import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration } from '/js/media.js'
 import { uploadVideo, waitForVideoUpload, cancelVideoUpload, retryVideoUpload, selectVideoVariant, getVideoUploadConfig, formatVideoElapsed, formatVideoBytes } from '/js/video-upload.js'
 import { createBackupSettings } from '/js/backup-settings.js'
+import { createBrowserNotifications } from '/js/browser-notifications.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
@@ -27,7 +28,8 @@ let activePostMenu = null
 let activeInlineComposerCleanup = null
 let activeSettingsCleanup = null
 let serviceWorkerRegistration = null
-const SERVICE_WORKER_READY_TIMEOUT_MS = 5000
+let activeUserNotificationCleanup = null
+const browserNotifications = createBrowserNotifications({ api, getRegistration: () => serviceWorkerRegistration, getUser: () => site?.user })
 let dayProgressTimer = null
 let hasRenderedView = false
 let pageTransitionToken = 0
@@ -2026,7 +2028,7 @@ async function openAvatarCropper(file, onConfirm, onCancel) {
 
 // ---------- 账号视图(修改登录账号、显示名称与密码) ----------
 
-function renderAccount() {
+function renderAccount({ backHref = '#/', backLabel = '返回时间轴' } = {}) {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
@@ -2035,7 +2037,7 @@ function renderAccount() {
   const page = el(`
     <div class="account-page">
       <header class="account-page-header">
-        <a class="account-back" href="#/" aria-label="返回时间轴" title="返回时间轴">${icon('arrow-left')}</a>
+        <a class="account-back" href="${backHref}" aria-label="${backLabel}" title="${backLabel}">${icon('arrow-left')}</a>
         <h1 tabindex="-1">个人资料</h1>
       </header>
 
@@ -2075,6 +2077,16 @@ function renderAccount() {
         </div>
       </form>
     </div>`)
+
+  if (backHref === '#/settings') {
+    $('.account-back', page).onclick = (event) => {
+      if (!plainNavigation(event)) return
+      event.preventDefault()
+      const source = history.state?.profileReturn
+      if (source?.route === location.hash && source.from === backHref) history.back()
+      else location.replace(backHref)
+    }
+  }
 
   const profileForm = $('.profile-form', page)
   const usernameInput = $('[name=username]', profileForm)
@@ -2358,9 +2370,16 @@ function renderSettings() {
   main.appendChild(el('<header class="page-heading settings-heading"><div><p>让日常，更合心意</p><h1>设置</h1></div></header>'))
   main.appendChild(renderThemeCard())
   const profileCard = el(`<section class="settings-card settings-profile">
-    <div class="settings-card-heading"><div><h2>个人资料</h2><p>头像和显示名称会展示给另一位成员及访客。</p></div><a class="btn-ghost" href="#/account">${icon('user')}<span>编辑资料</span></a></div>
+    <div class="settings-card-heading settings-profile-heading"><h2>个人资料</h2><a class="btn-ghost settings-profile-edit" href="#/settings/profile">${icon('user')}<span>编辑资料</span></a><p>头像和显示名称会展示给另一位成员及访客。</p></div>
     <div class="settings-profile-summary"><span class="settings-profile-avatar"></span><div><strong class="settings-profile-name"></strong><span class="settings-profile-username"></span></div></div>
   </section>`)
+  $('.settings-profile-edit', profileCard).onclick = (event) => {
+    if (!plainNavigation(event) || location.hash !== '#/settings') return
+    event.preventDefault()
+    const target = '#/settings/profile'
+    history.pushState({ profileReturn: { route: target, from: '#/settings' } }, '', target)
+    route()
+  }
   $('.settings-profile-avatar', profileCard).replaceWith(avatarNode(site.user.name, site.user.avatarUrl, 'settings-profile-avatar'))
   $('.settings-profile-name', profileCard).textContent = site.user.name
   $('.settings-profile-username', profileCard).textContent = `登录账号：${site.user.username || site.user.name}`
@@ -2372,7 +2391,8 @@ function renderSettings() {
     <p class="notification-help" aria-live="polite"></p>
   </section>`)
   const notificationAction = browserNotificationAction({ settings: true, help: $('.notification-help', notificationCard) })
-  $('.notification-action-slot', notificationCard).appendChild(notificationAction)
+  $('.notification-action-slot', notificationCard).appendChild(notificationAction.button)
+  activeSettingsCleanup = notificationAction.dispose
   main.appendChild(notificationCard)
 
   const sections = [
@@ -2389,7 +2409,7 @@ function renderSettings() {
   $('.settings-logout', accountActions).onclick = async () => {
     const button = $('.settings-logout', accountActions)
     button.disabled = true
-    await disablePush().catch(() => {})
+    await browserNotifications.disable().catch(() => {})
     await api('/api/logout', { method: 'POST' })
     location.reload()
   }
@@ -2693,162 +2713,26 @@ function notificationTarget(postId, commentId) {
   window.focus?.()
 }
 
-// 浏览器系统通知走 Web Push:订阅交给服务端保存,新评论由服务端直接推给推送服务,
-// 页面切后台或整个关掉都能收到(轮询做不到这点),展示由 sw.js 的 push 事件负责。
-
-// applicationServerKey 只接受二进制,服务端给的是 base64url 公钥
-function base64UrlToBytes(value) {
-  const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
-  const raw = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
-  return Uint8Array.from(raw, (ch) => ch.charCodeAt(0))
-}
-
-async function readyServiceWorker() {
-  let timer = null
-  let registration
-  try {
-    registration = await Promise.race([
-      Promise.resolve(serviceWorkerRegistration),
-      new Promise((resolve) => { timer = setTimeout(() => resolve(null), SERVICE_WORKER_READY_TIMEOUT_MS) }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-  return registration
-}
-
-async function currentPushSubscription() {
-  const registration = await readyServiceWorker()
-  return registration?.pushManager ? registration.pushManager.getSubscription() : null
-}
-
-async function savePushSubscription(subscription) {
-  await api('/api/push/subscribe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(subscription.toJSON()),
-  })
-}
-
-async function enablePush() {
-  // 权限请求必须紧跟用户点击,移动端 Chrome 会拒绝跨过异步等待后的请求。
-  const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
-  if (permission !== 'granted') return false
-  const registration = await readyServiceWorker()
-  if (!registration?.pushManager) throw new Error('通知服务尚未就绪')
-  const { key } = await api('/api/push/key')
-  const subscription = await registration.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: base64UrlToBytes(key),
-  })
-  try {
-    await savePushSubscription(subscription)
-  } catch (e) {
-    // 服务端没存下就等于没开,留着浏览器侧的订阅只会让开关显示成已开启
-    await subscription.unsubscribe()
-    throw e
-  }
-  return true
-}
-
-// 登录后自动尝试一次通知订阅。浏览器若要求用户手势或策略阻止,保留菜单中的手动开关。
-async function autoEnablePush() {
-  if (!site?.user || !window.isSecureContext ||
-      !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator) ||
-      Notification.permission === 'denied') return
-  try {
-    const existing = await currentPushSubscription()
-    if (existing) {
-      // 浏览器订阅是设备级的,换账号后不能只看见已有订阅就返回,必须重新绑定当前用户。
-      await savePushSubscription(existing)
-      return
-    }
-    // 未决定时不在页面初始化阶段弹授权框,只由通知按钮触发。
-    if (Notification.permission === 'default') return
-    await enablePush()
-  } catch {
-    // 自动请求失败时不弹出错误,用户仍可从头像菜单手动开启。
-  }
-}
-
-async function disablePush() {
-  const subscription = await currentPushSubscription()
-  if (!subscription) return
-  let failure = null
-  try {
-    await api('/api/push/unsubscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ endpoint: subscription.endpoint }),
-    })
-  } catch (e) {
-    failure = e
-  } finally {
-    // 服务端失败也必须清掉本地订阅,否则下一个登录账号会复用旧账号的 endpoint。
-    try { await subscription.unsubscribe() } catch (e) { if (!failure) failure = e }
-  }
-  if (failure) throw failure
-}
-
-function notificationEnvironment() {
-  if (!window.isSecureContext) return { supported: false, label: '通知需要 HTTPS', help: '请使用 HTTPS 地址打开此站点。' }
-  const ios = /iPad|iPhone|iPod/.test(navigator.platform) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform))
-  const standalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone
-  if (ios && !standalone) return { supported: false, label: '请添加到主屏幕后开启', help: 'iPhone 请从分享菜单添加到主屏幕，再从主屏幕打开此站点。' }
-  if (!('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator)) {
-    return { supported: false, label: '浏览器不支持通知', help: '请更新浏览器，或使用支持 Web Push 的浏览器。' }
-  }
-  return { supported: true, help: '允许后，另一位成员发表评论时会提醒你。' }
-}
-
+// 两个通知入口仅订阅共享状态，权限、查询与推送操作统一由模块管理。
 function browserNotificationAction({ settings = false, help = null } = {}) {
   const button = el(settings
-    ? `<button class="btn-ghost notification-toggle" type="button" disabled>${icon('bell')}<span>开启浏览器通知</span></button>`
-    : `<button class="dropdown-item browser-notify" type="button" disabled>${icon('bell')}<span>开启浏览器通知</span></button>`)
+    ? `<button class="btn-ghost notification-toggle" type="button">${icon('bell')}<span></span></button>`
+    : `<button class="dropdown-item browser-notify" type="button">${icon('bell')}<span></span></button>`)
   const label = $('span', button)
-  const environment = notificationEnvironment()
-  const setHelp = (message) => { if (help) help.textContent = message }
-  if (!environment.supported) {
-    label.textContent = environment.label
-    setHelp(environment.help)
-    return button
-  }
-  if (Notification.permission === 'denied') {
-    label.textContent = '通知权限已被阻止'
-    setHelp('请在浏览器的站点设置中允许通知，再回到这里重试。')
-    return button
-  }
-
-  const sync = async () => {
-    try {
-      const subscribed = Boolean(await currentPushSubscription())
-      label.textContent = subscribed ? '关闭浏览器通知' : '开启浏览器通知'
-      setHelp(subscribed ? '已开启。另一位成员发表评论时会提醒你。' : environment.help)
-    } catch {
-      label.textContent = '通知暂时不可用'
-      setHelp('Service Worker 尚未就绪，请稍后重试。')
-    } finally {
-      button.disabled = false
+  const dispose = browserNotifications.subscribe((state) => {
+    label.textContent = state.label
+    button.disabled = !state.supported || state.permission === 'denied' || state.busy
+    button.setAttribute('aria-busy', String(state.busy))
+    button.setAttribute('aria-pressed', String(state.permission === 'granted' && state.subscribed === true))
+    button.title = state.help
+    if (help) {
+      help.textContent = state.help
+      if (!settings) help.hidden = !state.error
     }
-  }
-  // 状态查询可以后台完成,按钮必须立即可点以保留移动端的用户手势。
-  button.disabled = false
-  button.onclick = async () => {
-    button.disabled = true
-    label.textContent = '处理中…'
-    try {
-      // permission 为 default 时不能先 await getSubscription,否则会丢失移动端用户手势。
-      if (Notification.permission === 'default') {
-        if (!await enablePush()) setHelp('未获得通知权限，可在浏览器站点设置中重新允许。')
-      } else if (await currentPushSubscription()) await disablePush()
-      else if (!await enablePush()) setHelp('未获得通知权限，可在浏览器站点设置中重新允许。')
-    } catch (e) {
-      setHelp(e.message || '无法开启通知，请稍后重试。')
-    }
-    await sync()
-  }
-  sync()
-  return button
+  })
+  // 错误已广播到两个入口；不在单个按钮上另存一份状态。
+  button.onclick = () => { void browserNotifications.toggle().catch(() => {}) }
+  return { button, dispose }
 }
 
 function renderNotifyBell() {
@@ -2922,6 +2806,8 @@ function renderNotifyBell() {
 }
 
 function renderUserArea() {
+  activeUserNotificationCleanup?.()
+  activeUserNotificationCleanup = null
   const area = $('#userArea')
   area.innerHTML = ''
   if (!site.user) {
@@ -2940,6 +2826,7 @@ function renderUserArea() {
       <div class="dropdown" hidden>
         <div class="dropdown-name">${esc(site.user.name)}</div>
         <div class="browser-notify-slot"></div>
+        <p class="notification-help browser-notify-help" aria-live="polite" hidden></p>
         <a href="#/account" class="dropdown-item">${icon('user')}<span>个人资料</span></a>
         <a href="#/settings" class="dropdown-item">${icon('settings')}<span>设置</span></a>
         <button class="dropdown-item logout">${icon('log-out')}<span>退出登录</span></button>
@@ -2948,7 +2835,9 @@ function renderUserArea() {
   const btn = $('.avatar-btn', menu)
   const drop = $('.dropdown', menu)
   $('.user-avatar-slot', menu).replaceWith(avatarNode(site.user.name, site.user.avatarUrl, 'small'))
-  $('.browser-notify-slot', menu).replaceWith(browserNotificationAction())
+  const notificationAction = browserNotificationAction({ help: $('.browser-notify-help', menu) })
+  $('.browser-notify-slot', menu).replaceWith(notificationAction.button)
+  activeUserNotificationCleanup = notificationAction.dispose
   btn.onclick = (e) => {
     e.stopPropagation()
     const open = drop.hidden || !drop.classList.contains('menu-presence-present') || drop.classList.contains('menu-presence-closing')
@@ -2959,11 +2848,15 @@ function renderUserArea() {
   menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => closeDropdowns()))
   $('.logout', menu).onclick = async () => {
     // 先退订再退出:退订接口需要登录态,且不能让已登出的账号继续往这台设备推通知
-    await disablePush().catch(() => {})
+    await browserNotifications.disable().catch(() => {})
     await api('/api/logout', { method: 'POST' })
     location.reload()
   }
   area.appendChild(menu)
+}
+
+function plainNavigation(event) {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
 }
 
 function route() {
@@ -2984,6 +2877,7 @@ function route() {
   })
   if (hash === '#/login') return site.user ? (location.hash = '#/') : renderLogin()
   if (hash === '#/account') return renderAccount()
+  if (hash === '#/settings/profile') return renderAccount({ backHref: '#/settings', backLabel: '返回设置' })
   const settingsMatch = hash.match(/^#\/settings\/(site|ai|storage|backup)$/)
   if (settingsMatch) return renderSettingsSection(settingsMatch[1])
   if (hash === '#/settings') return renderSettings()
@@ -3033,8 +2927,10 @@ async function init() {
     serviceWorkerRegistration = navigator.serviceWorker
       .register('/sw.js')
       .then(() => navigator.serviceWorker.ready)
+      .then((registration) => { void browserNotifications.refresh(); return registration })
       .catch(() => null)
   }
+  browserNotifications.start()
   renderUserArea()
   document.querySelectorAll('.mobile-nav [data-icon]').forEach((node) => { node.innerHTML = icon(node.dataset.icon) })
   $('.mobile-compose').onclick = (event) => {
@@ -3055,7 +2951,7 @@ async function init() {
       sessionStorage.removeItem('database-restore-notice')
     }
   } catch { /* 浏览器未启用会话存储时仍可正常登录。 */ }
-  if (site.user) autoEnablePush()
+  if (site.user) void browserNotifications.autoEnable().catch(() => {})
 }
 
 window.addEventListener('hashchange', route)

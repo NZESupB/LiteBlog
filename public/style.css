@@ -342,6 +342,7 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible), input:focus:not(:
 .browser-notify-slot, .notification-action-slot, .notification-card, .notification-intro, .notification-help, .notification-toggle { font-size: var(--fs-footnote); color: var(--text); }
 .notification-intro { margin: 0 0 8px; color: var(--muted); }
 .notification-help { margin: 4px 0 0; color: var(--muted); font-size: var(--fs-caption); }
+.browser-notify-help { padding: 0 12px 8px; overflow-wrap: anywhere; }
 .notification-toggle { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border-radius: var(--radius-sm); }
 .notification-toggle:hover { background: var(--accent-soft); color: var(--accent-deep); }
 .notification-action-slot { display: flex; gap: 8px; padding: 4px 0 0; }
@@ -839,6 +840,11 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width
 .settings-link-copy small { display: block; margin-top: 1px; color: var(--muted); font-size: var(--fs-caption); }
 .settings-link-arrow { color: var(--faint); }
 .settings-link-arrow .icon { width: 16px; height: 16px; }
+/* 说明另起一行，编辑入口保留完整标签与触控尺寸，窄屏可整体换行。 */
+.settings-profile-heading { align-items: center; flex-wrap: wrap; row-gap: 6px; }
+.settings-profile-heading h2 { flex: 1 1 auto; min-width: 0; }
+.settings-profile-heading p { flex: 0 0 100%; margin: 0; }
+.settings-profile-edit { flex: 0 0 auto; white-space: nowrap; min-height: 44px; }
 .settings-profile-summary { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .settings-profile-avatar { flex-shrink: 0; }
 .settings-profile-name { display: block; font-family: var(--font-display); font-size: var(--fs-title); font-weight: 700; letter-spacing: -0.015em; color: var(--ink); }
