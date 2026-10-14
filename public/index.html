@@ -44,19 +44,21 @@
   </nav>
 
   <!-- 媒体灯箱:图片 / 视频 / 实况图共用一个序列,一律由用户点击才播放 -->
-  <div id="lightbox" class="lightbox" hidden>
+  <div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="查看图片" hidden>
     <button class="lb-btn lb-close" aria-label="关闭">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
     </button>
     <button class="lb-btn lb-prev" aria-label="上一张">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
     </button>
-    <div class="lb-stage" id="lightboxStage">
-      <img id="lightboxImg" alt="" />
-      <video id="lightboxVideo" playsinline preload="none" hidden></video>
-      <button id="lightboxLive" class="lb-live" type="button" aria-pressed="false" hidden>
-        <span class="lb-live-dot" aria-hidden="true"></span><span>LIVE</span>
-      </button>
+    <div class="lb-viewport" id="lightboxViewport" tabindex="0" aria-label="图片浏览区域，可滚动，双击或双指缩放">
+      <div class="lb-stage" id="lightboxStage">
+        <img id="lightboxImg" alt="" draggable="false" />
+        <video id="lightboxVideo" playsinline preload="none" hidden></video>
+        <button id="lightboxLive" class="lb-live" type="button" aria-pressed="false" hidden>
+          <span class="lb-live-dot" aria-hidden="true"></span><span>LIVE</span>
+        </button>
+      </div>
     </div>
     <button class="lb-btn lb-next" aria-label="下一张">
       <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>

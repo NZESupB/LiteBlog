@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { execFileSync } from 'node:child_process'
 
 // 实况图配对规则是纯函数,先在 Node 里把边界钉死(浏览器里跑的是同一份代码)
 const { groupMediaFiles, mediaStem, isVideoFile, videoContentType } = await import('../public/js/media.js')
@@ -136,7 +137,7 @@ setConfigForTests({
   security: { jwtSecret: 'isolated-media-regression' },
   site: { privateMode: true },
   storage: { backend: 'local' },
-  media: { maxVideoBytes: 4096 },
+  media: { maxVideoBytes: 4096, videoCompression: false },
 })
 
 let db
@@ -177,8 +178,8 @@ try {
     const task = JSON.parse(text)
     assert.equal(task.status, 'saving')
     assert.equal(task.size, bytes.length)
-    for (let i = 0; i < 200; i++) {
-      await new Promise((resolve) => setImmediate(resolve))
+    for (let i = 0; i < 1000; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
       const stateRes = await request(`/api/uploads/video/${task.uploadId}`)
       const stateText = await stateRes.text()
       assert.equal(stateRes.status, 200, stateText)
@@ -193,7 +194,11 @@ try {
   }
 
   // 视频:内容不参与去重(同名随机段),后台保存完成后可从 /uploads 读到
-  const videoBytes = new Uint8Array(1000).map((_, i) => (i * 7) % 251)
+  // 服务端现在校验真实视频；本回归关闭压缩以继续验证原字节与 Range 切片。
+  const fixturePath = path.join(dataDir, 'fixture.mp4')
+  execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=10:d=0.5', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', fixturePath])
+  const videoBytes = new Uint8Array(readFileSync(fixturePath))
+  assert.ok(videoBytes.length < 4096)
   const videoName = await uploadVideo(videoBytes)
   assert.match(videoName, /^\d{8}-\d{6}-[a-f0-9]{8}\.mp4$/)
   const videoPoster = await uploadImage(coverJpeg, 'poster.jpg')

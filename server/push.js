@@ -3,6 +3,7 @@
 import { createECDH, createHmac, createCipheriv, createPrivateKey, randomBytes, sign } from 'node:crypto'
 import { db, getSetting, setSetting } from './db.js'
 import { configValue } from './config.js'
+import { enterOperation, isMaintenance } from './maintenance.js'
 
 const CURVE = 'prime256v1'
 // 推送服务要求 sub 是可联系到发送方的 mailto: 或 https: URL(Apple 会校验)
@@ -136,6 +137,12 @@ export function removeSubscription(userId, endpoint) {
 
 // 给某个用户的所有设备推送。外部推送服务不可靠,失败只记日志,绝不影响调用方的业务流程。
 export async function pushToUser(userId, payload) {
+  if (isMaintenance()) return
+  const release = enterOperation('push')
+  try { await sendToUser(userId, payload) } finally { release() }
+}
+
+async function sendToUser(userId, payload) {
   const rows = db.prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?').all(userId)
   const body = JSON.stringify(payload)
   await Promise.all(rows.map(async (row) => {

@@ -2,7 +2,7 @@
 import { sign, verify } from 'hono/jwt'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { randomBytes } from 'node:crypto'
-import { db } from './db.js'
+import { db, getSetting } from './db.js'
 import { configValue } from './config.js'
 
 const JWT_SECRET = String(configValue('security.jwtSecret', '')).trim() || randomBytes(32).toString('hex')
@@ -17,7 +17,7 @@ export async function createSession(c, user) {
   const username = user.username || user.name
   const name = user.displayName || user.name || username
   const token = await sign(
-    { uid: user.id, username, name, displayName: name, exp: Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400 },
+    { uid: user.id, username, name, displayName: name, sessionVersion: getSetting('session_version', ''), exp: Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400 },
     JWT_SECRET
   )
   setCookie(c, COOKIE_NAME, token, {
@@ -39,6 +39,7 @@ export async function sessionMiddleware(c, next) {
   if (token) {
     try {
       const payload = await verify(token, JWT_SECRET, 'HS256')
+      if ((payload.sessionVersion || '') !== getSetting('session_version', '')) throw new Error('恢复后会话已失效')
       const current = db.prepare('SELECT username, name, avatar_filename FROM users WHERE id = ?').get(payload.uid)
       if (!current) throw new Error('会话用户不存在')
       const legacyName = payload.displayName || payload.name || payload.username

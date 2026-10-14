@@ -83,40 +83,177 @@ const ACTIONS = {
 const EMOJIS = '😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 🤔 🫡 🤗 😴 🥺 😢 😭 😤 😡 🤬 😱 😮 😲 🫠 😶‍🌫️ ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💕 💞 💓 💗 💖 💘 💝 💟 👍 👎 👏 🙌 👐 🤝 💪 🔥 ✨ 🎉 🎊 🌹 🌸 🌞 🌙 ⭐ 🎈 🍰 🍷 ☕ 🍽️ 📷 🌈 🍃 🐱 🐶'.split(' ')
 
 let emojiPanel = null
-// 表情面板:textarea 与单行 input 通用,trigger 为触发按钮(再次点击收起、点击面板外关闭)
-function toggleEmojiPanel(ta, trigger) {
-  if (emojiPanel && emojiPanel.isConnected) {
-    emojiPanel._close?.()
-    emojiPanel = null
+let emojiPanelSeq = 0
+
+function coarsePointer() {
+  return Boolean(window.matchMedia?.('(pointer: coarse)')?.matches)
+}
+
+function keyboardInset() {
+  const viewport = window.visualViewport
+  if (!viewport) return 0
+  return Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop)
+}
+
+function keepInputAbovePanel(input, panel) {
+  const panelTop = panel.getBoundingClientRect().top
+  const inputRect = input.getBoundingClientRect()
+  const delta = inputRect.bottom - (panelTop - 12)
+  if (delta <= 0) return
+  const scroller = input.closest?.('.composer-body')
+  if (scroller && scroller.scrollHeight > scroller.clientHeight) {
+    scroller.scrollTop += delta
     return
   }
-  const panel = document.createElement('div')
-  panel.className = 'emoji-panel'
-  panel.hidden = true
-  panel.innerHTML = `<div class="emoji-grid">${EMOJIS.map((e) => `<button type="button" class="emoji-btn">${e}</button>`).join('')}</div>`
-  panel.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('.emoji-btn')
-    if (!btn) return
-    ev.preventDefault()
-    ev.stopPropagation()
-    replaceSelection(ta, btn.textContent)
-    ta.focus()
-  })
-  // 关闭面板:点击面板外部时移除
-  const closePanel = () => {
-    animatePresence(panel, false, { className: 'panel-presence', duration: 180, remove: true })
-    if (emojiPanel === panel) emojiPanel = null
-    document.removeEventListener('click', closer)
+  const root = document.scrollingElement || document.documentElement
+  if (root) root.scrollTop += delta
+}
+
+export function closeEmojiPanel(immediate = false) {
+  if (!emojiPanel) return false
+  emojiPanel.close({ immediate })
+  return true
+}
+
+// 表情面板:textarea 与单行 input 通用。鼠标设备锚在触发按钮旁;触屏设备用底部表情盘,
+// 打开时先收起键盘,选择后把焦点交还输入框。两种形态都不参与表单排版。
+function toggleEmojiPanel(ta, trigger) {
+  if (emojiPanel) {
+    const current = emojiPanel
+    if (current.input === ta && current.trigger === trigger) {
+      current.close({ restoreKeyboard: current.coarse })
+      return
+    }
+    current.close({ immediate: true })
   }
-  const closer = (e) => {
-    if (panel.contains(e.target) || (trigger && trigger.contains(e.target))) return
+
+  const panel = document.createElement('div')
+  const coarse = coarsePointer()
+  const panelId = `emoji-panel-${++emojiPanelSeq}`
+  panel.id = panelId
+  panel.className = `emoji-panel ${coarse ? 'emoji-panel-tray' : 'emoji-panel-popover'}`
+  panel.hidden = true
+  panel.setAttribute('role', 'dialog')
+  panel.setAttribute('aria-label', '选择表情')
+  panel.innerHTML = `<div class="emoji-panel-surface">
+    <div class="emoji-panel-head"><strong>表情</strong><button class="emoji-panel-close" type="button" aria-label="关闭表情面板">×</button></div>
+    <div class="emoji-grid">${EMOJIS.map((e) => `<button type="button" class="emoji-btn">${e}</button>`).join('')}</div>
+  </div>`
+
+  trigger?.setAttribute('aria-haspopup', 'dialog')
+  trigger?.setAttribute('aria-controls', panelId)
+  trigger?.setAttribute('aria-expanded', 'true')
+  document.body.appendChild(panel)
+  panel.hidden = false
+
+  let frame = 0
+  let closed = false
+
+  const positionPopover = () => {
+    if (coarse || panel.hidden) return
+    const rect = trigger.getBoundingClientRect()
+    const width = panel.offsetWidth || 360
+    const height = panel.offsetHeight || 240
+    const gap = 8
+    const padding = 8
+    const aboveSpace = rect.top - gap - padding
+    const belowSpace = window.innerHeight - rect.bottom - gap - padding
+    const above = aboveSpace >= height || (belowSpace < height && aboveSpace > belowSpace)
+    const top = above
+      ? Math.max(padding, rect.top - gap - height)
+      : Math.min(window.innerHeight - padding - height, rect.bottom + gap)
+    const left = Math.max(padding, Math.min(window.innerWidth - padding - width, rect.right - width))
+    const originX = Math.max(12, Math.min(width - 12, rect.left + rect.width / 2 - left))
+    panel.style.left = `${left}px`
+    panel.style.top = `${Math.max(padding, top)}px`
+    panel.style.transformOrigin = `${originX}px ${above ? '100%' : '0%'}`
+  }
+
+  const syncTray = () => {
+    frame = 0
+    if (closed || !coarse || !panel.isConnected) return
+    panel.style.setProperty('--emoji-keyboard-offset', `${keyboardInset()}px`)
+    keepInputAbovePanel(ta, panel)
+  }
+  const scheduleTray = () => {
+    if (!frame && !closed) frame = requestAnimationFrame(syncTray)
+  }
+  const closer = (event) => {
+    if (panel.contains(event.target) || trigger?.contains(event.target)) return
     closePanel()
   }
-  panel._close = closePanel
-  setTimeout(() => document.addEventListener('click', closer), 0)
-  ta.parentElement.insertBefore(panel, ta)
-  emojiPanel = panel
-  animatePresence(panel, true, { className: 'panel-presence', duration: 180 })
+  const onKeydown = (event) => {
+    if (event.key === 'Escape') closePanel()
+  }
+  const removeListeners = () => {
+    if (frame) cancelAnimationFrame(frame)
+    frame = 0
+    window.removeEventListener('resize', onWindowChange)
+    window.removeEventListener('scroll', positionPopover, true)
+    window.visualViewport?.removeEventListener('resize', scheduleTray)
+    window.visualViewport?.removeEventListener('scroll', scheduleTray)
+    document.removeEventListener('click', closer)
+    document.removeEventListener('keydown', onKeydown)
+  }
+  const closePanel = ({ immediate = false, restoreKeyboard = false } = {}) => {
+    if (closed) return
+    closed = true
+    removeListeners()
+    trigger?.setAttribute('aria-expanded', 'false')
+    if (restoreKeyboard) ta.focus({ preventScroll: true })
+    animatePresence(panel, false, {
+      className: 'emoji-panel-presence',
+      duration: 180,
+      immediate,
+      remove: true,
+      onComplete() {
+        cancelAnimationFrame(frame)
+        document.body.classList.remove('emoji-tray-open')
+        if (emojiPanel?.panel === panel) emojiPanel = null
+      },
+    })
+  }
+  const onWindowChange = () => {
+    if (coarse) scheduleTray()
+    else positionPopover()
+  }
+
+  panel.addEventListener('click', (event) => {
+    if (event.target.closest('.emoji-panel-close')) {
+      event.preventDefault()
+      closePanel()
+      return
+    }
+    const btn = event.target.closest('.emoji-btn')
+    if (!btn) return
+    event.preventDefault()
+    event.stopPropagation()
+    replaceSelection(ta, btn.textContent)
+    closePanel({ restoreKeyboard: true })
+  })
+
+  if (coarse) {
+    document.body.classList.add('emoji-tray-open')
+    panel.style.setProperty('--emoji-keyboard-offset', `${keyboardInset()}px`)
+    ta.blur()
+    window.visualViewport?.addEventListener('resize', scheduleTray)
+    window.visualViewport?.addEventListener('scroll', scheduleTray)
+    scheduleTray()
+  } else {
+    panel.style.visibility = 'hidden'
+    positionPopover()
+    panel.style.visibility = ''
+    window.addEventListener('scroll', positionPopover, true)
+  }
+  window.addEventListener('resize', onWindowChange)
+  setTimeout(() => {
+    if (closed) return
+    document.addEventListener('click', closer)
+  }, 0)
+  document.addEventListener('keydown', onKeydown)
+
+  emojiPanel = { panel, input: ta, trigger, coarse, close: closePanel }
+  animatePresence(panel, true, { className: 'emoji-panel-presence', duration: 220 })
 }
 
 // 给任意输入框挂表情按钮(评论框等,不带完整 Markdown 工具栏时用)

@@ -1,12 +1,15 @@
 // 前端逻辑:hash 路由 + 时间轴 / 相册 / 登录 / 账号 / 设置视图
-import { attachMdToolbar, attachEmojiButton } from '/vendor/md-toolbar.js'
+import { attachMdToolbar, attachEmojiButton, closeEmojiPanel } from '/vendor/md-toolbar.js'
 import { icon } from '/vendor/icons.js'
 import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
-import { attachComposerViewport } from '/js/composer-viewport.js'
-import { api, streamSse, uploadWithProgress, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
+import { attachComposerViewport, attachInlineInputViewport } from '/js/composer-viewport.js'
+import { api, streamSse, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
 import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/inline-video.js'
-import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration, videoContentType } from '/js/media.js'
+import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration } from '/js/media.js'
+import { uploadVideo, waitForVideoUpload, cancelVideoUpload, retryVideoUpload, selectVideoVariant, getVideoUploadConfig, formatVideoElapsed, formatVideoBytes } from '/js/video-upload.js'
+import { createBackupSettings } from '/js/backup-settings.js'
+import { createBrowserNotifications } from '/js/browser-notifications.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
@@ -22,8 +25,11 @@ function withinEditWindow(createdAt) {
   return Number.isFinite(time) && Date.now() - time <= EDIT_WINDOW_MS
 }
 let activePostMenu = null
+let activeInlineComposerCleanup = null
+let activeSettingsCleanup = null
 let serviceWorkerRegistration = null
-const SERVICE_WORKER_READY_TIMEOUT_MS = 5000
+let activeUserNotificationCleanup = null
+const browserNotifications = createBrowserNotifications({ api, getRegistration: () => serviceWorkerRegistration, getUser: () => site?.user })
 let dayProgressTimer = null
 let hasRenderedView = false
 let pageTransitionToken = 0
@@ -392,7 +398,12 @@ function watchHeaderWrite(source) {
 
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
+  activeSettingsCleanup?.()
+  activeSettingsCleanup = null
   activeComposerModal?.close?.(true)
+  activeInlineComposerCleanup?.()
+  activeInlineComposerCleanup = null
+  closeEmojiPanel(true)
   stopInlineVideo()
   closeLightbox(true)
   closePostMenu(true)
@@ -520,7 +531,6 @@ function createComposer(post, draftId, onDone, onCancel) {
         <span class="md-sep"></span>
         <button data-md="emoji" title="表情" type="button">${icon('smile')}</button>
         <span class="ai-tools" role="group" aria-label="AI 工具">
-          <span class="ai-tools-label">AI 工具</span>
           <button class="md-polish" title="AI 优化正文" type="button">${icon('sparkles')}<span>AI 优化</span></button>
           <button class="md-image" title="根据正文生成配图" type="button">${icon('image')}<span>AI 配图</span></button>
         </span>
@@ -631,12 +641,26 @@ function createComposer(post, draftId, onDone, onCancel) {
     resultPane.textContent = ''
     polishResult = ''
     animatePresence(compare, true, { className: 'panel-presence', duration: 200 })
-    statusEl.textContent = '生成中…'
     polishAbort = new AbortController()
     setPolishState(true)
+    // 思考模型会先产出思维链,正文可能十几秒后才有。这段时间用秒数/思考字数报进度,
+    // 否则面板一片空白,看起来像是卡住了。
+    const startedAt = Date.now()
+    let thinkingChars = 0
+    let gotContent = false
+    const tick = () => {
+      if (gotContent) return
+      const seconds = Math.floor((Date.now() - startedAt) / 1000)
+      statusEl.textContent = thinkingChars ? `思考中…（${thinkingChars} 字）` : `思考中…${seconds}s`
+    }
+    tick()
+    const ticker = setInterval(tick, 500)
     try {
       await streamSse('/api/llm/polish', { text }, (evt) => {
+        // 思维链只用来表示「还在思考」,不并入结果也不是正文
+        if (evt.reasoning) { thinkingChars += evt.reasoning.length; tick(); return }
         if (!evt.delta) return
+        if (!gotContent) { gotContent = true; statusEl.textContent = '生成中…' }
         polishResult += evt.delta
         resultPane.textContent = polishResult
         resultPane.scrollTop = resultPane.scrollHeight
@@ -653,6 +677,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       errorLine.textContent = e.message
       if (!polishResult) animatePresence(compare, false, { className: 'panel-presence', duration: 200 })
     } finally {
+      clearInterval(ticker)
       polishAbort = null
       setPolishState(false)
     }
@@ -675,6 +700,9 @@ function createComposer(post, draftId, onDone, onCancel) {
   if (post) textarea.value = post.content
   const keepImages = post ? post.images.map((img) => ({ ...img })) : [] // 保留的已有图片(已就绪,不显示处理动画)
   const newFiles = [] // 新增文件,含 _status: processing/uploading/done/error
+  const videoControllers = new Map()
+  const videoResults = el('<div class="storage-hint" aria-live="polite" hidden></div>')
+  previews.insertAdjacentElement('afterend', videoResults)
   const savedDraft = readComposeState(draftId) || {}
   let imageTask = null
   let imageJobId = savedDraft.imageJobId || ''
@@ -689,11 +717,16 @@ function createComposer(post, draftId, onDone, onCancel) {
       filename: file._name || '', jobId: file._jobId || '',
       kind: file._kind || 'image', poster: file._poster || '', duration: file._duration || null,
       motion: file._motion?._name || '', motionStatus: file._motion?._status || '',
+      videoJobId: file._videoJobId || '', videoResult: file._videoResult || null,
+      clientUploadId: file._clientUploadId || '', fingerprint: file._fingerprint || '',
+      motionJobId: file._motion?._videoJobId || '', motionResult: file._motion?._videoResult || null,
+      motionClientUploadId: file._motion?._clientUploadId || '', motionFingerprint: file._motion?._fingerprint || '',
     })),
     keep: keepImages.map((image) => image.id),
     imageJobId: imageTask?.id || savedDraft.imageJobId || '',
   })
   const persistDraft = () => { if (!disposed) saveComposeState(draftId, draftState()) }
+  window.addEventListener('pagehide', persistDraft)
   const savedKeep = new Set(Array.isArray(savedDraft.keep) ? savedDraft.keep : keepImages.map((image) => image.id))
   if (post) {
     for (let i = keepImages.length - 1; i >= 0; i--) if (!savedKeep.has(keepImages[i].id)) keepImages.splice(i, 1)
@@ -707,34 +740,66 @@ function createComposer(post, draftId, onDone, onCancel) {
   textarea.addEventListener('input', persistDraft)
   const draftReady = api('/api/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: draftId, postId: post?.id || null }) }).catch(() => null)
 
-  // 恢复已上传图片和 IndexedDB 中尚未处理完的原文件。
+  // 原视频不写入 IndexedDB；已完整接收的视频通过任务 ID 恢复后台轮询。
   ;(async () => {
+    await draftReady
+    if (disposed) return
+    const snapshot = await api(`/api/drafts/${encodeURIComponent(draftId)}`)
+    if (disposed) return
+    const serverJobs = new Map((snapshot.videoJobs || []).map((job) => [job.uploadId, job]))
     const restoredIds = new Set()
-    for (const saved of Array.isArray(savedDraft.files) ? savedDraft.files : []) {
-      if (!saved.filename) continue
+    const savedFiles = Array.isArray(savedDraft.files) ? savedDraft.files : []
+    function restoreMotion(file, saved) {
+      if (!saved?.motion && !saved?.motionJobId && !saved?.motionStatus) return
+      file._motion = { _id: newDraftId(), name: '实况视频', _status: saved.motion ? 'done' : 'uploading', _name: saved.motion || '', _videoJobId: saved.motionJobId || '', _videoResult: saved.motionResult || null }
+      file._motion._clientUploadId = saved.motionClientUploadId || ''; file._motion._fingerprint = saved.motionFingerprint || ''
+      const state = serverJobs.get(saved.motionJobId)
+      if (state?.status === 'done') applyVideoResult(file._motion, state, false)
+      else if (saved.motionJobId && (!saved.motion || state)) runVideoTask(file._motion, null, false)
+      else if (!saved.motion) { file._motion._status = 'error'; file._motion._needsFile = true; file._motion._errMsg = '选择原始配对视频继续上传' }
+    }
+    for (const saved of savedFiles) {
       const kind = saved.kind || 'image'
-      // 视频的缩略图只能是它的封面帧;拿不到封面就留空,渲染成中性底而不是裂图
+      if (!saved.filename && kind !== 'video') continue
       const thumb = kind === 'video' ? saved.poster : saved.filename
       const file = {
-        _id: saved.id || newDraftId(), _name: saved.filename, _status: 'done', _jobId: saved.jobId || '',
-        name: saved.name, type: saved.type, _kind: kind, _poster: saved.poster || '',
-        _duration: saved.duration || null,
+        _id: saved.id || newDraftId(), _name: saved.filename || '', _status: saved.filename ? 'done' : 'uploading', _jobId: saved.jobId || '',
+        name: saved.name, type: saved.type, _kind: kind, _poster: saved.poster || '', _duration: saved.duration || null,
+        _videoJobId: saved.videoJobId || '', _videoResult: saved.videoResult || null,
+        _clientUploadId: saved.clientUploadId || '', _fingerprint: saved.fingerprint || '',
         _url: thumb ? `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(thumb)}` : '',
       }
-      if (saved.motion) file._motion = { _id: newDraftId(), name: '', _status: 'done', _name: saved.motion }
       newFiles.push(file)
       restoredIds.add(file._id)
+      restoreMotion(file, saved)
+      if (kind === 'video') {
+        const state = serverJobs.get(saved.videoJobId)
+        if (state?.status === 'done') applyVideoResult(file, state, true)
+        else if (saved.videoJobId && (!saved.filename || state)) runVideoTask(file, null, true)
+        else if (!saved.filename) { file._status = 'error'; file._needsFile = true; file._errMsg = '选择原始视频继续上传' }
+      }
+    }
+    const restoredJobs = new Set(newFiles.flatMap((file) => [file._videoJobId, file._motion?._videoJobId]).filter(Boolean))
+    for (const state of serverJobs.values()) {
+      if (!state.needsPoster || restoredJobs.has(state.uploadId) || state.status === 'cancelled'
+        || keepImages.some((image) => image.filename === state.filename)) continue
+      const file = { _id: newDraftId(), _kind: 'video', _videoJobId: state.uploadId, name: state.name || '视频', _status: 'uploading' }
+      newFiles.push(file)
+      if (state.status === 'done') applyVideoResult(file, state, true)
+      else runVideoTask(file, null, true)
     }
     const blobs = await loadDraftFiles(draftId)
+    if (disposed) return
     for (const file of blobs) {
       if (restoredIds.has(file._id)) continue
       newFiles.push(file)
+      restoreMotion(file, savedFiles.find((saved) => saved.id === file._id))
       processFile(file)
     }
     renderPreviews()
     updatePublishGuard()
     persistDraft()
-  })()
+  })().catch((error) => { if (!disposed) errorLine.textContent = `恢复草稿失败：${error.message}` })
 
   function formatElapsed(startedAt) {
     const start = startedAt ? parseTime(startedAt).getTime() : Date.now()
@@ -860,11 +925,14 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   const dispose = () => {
     if (disposed) return
+    window.removeEventListener('pagehide', persistDraft)
     disposed = true
     clearInterval(imagePollTimer)
     imagePollTimer = null
     polishAbort?.abort()
     polishAbort = null
+    for (const controller of videoControllers.values()) controller.abort()
+    videoControllers.clear()
     // 关闭编辑器时，未加入发布内容的 AI 结果没有保留价值；运行中的任务也一并取消。
     if (imageJobId && !newFiles.some((file) => file._jobId === imageJobId)) {
       api(`/api/image-jobs/${encodeURIComponent(imageJobId)}`, { method: 'DELETE' }).catch(() => {})
@@ -874,30 +942,68 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   const STATUS_TEXT = { processing: '处理中', uploading: '上传中', generating: '生成中' }
 
-  async function waitForVideoUpload(uploadId) {
-    const deadline = Date.now() + 30 * 60 * 1000
-    while (Date.now() < deadline) {
-      const state = await api(`/api/uploads/video/${encodeURIComponent(uploadId)}`)
-      if (state.status === 'done') return state
-      if (state.status === 'failed') throw new Error(state.error || '视频保存失败')
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+
+  function applyVideoResult(item, result, needsPoster) {
+    item._name = result.filename
+    item._duration = result.duration
+    item._videoResult = result
+    if (needsPoster && result.poster) {
+      for (const url of [item._url, item._posterUrl]) if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
+      item._poster = result.poster
+      item._posterUrl = ''
+      item._url = `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(result.poster)}`
     }
-    throw new Error('视频保存超时，请稍后在草稿中确认')
+    item._status = 'done'
+    item._progress = null
+    item._needsFile = false; item._canRetry = false; item._errMsg = ''
+  }
+  async function runVideoTask(item, source, needsPoster) {
+    if (disposed || item._removed) return
+    const controller = new AbortController()
+    videoControllers.set(item, controller)
+    item._status = 'uploading'
+    item._needsFile = false; item._canRetry = false; item._errMsg = ''
+    let lastPaint = 0
+    const onState = (state) => {
+      if (disposed || item._removed) return
+      const newId = state.uploadId && item._videoJobId !== state.uploadId
+      if (state.uploadId) item._videoJobId = state.uploadId
+      const identityChanged = (state.clientUploadId && state.clientUploadId !== item._clientUploadId) || (state.fingerprint && state.fingerprint !== item._fingerprint)
+      if (state.clientUploadId) item._clientUploadId = state.clientUploadId
+      if (state.fingerprint) item._fingerprint = state.fingerprint
+      if (state.variants?.original) item._videoResult = state
+      item._progress = { ...state, loaded: state.loaded ?? state.received ?? 0 }
+      if (state.duration) item._duration = state.duration
+      if (newId || identityChanged) persistDraft()
+      const now = performance.now()
+      if (now - lastPaint < 100) return
+      lastPaint = now
+      renderPreviews()
+      updatePublishGuard()
+    }
+    persistDraft()
+    renderPreviews()
+    updatePublishGuard()
+    try {
+      if (!(await draftReady)) throw new Error('草稿初始化失败，请重新打开编辑器')
+      const options = { draftId, needsPoster, signal: controller.signal, onState, uploadId: item._videoJobId || '', clientUploadId: item._clientUploadId || '', fingerprint: item._fingerprint || '' }
+      const result = source ? await uploadVideo(source, options) : await waitForVideoUpload(item._videoJobId, options)
+      if (disposed || item._removed) return
+      applyVideoResult(item, result, needsPoster)
+    } catch (error) {
+      if (disposed || item._removed) return
+      item._status = 'error'
+      item._errMsg = error.message || '视频处理失败'
+      item._needsFile = Boolean(error.needsFile); item._canRetry = Boolean(error.canRetry)
+    } finally {
+      videoControllers.delete(item)
+      if (!disposed && !item._removed) { renderPreviews(); updatePublishGuard(); persistDraft() }
+    }
   }
 
-  async function uploadVideoFile(file, onProgress) {
-    const uploaded = await uploadWithProgress(`/api/uploads/video?draftId=${encodeURIComponent(draftId)}`, file, {
-      headers: { 'Content-Type': videoContentType(file) },
-      onProgress,
-    })
-    if (uploaded.status === 'saving' && uploaded.uploadId) return waitForVideoUpload(uploaded.uploadId)
-    if (uploaded.filename) return uploaded
-    throw new Error(uploaded.error || '视频上传没有返回结果')
-  }
-
-  // 视频不压缩不转码:先抽一帧做封面(列表只加载封面,不会为了显示格子去拉视频),
-  // 再把原文件按原始字节流上传。大文件刻意不写进 IndexedDB 草稿缓存 —— 手机浏览器配额撑不住 200MB 视频。
+  // 浏览器封面用于即时预览；不支持原件编码时仍上传，由服务端生成正式封面。
   async function processVideo(file) {
+    file._id ||= newDraftId()
     file._kind = 'video'
     file._status = 'processing'
     persistDraft()
@@ -905,70 +1011,16 @@ function createComposer(post, draftId, onDone, onCancel) {
     updatePublishGuard()
     try {
       const { duration, poster } = await readVideoPoster(file)
+      if (disposed || file._removed) return
       file._duration = duration
-      if (poster) {
-        file._posterUrl = URL.createObjectURL(poster)
-        file._url = file._posterUrl
-        const form = new FormData()
-        form.append('image', poster)
-        form.append('draftId', draftId)
-        const uploaded = await api('/api/uploads', { method: 'POST', body: form })
-        file._poster = uploaded.filename
-      }
-      file._status = 'uploading'
-      file._progress = { loaded: 0, total: file.size, phase: 'uploading' }
-      renderPreviews()
-      let lastPaint = 0
-      const uploaded = await uploadVideoFile(file, ({ loaded, total }) => {
-        file._progress = { loaded, total: total || file.size, phase: 'uploading' }
-        const now = performance.now()
-        if (now - lastPaint < 100) return
-        lastPaint = now
-        renderPreviews()
-      })
-      file._progress = { loaded: uploaded.size || file.size, total: uploaded.size || file.size, phase: 'saving' }
-      renderPreviews()
-      file._name = uploaded.filename
-      file._status = 'done'
-      file._progress = null
-    } catch (e) {
-      file._status = 'error'
-      file._errMsg = e.message || '视频处理失败'
-    }
-    renderPreviews()
-    updatePublishGuard()
-    persistDraft()
+      if (poster) { file._posterUrl = URL.createObjectURL(poster); file._url = file._posterUrl }
+    } catch { /* 原件无法在浏览器解码时，正式探测与封面交由服务器处理。 */ }
+    if (!disposed && !file._removed) await runVideoTask(file, file, true)
   }
 
-  // 实况图的配对视频:跟着静帧一起传,发布时用文件名把两者挂在一起
   async function attachMotion(still, motionFile) {
     still._motion = { _id: newDraftId(), name: motionFile.name, _status: 'uploading' }
-    persistDraft()
-    renderPreviews()
-    updatePublishGuard()
-    try {
-      still._motion._progress = { loaded: 0, total: motionFile.size, phase: 'uploading' }
-      renderPreviews()
-      let lastPaint = 0
-      const uploaded = await uploadVideoFile(motionFile, ({ loaded, total }) => {
-        still._motion._progress = { loaded, total: total || motionFile.size, phase: 'uploading' }
-        const now = performance.now()
-        if (now - lastPaint < 100) return
-        lastPaint = now
-        renderPreviews()
-      })
-      still._motion._progress = { loaded: uploaded.size || motionFile.size, total: uploaded.size || motionFile.size, phase: 'saving' }
-      renderPreviews()
-      still._motion._name = uploaded.filename
-      still._motion._status = 'done'
-      still._motion._progress = null
-    } catch (e) {
-      still._motion._status = 'error'
-      still._motion._errMsg = e.message || '实况视频上传失败'
-    }
-    renderPreviews()
-    updatePublishGuard()
-    persistDraft()
+    await runVideoTask(still._motion, motionFile, false)
   }
 
   // 选完图立刻处理(HEIC 转码 + 压缩)并上传到存储后端,发布时只提交文件名
@@ -1005,15 +1057,23 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   function uploadProgressText(item) {
     const progress = item._progress
-    if (progress?.total > 0) {
-      const label = progress.phase === 'saving' ? '正在保存到 WebDAV' : '上传中'
-      return `${label} ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
+    const labels = { hashing: '校验原文件', connection: '等待网络恢复', receiving: '接收原文件', queued: '原件已接收，等待处理', verifying_source: '验证原文件', saving_original: '保存原文件', probing: '读取视频信息', planning: '建立检查点', audio: '处理音轨', merging: '合并视频', comparing: '对比两份版本', saving_compressed: '保存压缩版本', compressing: '压缩中', remuxing: '优化视频封装', validating: '校验压缩结果', poster: '生成视频封面', registering: '登记视频结果', saving: '保存中', waiting: '处理已暂停' }
+    if (progress && labels[progress.phase]) {
+      const label = progress.phase === 'saving' && progress.backend === 'webdav' ? '正在保存到 WebDAV' : labels[progress.phase]
+      if (['compressing', 'remuxing'].includes(progress.phase)) {
+        const estimate = Number.isFinite(progress.estimatedRemainingMs)
+          ? `预计剩余约 ${formatVideoElapsed(progress.estimatedRemainingMs)}` : '预计时间计算中…'
+        return `${label} ${Math.floor(progress.progress || 0)}% · ${estimate}`
+      }
+      return label
     }
+    if (progress?.total > 0) return `上传中 ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
     return STATUS_TEXT[item._status] || '上传中'
   }
 
   function renderPreviews() {
     previews.innerHTML = ''
+    videoResults.replaceChildren()
     const rows = [
       ...keepImages.map((img) => [keepImages, img]),
       ...newFiles.map((f) => [newFiles, f]),
@@ -1052,6 +1112,13 @@ function createComposer(post, draftId, onDone, onCancel) {
         }
       }
       $('.remove', node).onclick = () => {
+        item._removed = true
+        if (item._motion) item._motion._removed = true
+        for (const video of [item, item._motion]) {
+          if (!video) continue
+          videoControllers.get(video)?.abort()
+          if (video._videoJobId) cancelVideoUpload(video._videoJobId).catch((error) => { errorLine.textContent = `取消视频失败：${error.message}` })
+        }
         for (const url of [item._url, item._posterUrl]) {
           if (url && url.startsWith('blob:')) URL.revokeObjectURL(url)
         }
@@ -1069,16 +1136,73 @@ function createComposer(post, draftId, onDone, onCancel) {
         persistDraft()
       }
       previews.appendChild(node)
+      for (const video of [item, item._motion]) {
+        const result = video?._videoResult
+        if (video?._progress && video._status === 'uploading') {
+          const line = el('<p></p>')
+          line.textContent = `${video.name || '视频'}：${uploadProgressText(video)}。原件上传后会先保存，后台继续处理。`
+          videoResults.appendChild(line)
+        }
+        if (video?._needsFile || video?._canRetry) {
+          const line = el('<p></p>'), button = el('<button class="btn btn-ghost" type="button"></button>')
+          button.textContent = video._needsFile ? '选择原件续传' : '从检查点重试'
+          button.onclick = async () => {
+            if (video._needsFile) {
+              const input = document.createElement('input'); input.type = 'file'; input.accept = 'video/*,.mov,.mp4,.webm'
+              input.onchange = () => { if (input.files[0]) runVideoTask(video, input.files[0], video === item && kind === 'video') }
+              input.click()
+            } else {
+              button.disabled = true
+              try { await retryVideoUpload(video._videoJobId); runVideoTask(video, null, video === item && kind === 'video') }
+              catch (error) { errorLine.textContent = error.message; button.disabled = false }
+            }
+          }
+          line.append(button); videoResults.appendChild(line)
+        }
+        if (!result || !['done', 'error', 'selecting'].includes(video._status)) continue
+        const line = el('<div class="video-comparison"></div>')
+        const summary = el('<p></p>')
+        summary.textContent = `${video.name || '视频'}：${result.message || ''}${Number.isFinite(result.totalElapsedMs) ? ` · 总计 ${formatVideoElapsed(result.totalElapsedMs)}` : ''}`
+        line.append(summary)
+        for (const [variant, label] of [['original', '原文件'], ['compressed', '压缩版本']]) {
+          const version = result.variants?.[variant]
+          if (!version) continue
+          const row = el('<p></p>')
+          row.textContent = `${label}：${formatVideoBytes(version.size)} · ${version.codec || '待探测'} · ${version.width || '?'}×${version.height || '?'} · ${Number(version.rate || 0).toFixed(2)}fps · ${version.bitDepth || '?'}bit · ${version.hdr ? 'HDR' : 'SDR'}${result.recommendedVariant === variant ? ' · 推荐' : ''}`
+          if (result.canSelect && version.available !== false && version.codec) {
+            const choose = el('<button class="btn btn-ghost" type="button"></button>')
+            choose.textContent = result.selectedVariant === variant && video._status === 'done' ? '已采用' : `采用${label}`
+            choose.disabled = video._status === 'selecting' || (result.selectedVariant === variant && video._status === 'done')
+            choose.onclick = async () => {
+              video._status = 'selecting'; renderPreviews(); updatePublishGuard()
+              try { const chosen = await selectVideoVariant(video._videoJobId, variant); if (disposed || video._removed) return; applyVideoResult(video, chosen, video === item && kind === 'video') }
+              catch (error) { if (!disposed && !video._removed) { video._status = result.status === 'failed' ? 'error' : 'done'; errorLine.textContent = error.message } }
+              finally { if (!disposed && !video._removed) { renderPreviews(); updatePublishGuard(); persistDraft() } }
+            }
+            row.append(' ', choose)
+          }
+          line.append(row)
+        }
+        if (result.comparison?.compressed) {
+          const details = el('<p></p>'), saved = result.comparison.savingPercent
+          details.textContent = `${saved >= 0 ? '节省' : '增大'} ${Math.abs(saved).toFixed(1)}% · 压缩后/原件 ${(result.comparison.compressionRatio * 100).toFixed(1)}%。${result.comparison.changes.join('；')}`
+          line.append(details)
+        }
+        videoResults.appendChild(line)
+      }
     }
+    videoResults.hidden = videoResults.childElementCount === 0
   }
 
   // 发布守卫:任一媒体(含实况配对视频)还在处理或上传中则禁用发布
-  const MEDIA_PENDING = ['processing', 'uploading']
+  const MEDIA_PENDING = ['processing', 'uploading', 'selecting']
+  const videoUnresolved = () => newFiles.some((file) => (file._kind === 'video' && file._status === 'error') || file._motion?._status === 'error')
   function updatePublishGuard() {
     const pending = newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))
     const generating = imageTask && ['queued', 'running', 'uploading'].includes(imageTask.status)
-    submitBtn.disabled = pending || generating
-    if (pending) submitBtn.textContent = '图片上传中…'
+    submitBtn.disabled = pending || generating || videoUnresolved()
+    if (videoUnresolved()) submitBtn.textContent = '请处理或移除失败视频'
+    else if (pending) submitBtn.textContent = '媒体处理中…'
     else if (generating) submitBtn.textContent = 'AI 配图生成中…'
     else submitBtn.textContent = post ? '保存' : '发布'
   }
@@ -1121,7 +1245,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       errorLine.textContent = '写点什么或传张图吧'
       return
     }
-    if (newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))) return
+    if (videoUnresolved() || newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))) return
     submitBtn.disabled = true
     submitBtn.textContent = '发布中…'
     errorLine.textContent = ''
@@ -1302,6 +1426,8 @@ function renderComments(p) {
 
   function openComposer(comment = null) {
     if (!form || !input) return
+    activeInlineComposerCleanup?.()
+    activeInlineComposerCleanup = attachInlineInputViewport(form, input)
     setReplyTarget(comment)
     animatePresence(wrap, true, { className: 'panel-presence', duration: 200 })
     animatePresence(form, true, { className: 'panel-presence', duration: 180 })
@@ -1378,7 +1504,7 @@ function renderComments(p) {
   if (site.user) {
     form = $('.comment-form', wrap)
     replyState = el('<div class="comment-reply-state" hidden><span class="comment-reply-target"></span><button class="comment-reply-cancel" type="button" title="取消回复" aria-label="取消回复">&times;</button></div>')
-    input = el('<input class="comment-input" placeholder="写条评论…" maxlength="500" />')
+    input = el(`<input class="comment-input" type="text" name="comment-${p.id}" aria-label="评论内容" placeholder="写条评论…" maxlength="500" />`)
     const emojiBtn = el(`<button class="emoji-toggle" type="button" title="表情" aria-label="插入表情">${icon('smile')}</button>`)
     attachEmojiButton(emojiBtn, input)
     const btn = el('<button class="btn tiny">评论</button>')
@@ -1483,7 +1609,7 @@ function mediaTile(media) {
 function mediaTileAction(tile, media, photos) {
   const hit = $('.media-hit', tile)
   if (media.type === 'video') {
-    hit.onclick = () => playInlineVideo(tile, media, { onError: () => showToast('这个视频的编码浏览器放不了') })
+    hit.onclick = () => playInlineVideo(tile, media, { onError: () => showToast('浏览器或设备无法解码此视频，请尝试支持 HEVC 的浏览器或设备') })
     // 收起按钮是点击层的兄弟节点(不能套在按钮里),事件不会冒泡过去,得单独接
     $('.media-collapse', tile).onclick = () => stopInlineVideo()
     return hit
@@ -1902,7 +2028,7 @@ async function openAvatarCropper(file, onConfirm, onCancel) {
 
 // ---------- 账号视图(修改登录账号、显示名称与密码) ----------
 
-function renderAccount() {
+function renderAccount({ backHref = '#/', backLabel = '返回时间轴' } = {}) {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
@@ -1911,7 +2037,7 @@ function renderAccount() {
   const page = el(`
     <div class="account-page">
       <header class="account-page-header">
-        <a class="account-back" href="#/" aria-label="返回时间轴" title="返回时间轴">${icon('arrow-left')}</a>
+        <a class="account-back" href="${backHref}" aria-label="${backLabel}" title="${backLabel}">${icon('arrow-left')}</a>
         <h1 tabindex="-1">个人资料</h1>
       </header>
 
@@ -1951,6 +2077,16 @@ function renderAccount() {
         </div>
       </form>
     </div>`)
+
+  if (backHref === '#/settings') {
+    $('.account-back', page).onclick = (event) => {
+      if (!plainNavigation(event)) return
+      event.preventDefault()
+      const source = history.state?.profileReturn
+      if (source?.route === location.hash && source.from === backHref) history.back()
+      else location.replace(backHref)
+    }
+  }
 
   const profileForm = $('.profile-form', page)
   const usernameInput = $('[name=username]', profileForm)
@@ -2156,15 +2292,50 @@ function renderSiteSettingsCard() {
 
 }
 
+async function renderVideoSettingsCard() {
+  const pageHash = location.hash
+  const pageHeader = $('.settings-subpage-header', main)
+  let config
+  try { config = await getVideoUploadConfig() }
+  catch (error) { if (location.hash === pageHash && main.contains(pageHeader)) appendSettingsItem(el(`<p class="form-error">${esc(error.message)}</p>`)); return }
+  if (location.hash !== pageHash || !main.contains(pageHeader)) return
+  const card = el(`<section class="settings-card video-settings">
+    <h2>视频压缩</h2>
+    <p class="storage-hint">默认先保存原文件，再由后台自动压缩。完成后对比体积和规格，推荐版本自动采用；发布前仍可切换，未采用版本在发布或丢弃草稿时清理。</p>
+    <label class="row"><input name="videoEnabled" type="checkbox" ${config.enabled ? 'checked' : ''} /><span>自动压缩视频</span></label>
+    <p class="storage-hint">固定档位：1080p 30/60fps 为 25/35MB 每分钟；4K 30/60fps 为 85/120MB。1MB = 1,000,000 字节；预算包含音轨，实际体积随内容变化。</p>
+    <p class="storage-hint">保留分辨率与最高 ${esc(String(config.maxFps))}fps，不补低帧率；软件编码使用 Main10、CRF21/22、fast，硬件编码使用独立参数；音轨为 AAC 128kbps。播放需要设备支持 HEVC；压缩属于有损处理，不承诺画质无损。</p>
+    <p class="storage-hint">上传中断后重新选择同一原文件可续传；后台任务按检查点恢复。关闭压缩则直接采用原件。</p>
+    <div class="storage-status">视频工具：${config.available ? '已就绪' : esc(config.error)}；原文件上限 ${Math.round(config.maxBytes / 1024 / 1024)}MiB</div>
+    <div class="form-error" role="status"></div>
+    <div class="settings-actions"><span class="save-tip" hidden>已保存</span><button class="btn save" type="button">保存</button></div>
+  </section>`)
+  const enabled = $('[name=videoEnabled]', card)
+  enabled.onchange = () => { $('.save-tip', card).hidden = true }
+  $('.save', card).onclick = async () => {
+    const button = $('.save', card)
+    const error = $('.form-error', card)
+    error.textContent = ''
+    button.disabled = true
+    try {
+      await api('/api/uploads/video/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled.checked }) })
+      $('.save-tip', card).hidden = false
+    } catch (e) { error.textContent = e.message }
+    finally { button.disabled = false }
+  }
+  appendSettingsItem(card)
+}
+
 function renderSettingsSection(kind) {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
-  const titles = { site: '站点设置', ai: 'AI 设置', storage: '图片存储' }
+  const titles = { site: '站点设置', ai: 'AI 设置', storage: '图片存储', backup: '备份与恢复' }
   const header = el(`<header class="account-page-header settings-subpage-header"><a class="account-back" href="#/settings" aria-label="返回设置" title="返回设置">${icon('arrow-left')}</a><h1 tabindex="-1">${titles[kind]}</h1></header>`)
   main.appendChild(header)
-  if (kind === 'site') renderSiteSettingsCard()
+  if (kind === 'site') { renderSiteSettingsCard(); renderVideoSettingsCard() }
   else if (kind === 'ai') renderAiCards()
+  else if (kind === 'backup') renderBackupCard()
   else renderStorageCard()
   $('h1', header).focus()
 }
@@ -2199,9 +2370,16 @@ function renderSettings() {
   main.appendChild(el('<header class="page-heading settings-heading"><div><p>让日常，更合心意</p><h1>设置</h1></div></header>'))
   main.appendChild(renderThemeCard())
   const profileCard = el(`<section class="settings-card settings-profile">
-    <div class="settings-card-heading"><div><h2>个人资料</h2><p>头像和显示名称会展示给另一位成员及访客。</p></div><a class="btn-ghost" href="#/account">${icon('user')}<span>编辑资料</span></a></div>
+    <div class="settings-card-heading settings-profile-heading"><h2>个人资料</h2><a class="btn-ghost settings-profile-edit" href="#/settings/profile">${icon('user')}<span>编辑资料</span></a><p>头像和显示名称会展示给另一位成员及访客。</p></div>
     <div class="settings-profile-summary"><span class="settings-profile-avatar"></span><div><strong class="settings-profile-name"></strong><span class="settings-profile-username"></span></div></div>
   </section>`)
+  $('.settings-profile-edit', profileCard).onclick = (event) => {
+    if (!plainNavigation(event) || location.hash !== '#/settings') return
+    event.preventDefault()
+    const target = '#/settings/profile'
+    history.pushState({ profileReturn: { route: target, from: '#/settings' } }, '', target)
+    route()
+  }
   $('.settings-profile-avatar', profileCard).replaceWith(avatarNode(site.user.name, site.user.avatarUrl, 'settings-profile-avatar'))
   $('.settings-profile-name', profileCard).textContent = site.user.name
   $('.settings-profile-username', profileCard).textContent = `登录账号：${site.user.username || site.user.name}`
@@ -2213,13 +2391,15 @@ function renderSettings() {
     <p class="notification-help" aria-live="polite"></p>
   </section>`)
   const notificationAction = browserNotificationAction({ settings: true, help: $('.notification-help', notificationCard) })
-  $('.notification-action-slot', notificationCard).appendChild(notificationAction)
+  $('.notification-action-slot', notificationCard).appendChild(notificationAction.button)
+  activeSettingsCleanup = notificationAction.dispose
   main.appendChild(notificationCard)
 
   const sections = [
     ['#/settings/site', 'settings', '站点设置', '站名、纪念日和访客可见范围'],
     ['#/settings/ai', 'sparkles', 'AI 设置', '配置 AI 优化与 AI 配图的接口、模型和连接测试'],
     ['#/settings/storage', 'image', '图片存储', '选择本地磁盘或 WebDAV'],
+    ['#/settings/backup', 'settings', '备份与恢复', '自动备份到 WebDAV，导入数据库恢复'],
   ]
   for (const [href, iconName, title, description] of sections) {
     main.appendChild(el(`<a class="settings-link settings-card" href="${href}"><span class="settings-link-icon">${icon(iconName)}</span><span class="settings-link-copy"><strong>${title}</strong><small>${description}</small></span><span class="settings-link-arrow">${icon('arrow-right')}</span></a>`))
@@ -2229,7 +2409,7 @@ function renderSettings() {
   $('.settings-logout', accountActions).onclick = async () => {
     const button = $('.settings-logout', accountActions)
     button.disabled = true
-    await disablePush().catch(() => {})
+    await browserNotifications.disable().catch(() => {})
     await api('/api/logout', { method: 'POST' })
     location.reload()
   }
@@ -2240,9 +2420,36 @@ function appendSettingsItem(node) {
   main.appendChild(node)
 }
 
+function renderBackupCard() {
+  const view = createBackupSettings(async ({ safetyBackup }) => {
+    try {
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith(`compose-draft:${location.origin}:`) || key.startsWith(`compose-draft-id:${location.origin}:`)) localStorage.removeItem(key)
+      }
+      for (const key of Object.keys(sessionStorage)) if (key.startsWith('compose-draft:')) sessionStorage.removeItem(key)
+    } catch { /* 浏览器可能禁用本地存储，服务端恢复结果仍然有效。 */ }
+    try {
+      const database = await draftFileDb()
+      if (database) await new Promise((resolve, reject) => {
+        const transaction = database.transaction('files', 'readwrite')
+        transaction.objectStore('files').clear()
+        transaction.oncomplete = resolve
+        transaction.onerror = transaction.onabort = () => reject(transaction.error)
+      })
+    } catch { /* 缓存不可访问时继续重新登录，旧任务引用已在服务端失效。 */ }
+    const notice = `数据库已恢复，请使用导入库中的账号重新登录。恢复前副本：${safetyBackup}`
+    try { sessionStorage.setItem('database-restore-notice', notice) } catch { window.alert(notice) }
+    site.user = null
+    location.hash = '#/login'
+    location.reload()
+  })
+  appendSettingsItem(view.node)
+  activeSettingsCleanup = view.dispose
+}
+
 // AI 优化与 AI 配图共用一张接口配置卡:共享 API 可各自选模型,也可使用独立 API。
 // 两个模块的接口同形(GET/PUT 配置、POST /models、POST /test),文案与额外状态行由调用方给出。
-async function createApiConfigCard({ key, title, intro, path, modelHint, extraStatus = '', testMessage }) {
+async function createApiConfigCard({ key, title, intro, path, modelHint, extraStatus = '', testMessage, thinking = false }) {
   let s
   try {
     s = await api(path)
@@ -2283,6 +2490,16 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
         <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="${s.custom.hasApiKey ? '已保存，留空表示不修改' : 'sk-…'}" /></label>
       </div>
       <datalist id="${listId}"></datalist>
+      ${thinking ? `
+      <label>思考强度
+        <select name="thinking">
+          <option value="">不指定(跟随模型默认)</option>
+          <option value="middle">中</option>
+          <option value="high">高</option>
+          <option value="max">最高</option>
+        </select>
+      </label>
+      <div class="storage-hint">选中后会随请求发送 <code>reasoning_effort</code>,值越高思考越久、结果越稳;模型不支持该参数时会直接报错。</div>` : ''}
       ${typeof extraStatus === 'function' ? extraStatus(s) : extraStatus}
       <div class="settings-actions">
         <span class="save-tip" hidden>已保存</span>
@@ -2293,6 +2510,8 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
       <div class="form-error" role="status" aria-live="polite"></div>
     </div>`)
   const err = $('.form-error', card)
+  const thinkingSelect = $('[name=thinking]', card)
+  if (thinkingSelect) thinkingSelect.value = s.thinking || ''
   const sharedWrap = $('.llm-shared', card)
   const customWrap = $('.llm-custom', card)
   const selectedMode = () => $('[name=mode]:checked', card).value
@@ -2312,9 +2531,11 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
   const currentPayload = () => {
     const mode = selectedMode()
     const model = modelInput(mode).value
-    return mode === 'shared'
+    const payload = mode === 'shared'
       ? { mode, model, sharedBaseUrl: $('[name=sharedBaseUrl]', card).value, sharedApiKey: $('[name=sharedApiKey]', card).value }
       : { mode, model, baseUrl: $('[name=baseUrl]', card).value, apiKey: $('[name=apiKey]', card).value }
+    if (thinkingSelect) payload.thinking = thinkingSelect.value
+    return payload
   }
 
   for (const fetchButton of card.querySelectorAll('.fetch-models')) fetchButton.onclick = async () => {
@@ -2376,6 +2597,7 @@ async function renderAiCards() {
     intro: '在发布框点「AI 优化」即可调用，凭据只存本服务器。',
     path: '/api/llm',
     modelHint: 'gpt-4o-mini',
+    thinking: true,
     testMessage: () => ({ text: '连接成功' }),
   }))
 
@@ -2491,162 +2713,26 @@ function notificationTarget(postId, commentId) {
   window.focus?.()
 }
 
-// 浏览器系统通知走 Web Push:订阅交给服务端保存,新评论由服务端直接推给推送服务,
-// 页面切后台或整个关掉都能收到(轮询做不到这点),展示由 sw.js 的 push 事件负责。
-
-// applicationServerKey 只接受二进制,服务端给的是 base64url 公钥
-function base64UrlToBytes(value) {
-  const base64 = value.replace(/-/g, '+').replace(/_/g, '/')
-  const raw = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='))
-  return Uint8Array.from(raw, (ch) => ch.charCodeAt(0))
-}
-
-async function readyServiceWorker() {
-  let timer = null
-  let registration
-  try {
-    registration = await Promise.race([
-      Promise.resolve(serviceWorkerRegistration),
-      new Promise((resolve) => { timer = setTimeout(() => resolve(null), SERVICE_WORKER_READY_TIMEOUT_MS) }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-  return registration
-}
-
-async function currentPushSubscription() {
-  const registration = await readyServiceWorker()
-  return registration?.pushManager ? registration.pushManager.getSubscription() : null
-}
-
-async function savePushSubscription(subscription) {
-  await api('/api/push/subscribe', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(subscription.toJSON()),
-  })
-}
-
-async function enablePush() {
-  // 权限请求必须紧跟用户点击,移动端 Chrome 会拒绝跨过异步等待后的请求。
-  const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
-  if (permission !== 'granted') return false
-  const registration = await readyServiceWorker()
-  if (!registration?.pushManager) throw new Error('通知服务尚未就绪')
-  const { key } = await api('/api/push/key')
-  const subscription = await registration.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: base64UrlToBytes(key),
-  })
-  try {
-    await savePushSubscription(subscription)
-  } catch (e) {
-    // 服务端没存下就等于没开,留着浏览器侧的订阅只会让开关显示成已开启
-    await subscription.unsubscribe()
-    throw e
-  }
-  return true
-}
-
-// 登录后自动尝试一次通知订阅。浏览器若要求用户手势或策略阻止,保留菜单中的手动开关。
-async function autoEnablePush() {
-  if (!site?.user || !window.isSecureContext ||
-      !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator) ||
-      Notification.permission === 'denied') return
-  try {
-    const existing = await currentPushSubscription()
-    if (existing) {
-      // 浏览器订阅是设备级的,换账号后不能只看见已有订阅就返回,必须重新绑定当前用户。
-      await savePushSubscription(existing)
-      return
-    }
-    // 未决定时不在页面初始化阶段弹授权框,只由通知按钮触发。
-    if (Notification.permission === 'default') return
-    await enablePush()
-  } catch {
-    // 自动请求失败时不弹出错误,用户仍可从头像菜单手动开启。
-  }
-}
-
-async function disablePush() {
-  const subscription = await currentPushSubscription()
-  if (!subscription) return
-  let failure = null
-  try {
-    await api('/api/push/unsubscribe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ endpoint: subscription.endpoint }),
-    })
-  } catch (e) {
-    failure = e
-  } finally {
-    // 服务端失败也必须清掉本地订阅,否则下一个登录账号会复用旧账号的 endpoint。
-    try { await subscription.unsubscribe() } catch (e) { if (!failure) failure = e }
-  }
-  if (failure) throw failure
-}
-
-function notificationEnvironment() {
-  if (!window.isSecureContext) return { supported: false, label: '通知需要 HTTPS', help: '请使用 HTTPS 地址打开此站点。' }
-  const ios = /iPad|iPhone|iPod/.test(navigator.platform) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform))
-  const standalone = window.matchMedia?.('(display-mode: standalone)').matches || window.navigator.standalone
-  if (ios && !standalone) return { supported: false, label: '请添加到主屏幕后开启', help: 'iPhone 请从分享菜单添加到主屏幕，再从主屏幕打开此站点。' }
-  if (!('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator)) {
-    return { supported: false, label: '浏览器不支持通知', help: '请更新浏览器，或使用支持 Web Push 的浏览器。' }
-  }
-  return { supported: true, help: '允许后，另一位成员发表评论时会提醒你。' }
-}
-
+// 两个通知入口仅订阅共享状态，权限、查询与推送操作统一由模块管理。
 function browserNotificationAction({ settings = false, help = null } = {}) {
   const button = el(settings
-    ? `<button class="btn-ghost notification-toggle" type="button" disabled>${icon('bell')}<span>开启浏览器通知</span></button>`
-    : `<button class="dropdown-item browser-notify" type="button" disabled>${icon('bell')}<span>开启浏览器通知</span></button>`)
+    ? `<button class="btn-ghost notification-toggle" type="button">${icon('bell')}<span></span></button>`
+    : `<button class="dropdown-item browser-notify" type="button">${icon('bell')}<span></span></button>`)
   const label = $('span', button)
-  const environment = notificationEnvironment()
-  const setHelp = (message) => { if (help) help.textContent = message }
-  if (!environment.supported) {
-    label.textContent = environment.label
-    setHelp(environment.help)
-    return button
-  }
-  if (Notification.permission === 'denied') {
-    label.textContent = '通知权限已被阻止'
-    setHelp('请在浏览器的站点设置中允许通知，再回到这里重试。')
-    return button
-  }
-
-  const sync = async () => {
-    try {
-      const subscribed = Boolean(await currentPushSubscription())
-      label.textContent = subscribed ? '关闭浏览器通知' : '开启浏览器通知'
-      setHelp(subscribed ? '已开启。另一位成员发表评论时会提醒你。' : environment.help)
-    } catch {
-      label.textContent = '通知暂时不可用'
-      setHelp('Service Worker 尚未就绪，请稍后重试。')
-    } finally {
-      button.disabled = false
+  const dispose = browserNotifications.subscribe((state) => {
+    label.textContent = state.label
+    button.disabled = !state.supported || state.permission === 'denied' || state.busy
+    button.setAttribute('aria-busy', String(state.busy))
+    button.setAttribute('aria-pressed', String(state.permission === 'granted' && state.subscribed === true))
+    button.title = state.help
+    if (help) {
+      help.textContent = state.help
+      if (!settings) help.hidden = !state.error
     }
-  }
-  // 状态查询可以后台完成,按钮必须立即可点以保留移动端的用户手势。
-  button.disabled = false
-  button.onclick = async () => {
-    button.disabled = true
-    label.textContent = '处理中…'
-    try {
-      // permission 为 default 时不能先 await getSubscription,否则会丢失移动端用户手势。
-      if (Notification.permission === 'default') {
-        if (!await enablePush()) setHelp('未获得通知权限，可在浏览器站点设置中重新允许。')
-      } else if (await currentPushSubscription()) await disablePush()
-      else if (!await enablePush()) setHelp('未获得通知权限，可在浏览器站点设置中重新允许。')
-    } catch (e) {
-      setHelp(e.message || '无法开启通知，请稍后重试。')
-    }
-    await sync()
-  }
-  sync()
-  return button
+  })
+  // 错误已广播到两个入口；不在单个按钮上另存一份状态。
+  button.onclick = () => { void browserNotifications.toggle().catch(() => {}) }
+  return { button, dispose }
 }
 
 function renderNotifyBell() {
@@ -2720,6 +2806,8 @@ function renderNotifyBell() {
 }
 
 function renderUserArea() {
+  activeUserNotificationCleanup?.()
+  activeUserNotificationCleanup = null
   const area = $('#userArea')
   area.innerHTML = ''
   if (!site.user) {
@@ -2738,6 +2826,7 @@ function renderUserArea() {
       <div class="dropdown" hidden>
         <div class="dropdown-name">${esc(site.user.name)}</div>
         <div class="browser-notify-slot"></div>
+        <p class="notification-help browser-notify-help" aria-live="polite" hidden></p>
         <a href="#/account" class="dropdown-item">${icon('user')}<span>个人资料</span></a>
         <a href="#/settings" class="dropdown-item">${icon('settings')}<span>设置</span></a>
         <button class="dropdown-item logout">${icon('log-out')}<span>退出登录</span></button>
@@ -2746,7 +2835,9 @@ function renderUserArea() {
   const btn = $('.avatar-btn', menu)
   const drop = $('.dropdown', menu)
   $('.user-avatar-slot', menu).replaceWith(avatarNode(site.user.name, site.user.avatarUrl, 'small'))
-  $('.browser-notify-slot', menu).replaceWith(browserNotificationAction())
+  const notificationAction = browserNotificationAction({ help: $('.browser-notify-help', menu) })
+  $('.browser-notify-slot', menu).replaceWith(notificationAction.button)
+  activeUserNotificationCleanup = notificationAction.dispose
   btn.onclick = (e) => {
     e.stopPropagation()
     const open = drop.hidden || !drop.classList.contains('menu-presence-present') || drop.classList.contains('menu-presence-closing')
@@ -2757,11 +2848,15 @@ function renderUserArea() {
   menu.querySelectorAll('.dropdown-item[href]').forEach((a) => (a.onclick = () => closeDropdowns()))
   $('.logout', menu).onclick = async () => {
     // 先退订再退出:退订接口需要登录态,且不能让已登出的账号继续往这台设备推通知
-    await disablePush().catch(() => {})
+    await browserNotifications.disable().catch(() => {})
     await api('/api/logout', { method: 'POST' })
     location.reload()
   }
   area.appendChild(menu)
+}
+
+function plainNavigation(event) {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
 }
 
 function route() {
@@ -2782,7 +2877,8 @@ function route() {
   })
   if (hash === '#/login') return site.user ? (location.hash = '#/') : renderLogin()
   if (hash === '#/account') return renderAccount()
-  const settingsMatch = hash.match(/^#\/settings\/(site|ai|storage)$/)
+  if (hash === '#/settings/profile') return renderAccount({ backHref: '#/settings', backLabel: '返回设置' })
+  const settingsMatch = hash.match(/^#\/settings\/(site|ai|storage|backup)$/)
   if (settingsMatch) return renderSettingsSection(settingsMatch[1])
   if (hash === '#/settings') return renderSettings()
   const postMatch = hash.match(/^#\/post\/(\d+)(?:\?comment=(\d+))?$/)
@@ -2831,8 +2927,10 @@ async function init() {
     serviceWorkerRegistration = navigator.serviceWorker
       .register('/sw.js')
       .then(() => navigator.serviceWorker.ready)
+      .then((registration) => { void browserNotifications.refresh(); return registration })
       .catch(() => null)
   }
+  browserNotifications.start()
   renderUserArea()
   document.querySelectorAll('.mobile-nav [data-icon]').forEach((node) => { node.innerHTML = icon(node.dataset.icon) })
   $('.mobile-compose').onclick = (event) => {
@@ -2844,7 +2942,16 @@ async function init() {
     openComposerModal(null, event.currentTarget)
   }
   route()
-  if (site.user) autoEnablePush()
+  try {
+    const notice = sessionStorage.getItem('database-restore-notice')
+    if (notice) {
+      const message = el('<p class="storage-hint" role="status"></p>')
+      message.textContent = notice
+      main.prepend(message)
+      sessionStorage.removeItem('database-restore-notice')
+    }
+  } catch { /* 浏览器未启用会话存储时仍可正常登录。 */ }
+  if (site.user) void browserNotifications.autoEnable().catch(() => {})
 }
 
 window.addEventListener('hashchange', route)

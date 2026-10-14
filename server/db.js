@@ -1,6 +1,6 @@
 // 数据库初始化与账号种子逻辑,全部持久化数据落在 DATA_DIR
 import { DatabaseSync } from 'node:sqlite'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, existsSync, readFileSync, writeFileSync, copyFileSync, renameSync, unlinkSync, openSync, closeSync, fsyncSync } from 'node:fs'
 import { scryptSync, randomBytes, timingSafeEqual } from 'node:crypto'
 import path from 'node:path'
 import { configValue, PROJECT_ROOT } from './config.js'
@@ -15,8 +15,11 @@ mkdirSync(UPLOAD_DIR, { recursive: true })
 mkdirSync(AVATAR_DIR, { recursive: true })
 mkdirSync(TMP_DIR, { recursive: true })
 
-export const db = new DatabaseSync(path.join(DATA_DIR, 'blog.db'))
+export const DB_PATH = path.join(DATA_DIR, 'blog.db')
+export const RESTORE_MARKER = path.join(DATA_DIR, '.restore-state.json')
+export let db
 
+export function initializeDatabase(db, { seed = true } = {}) {
 db.exec(`
   PRAGMA journal_mode = WAL;
   -- SQLite 默认不启用外键,不开则 ON DELETE CASCADE 全部失效(孤儿数据只能手动清)
@@ -132,6 +135,35 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_image_jobs_user ON image_jobs(user_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_image_jobs_draft ON image_jobs(draft_id, status);
+  CREATE TABLE IF NOT EXISTS video_jobs (
+    id           TEXT PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    draft_id     TEXT,
+    status       TEXT NOT NULL,
+    snapshot     TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_video_jobs_draft ON video_jobs(user_id, draft_id, created_at);
+  CREATE TABLE IF NOT EXISTS video_chunks (
+    job_id TEXT NOT NULL REFERENCES video_jobs(id) ON DELETE CASCADE,
+    offset INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (job_id, offset)
+  );
+  CREATE TABLE IF NOT EXISTS video_artifacts (
+    job_id TEXT NOT NULL REFERENCES video_jobs(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    PRIMARY KEY (job_id, name)
+  );
+  CREATE TABLE IF NOT EXISTS video_upload_keys (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    job_id TEXT NOT NULL UNIQUE REFERENCES video_jobs(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, client_id)
+  );
 `)
 
 // 旧库迁移:早期 users.name 同时承担登录账号和显示名称,先复制为 username
@@ -199,6 +231,8 @@ if (!commentColumns.some((col) => col.name === 'reply_to')) {
   db.exec('ALTER TABLE comments ADD COLUMN reply_to INTEGER')
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_comments_reply_to ON comments(reply_to)')
+  if (seed) seedAccounts(db)
+}
 
 export function hashPassword(password) {
   const salt = randomBytes(16).toString('hex')
@@ -215,6 +249,7 @@ export function verifyPassword(password, stored) {
 }
 
 // 首次启动(数据库为空)时写入固定初始账号,登录后请立即修改密码
+function seedAccounts(db) {
 const userCount = db.prepare('SELECT COUNT(*) AS c FROM users').get().c
 if (userCount === 0) {
   const insert = db.prepare('INSERT INTO users (username, name, pass_hash) VALUES (?, ?, ?)')
@@ -223,6 +258,67 @@ if (userCount === 0) {
     console.log(`已创建初始账号: ${username}`)
   }
 }
+}
+
+// 切换记录先于数据库替换持久化；未提交的切换在下次启动时回退。
+export function syncFile(filename) {
+  const fd = openSync(filename, 'r')
+  try { fsyncSync(fd) } finally { closeSync(fd) }
+}
+
+export function removeDatabaseSidecars(filename = DB_PATH) {
+  for (const suffix of ['-wal', '-shm', '-journal']) {
+    try { unlinkSync(filename + suffix) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+}
+
+export function writeRestoreMarker(state) {
+  const temp = RESTORE_MARKER + '.tmp'
+  writeFileSync(temp, JSON.stringify(state), { mode: 0o600 })
+  syncFile(temp)
+  renameSync(temp, RESTORE_MARKER)
+  syncFile(DATA_DIR)
+}
+
+export function clearRestoreMarker() {
+  unlinkSync(RESTORE_MARKER)
+  syncFile(DATA_DIR)
+}
+
+export function recoverInterruptedRestore() {
+  if (!existsSync(RESTORE_MARKER)) return
+  const state = JSON.parse(readFileSync(RESTORE_MARKER, 'utf8'))
+  if (!/^before-restore-\d{8}-\d{6}-[a-f0-9-]{36}\.db$/.test(state.safetyBackup)
+    || !['prepared', 'committed'].includes(state.phase)) throw new Error('恢复阶段记录无效，拒绝打开数据库')
+  if (state.phase === 'prepared') {
+    const temp = path.join(DATA_DIR, '.restore-rollback.db')
+    copyFileSync(path.join(DATA_DIR, 'backups', state.safetyBackup), temp)
+    syncFile(temp)
+    removeDatabaseSidecars()
+    renameSync(temp, DB_PATH)
+    syncFile(DATA_DIR)
+    console.warn('已回退未完成的数据库恢复，恢复前副本仍保留')
+  }
+  clearRestoreMarker()
+}
+
+export function openDatabase() {
+  const connection = new DatabaseSync(DB_PATH)
+  try {
+    initializeDatabase(connection)
+    db = connection
+  } catch (error) { connection.close(); throw error }
+}
+
+export function closeDatabase() {
+  if (!db?.isOpen) return
+  const result = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+  if (result.busy) throw new Error('数据库仍被占用，无法关闭连接')
+  db.close()
+}
+
+recoverInterruptedRestore()
+openDatabase()
 
 // 站点设置:数据库可后台修改,优先于环境变量(环境变量视为初始值)
 export function getSetting(key, envFallback = '') {

@@ -212,6 +212,7 @@ function lengthPx(value) { const number = Number.parseFloat(value); return Numbe
 
 export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = null } = {}) {
   const mobile = window.matchMedia('(max-width: 559px)')
+  const coarse = window.matchMedia('(pointer: coarse)')
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
 
   // ---------- 容器变形(液态展开) ----------
@@ -241,8 +242,10 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
   const distance = () => morph
     ? Math.min(320, Math.max(120, dialog.offsetHeight * .3))
     : mobile.matches ? Math.min(96, Math.max(48, dialog.offsetHeight * .1)) : 24
-  // 变形路径展开与收起同速(用户要求一致,收起那档的手感已确认);没有触发元素的回退路径沿用原来的节奏。
-  const response = (closing) => morph ? .3 : mobile.matches ? .38 : .34
+  // 宽屏触屏(iPad 横屏等)展开时给材质变化更多时间,避免桌面布局下显得生硬;收起仍保持快速。
+  const response = (closing) => morph
+    ? closing ? .3 : coarse.matches && !mobile.matches ? .42 : .3
+    : mobile.matches ? .38 : .34
   let position = reduced.matches ? 0 : distance()
   let velocity = 0
   let pointer = null

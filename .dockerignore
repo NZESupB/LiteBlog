@@ -5,3 +5,26 @@ node_modules
 .github
 backups
 *.log
+
+# 系统残留
+.DS_Store
+
+# 代理工具配置
+.agentdocs
+.agents
+.claude
+.codex
+.workbuddy
+tests
+tools
+tmp
+work
+
+# 部署与说明文件,由宿主机使用,不进构建上下文
+docker-compose.yml
+docker-compose.yml.bak
+README.md
+AGENTS.md
+TODO
+visual-design-review.md
+.gitignore

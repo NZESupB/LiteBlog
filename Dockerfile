@@ -1,6 +1,15 @@
 FROM node:24-alpine
 
 WORKDIR /app
+# 视频压缩使用系统 FFmpeg，不增加 Node 依赖；构建时确认所需编码器与滤镜。
+RUN apk add --no-cache ffmpeg \
+    && ffprobe -version > /dev/null \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libx265' \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q ' aac ' \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q ' mjpeg ' \
+    && ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' zscale ' \
+    && ffmpeg -hide_banner -filters 2>/dev/null | grep -q ' tonemap '
+
 
 # 先装依赖以利用镜像层缓存
 COPY package.json package-lock.json ./

@@ -2,31 +2,30 @@
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { createHash, randomUUID, randomBytes } from 'node:crypto'
-import { createWriteStream, readFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
-import { Readable, Transform } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { AVATAR_DIR, TMP_DIR, db, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
+import { AVATAR_DIR, db, closeDatabase, hashPassword, verifyPassword, getSetting, setSetting, getUserSetting, setUserSetting } from './db.js'
 import { sessionMiddleware, requireAuth, createSession, clearSession } from './auth.js'
-import { LOCAL, WEBDAV, activeBackend, putImage, putFileFromTemp, getImage, openStream, deleteImage } from './storage.js'
+import { LOCAL, WEBDAV, activeBackend, putImage, getImage, openStream, deleteImage, reserveMediaName, releaseMediaName, storeNewMedia } from './storage.js'
 import { vapidPublicKey, saveSubscription, removeSubscription, pushToUser, isValidSubscription } from './push.js'
 import * as webdav from './webdav.js'
 import { llmApp } from './llm.js'
 import { imageJobsApp, ensureDraft, draftOwnedBy, abandonDraft, cleanupDraftUploads } from './image-jobs.js'
 import { configValue } from './config.js'
+import { videoJobsApp, draftVideoJobs, stopVideoJobs, assertVideoUploadSelected, cleanupPublishedVideoVersions } from './video-jobs.js'
+import { mediaDateParts } from './media-path.js'
+import { maintenanceMiddleware } from './maintenance.js'
+import { backupsApp, startBackupScheduler, stopBackupScheduler } from './backup.js'
 
 const PORT = Number(configValue('server.port', 3000)) || 3000
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MAX_AVATAR_BYTES = 10 * 1024 * 1024
-// 视频不转码原样上传,上限走配置(默认 200MB)
-const MAX_VIDEO_BYTES = Math.max(1, Math.trunc(Number(configValue('media.maxVideoBytes', 200 * 1024 * 1024)) || 200 * 1024 * 1024))
 const IMAGE_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' }
-const VIDEO_EXT = { 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm' }
 // 新格式 YYYYMMDD-HHMMSS-<hash8>,旧格式为 16 位内容哈希,两者都要能读
 const UPLOAD_NAME_RE = /^(?:[a-f0-9]{16}|\d{8}-\d{6}-[a-f0-9]{8}(?:-[a-zA-Z0-9-]+)?|ai-[a-zA-Z0-9-]+)\.(jpg|png|webp|gif|mp4|mov|webm)$/
 const MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm' }
@@ -34,14 +33,11 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm'])
 const isVideoName = (name) => VIDEO_EXTENSIONS.has(path.extname(String(name)).toLowerCase())
 const AVATAR_MIME_BY_EXT = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }
 const AVATAR_NAME_RE = /^avatar-\d+-\d+-[a-f0-9]{12}\.(jpg|png|webp)$/
-// 网盘里按时间查找方便:文件名带日期。用 Intl 取东八区,不依赖容器 tzdata
-const FILE_TZ_FORMAT = new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'Asia/Shanghai', hourCycle: 'h23',
-  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-})
 
 export const app = new Hono()
+app.use('*', maintenanceMiddleware)
 app.use('*', sessionMiddleware)
+app.route('/api/backups', backupsApp)
 
 // 站点配置:数据库可后台修改,config.json 作为初始值
 function siteConfig() {
@@ -364,12 +360,13 @@ app.post('/api/drafts', requireAuth, async (c) => {
   return c.json({ id: draftId })
 })
 
-app.get('/api/drafts/:id', requireAuth, (c) => {
+app.get('/api/drafts/:id', requireAuth, async (c) => {
   const draft = db.prepare('SELECT * FROM drafts WHERE id = ? AND user_id = ?').get(c.req.param('id'), c.get('user').id)
   if (!draft) return c.json({ error: '草稿不存在' }, 404)
   const pending = db.prepare('SELECT filename, hash, storage, draft_id, storage_path, created_at FROM pending_uploads WHERE draft_id = ? AND user_id = ? ORDER BY created_at, filename').all(draft.id, c.get('user').id)
   const jobs = db.prepare('SELECT id, status, filename, storage, storage_path, mime, error, created_at, updated_at, finished_at FROM image_jobs WHERE draft_id = ? AND user_id = ? ORDER BY created_at DESC').all(draft.id, c.get('user').id)
-  return c.json({ draft, pending, jobs })
+  const videoJobs = await draftVideoJobs(c.get('user').id, draft.id)
+  return c.json({ draft, pending, jobs, videoJobs })
 })
 
 app.delete('/api/drafts/:id', requireAuth, async (c) => {
@@ -391,8 +388,8 @@ app.get('/api/drafts/:id/preview/:name', requireAuth, async (c) => {
   }
 })
 
-function stampedName(hash, ext, unique = false) {
-  const p = Object.fromEntries(FILE_TZ_FORMAT.formatToParts(new Date()).map((x) => [x.type, x.value]))
+function stampedName(hash, ext, unique = false, time = Date.now()) {
+  const p = mediaDateParts(time)
   return `${p.year}${p.month}${p.day}-${p.hour}${p.minute}${p.second}-${hash.slice(0, 8)}${unique ? `-${randomUUID().slice(0, 8)}` : ''}${ext}`
 }
 
@@ -428,6 +425,8 @@ async function cleanupPendingUploads() {
 }
 
 app.post('/api/uploads', requireAuth, async (c) => {
+  const startedAt = Date.now()
+  const backend = activeBackend()
   await cleanupPendingUploads()
   const form = await c.req.formData()
   const file = form.get('image')
@@ -456,140 +455,42 @@ app.post('/api/uploads', requireAuth, async (c) => {
     if (!pendingAtName || sameDraft) exist = ownedImage
   }
 
-  const filename = exist ? exist.filename : stampedName(hash, ext, Boolean(
-    ownedImage
-      || db.prepare('SELECT 1 FROM images WHERE hash = ? LIMIT 1').get(hash)
-      || db.prepare('SELECT 1 FROM pending_uploads WHERE hash = ? LIMIT 1').get(hash),
-  ))
-  let storage = exist ? exist.storage : null
-  if (!exist) {
-    try {
-      storage = await putImage(filename, buf, MIME_BY_EXT[ext], filename)
-    } catch (e) {
-      console.warn(`上传图片 ${filename} 失败: ${e.message}`)
-      return c.json({ error: e.message }, 502)
+  let filename = exist?.filename
+  const storage = exist?.storage || backend
+  let storagePath = exist ? (exist.storage_path || filename) : null
+  try {
+    if (!exist) {
+      const unique = Boolean(ownedImage
+        || db.prepare('SELECT 1 FROM images WHERE hash = ? LIMIT 1').get(hash)
+        || db.prepare('SELECT 1 FROM pending_uploads WHERE hash = ? LIMIT 1').get(hash))
+      filename = reserveMediaName((attempt) => stampedName(hash, ext, unique || attempt > 0, startedAt))
+      storagePath = await storeNewMedia(filename, storage, startedAt,
+        (relativePath, options) => putImage(filename, buf, MIME_BY_EXT[ext], relativePath, storage, options))
     }
-  }
-  db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
-              storage_path = excluded.storage_path, created_at = datetime('now')`)
-    .run(filename, hash, storage, userId, draftId, exist?.storage_path || filename)
-  return c.json({ filename, url: `/uploads/${filename}` })
-})
-
-// 视频上传:原始字节流(不是 multipart),先流式落到 data/tmp 临时文件并边写边算 sha256、边校验上限,
-// 再转存到当前激活的存储后端。全程不把视频读进内存 —— 200MB 的片段读进内存会直接压垮最低配 VPS。
-// 服务器接收完成即先回 202;WebDAV 转存在后台继续,前端轮询状态,避免反向代理把长转存请求截成 504。
-const videoUploadJobs = new Map()
-const VIDEO_UPLOAD_RETENTION_MS = 60 * 60 * 1000
-function cleanupVideoUploadJobs() {
-  const now = Date.now()
-  for (const [id, job] of videoUploadJobs) {
-    if (job.status !== 'saving' && job.expiresAt <= now) videoUploadJobs.delete(id)
-  }
-}
-
-function videoUploadView(job) {
-  const view = { uploadId: job.id, status: job.status, size: job.size }
-  if (job.status === 'done' && job.filename) {
-    view.filename = job.filename
-    view.url = `/uploads/${job.filename}`
-  }
-  if (job.error) view.error = job.error
-  return view
-}
-
-async function persistVideoUpload(job) {
-  let storage = null
-  try {
-    storage = await putFileFromTemp(job.filename, job.tempPath, job.size, job.contentType, job.filename)
-    db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
-                storage_path = excluded.storage_path, created_at = datetime('now')`)
-      .run(job.filename, job.hash, storage, job.userId, job.draftId, job.filename)
-    await unlink(job.tempPath).catch(() => {})
-    job.storage = storage
-    job.status = 'done'
-    job.expiresAt = Date.now() + VIDEO_UPLOAD_RETENTION_MS
+    // 新文件不使用 UPSERT 覆盖归属；只有已验证的复用记录更新草稿信息。
+    if (exist) {
+      db.prepare(`INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(filename) DO UPDATE SET user_id = excluded.user_id, draft_id = excluded.draft_id,
+        storage_path = excluded.storage_path, created_at = datetime('now')`)
+        .run(filename, hash, storage, userId, draftId, storagePath)
+    } else {
+      db.prepare('INSERT INTO pending_uploads (filename, hash, storage, user_id, draft_id, storage_path) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(filename, hash, storage, userId, draftId, storagePath)
+    }
+    return c.json({ filename, url: `/uploads/${filename}` })
   } catch (error) {
-    if (storage) await deleteImage(job.filename, storage, job.filename).catch(() => {})
-    await unlink(job.tempPath).catch(() => {})
-    job.status = 'failed'
-    job.error = error.message
-    job.expiresAt = Date.now() + VIDEO_UPLOAD_RETENTION_MS
-    console.warn(`转存视频 ${job.filename} 失败: ${error.message}`)
+    if (!exist && storagePath && !isReferenced(filename)) {
+      await deleteImage(filename, storage, storagePath).catch((e) => console.warn(`清理上传图片失败: ${e.message}`))
+    }
+    console.warn(`上传图片 ${filename || ''} 失败: ${error.message}`)
+    return c.json({ error: error.message }, 502)
+  } finally {
+    if (!exist) releaseMediaName(filename)
   }
-}
-
-app.post('/api/uploads/video', requireAuth, async (c) => {
-  cleanupVideoUploadJobs()
-  const draftId = String(c.req.query('draftId') || '').trim() || null
-  if (draftId && !draftOwnedBy(c.get('user').id, draftId)) return c.json({ error: '草稿不存在或无权操作' }, 403)
-  const contentType = String(c.req.header('content-type') || '').split(';')[0].trim().toLowerCase()
-  const ext = VIDEO_EXT[contentType]
-  if (!ext) return c.json({ error: '不支持的视频格式,请上传 MP4 / MOV / WebM' }, 400)
-  if (Number(c.req.header('content-length') || 0) > MAX_VIDEO_BYTES) {
-    return c.json({ error: `单个视频不能超过 ${Math.round(MAX_VIDEO_BYTES / 1024 / 1024)}MB` }, 413)
-  }
-  if (!c.req.raw.body) return c.json({ error: '没有收到视频' }, 400)
-  await cleanupPendingUploads()
-
-  const tempPath = path.join(TMP_DIR, `${randomUUID()}.part`)
-  const hash = createHash('sha256')
-  let size = 0
-  let tooLarge = false
-  try {
-    await pipeline(
-      Readable.fromWeb(c.req.raw.body),
-      new Transform({
-        transform(chunk, _encoding, done) {
-          size += chunk.length
-          // 不信任客户端声明的 Content-Length:边写边校验,超限立刻中止并删除半截文件
-          if (size > MAX_VIDEO_BYTES) { tooLarge = true; done(new Error('VIDEO_TOO_LARGE')); return }
-          hash.update(chunk)
-          done(null, chunk)
-        },
-      }),
-      createWriteStream(tempPath),
-    )
-  } catch (e) {
-    await unlink(tempPath).catch(() => {})
-    if (tooLarge) return c.json({ error: `单个视频不能超过 ${Math.round(MAX_VIDEO_BYTES / 1024 / 1024)}MB` }, 413)
-    console.warn(`接收视频失败: ${e.message}`)
-    return c.json({ error: '视频上传中断,请重试' }, 400)
-  }
-  if (size === 0) {
-    await unlink(tempPath).catch(() => {})
-    return c.json({ error: '没有收到视频' }, 400)
-  }
-
-  // 视频不参与内容去重(文件名里放随机段),hash 仍记下来供以后排查与迁移使用
-  const digest = hash.digest('hex')
-  const filename = stampedName(randomBytes(8).toString('hex'), ext)
-  const id = randomUUID()
-  const job = {
-    id,
-    userId: c.get('user').id,
-    draftId,
-    filename,
-    tempPath,
-    size,
-    hash: digest,
-    contentType,
-    status: 'saving',
-    expiresAt: Date.now() + VIDEO_UPLOAD_RETENTION_MS,
-  }
-  videoUploadJobs.set(id, job)
-  void persistVideoUpload(job)
-  return c.json(videoUploadView(job), 202)
 })
 
-app.get('/api/uploads/video/:id', requireAuth, (c) => {
-  cleanupVideoUploadJobs()
-  const job = videoUploadJobs.get(c.req.param('id'))
-  if (!job || job.userId !== c.get('user').id) return c.json({ error: '上传任务不存在或已过期' }, 404)
-  return c.json(videoUploadView(job))
-})
+// 固定配置/初始化路径由视频子应用优先注册，接收后压缩与保存均在后台进行。
+app.route('/api/uploads/video', videoJobsApp)
 
 // 编辑框里点 × 撤掉还没发布的图:连带把网盘上的文件删掉。幂等
 app.delete('/api/uploads/:name', requireAuth, async (c) => {
@@ -613,6 +514,7 @@ function lookupUploadable(name, userId, draftId = null) {
       FROM images i JOIN posts p ON p.id = i.post_id
       WHERE i.filename = ? AND p.user_id = ? LIMIT 1`).get(name, userId)
   if (!row) throw new Error('媒体不存在或已过期,请重新上传')
+  assertVideoUploadSelected(userId, name)
   return row
 }
 
@@ -681,7 +583,7 @@ app.post('/api/posts', requireAuth, async (c) => {
   try {
     claimed = claimUploads(names, c.get('user').id, draftId)
   } catch (e) {
-    return c.json({ error: e.message }, 400)
+    return c.json({ error: e.message }, e.status || 400)
   }
   const publicText = body.publicText ? 1 : 0
   const publicImages = body.publicImages ? 1 : 0
@@ -700,6 +602,7 @@ app.post('/api/posts', requireAuth, async (c) => {
     db.exec('ROLLBACK')
     throw e
   }
+  await cleanupPublishedVideoVersions(c.get('user').id, claimed.flatMap((media) => [media.filename, media.motion?.filename].filter(Boolean))).catch((e) => console.warn(`清理未采用视频版本失败: ${e.message}`))
   if (draftId) await cleanupDraftUploads(c.get('user').id, draftId).catch((e) => console.warn(`清理未采用草稿媒体失败: ${e.message}`))
   return c.json({ id: Number(postId) })
 })
@@ -737,7 +640,7 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
   try {
     claimed = claimUploads(names, c.get('user').id, draftId)
   } catch (e) {
-    return c.json({ error: e.message }, 400)
+    return c.json({ error: e.message }, e.status || 400)
   }
 
   const removed = existing.filter((img) => !keep.includes(img.id))
@@ -757,6 +660,7 @@ app.put('/api/posts/:id', requireAuth, async (c) => {
     throw e
   }
   for (const img of removed) await removeMediaFiles(img)
+  await cleanupPublishedVideoVersions(c.get('user').id, claimed.flatMap((media) => [media.filename, media.motion?.filename].filter(Boolean))).catch((e) => console.warn(`清理未采用视频版本失败: ${e.message}`))
   if (draftId) await cleanupDraftUploads(c.get('user').id, draftId).catch((e) => console.warn(`清理未采用草稿媒体失败: ${e.message}`))
   return c.json({ ok: true })
 })
@@ -1128,7 +1032,24 @@ app.get('/manifest.webmanifest', (c) => {
 app.use('*', serveStatic({ root: './public' }))
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  serve({ fetch: app.fetch, port: PORT }, () => {
+  startBackupScheduler()
+  process.once('exit', stopBackupScheduler)
+  const server = serve({ fetch: app.fetch, port: PORT }, () => {
     console.log(`${siteConfig().title} 已启动: http://localhost:${PORT}`)
   })
+  let shutdownStarted = false
+  const shutdown = async () => {
+    if (shutdownStarted) return
+    shutdownStarted = true
+    stopBackupScheduler()
+    const closed = new Promise((resolve) => server.close(resolve))
+    try {
+      await stopVideoJobs()
+      server.closeAllConnections()
+      await closed
+      closeDatabase()
+    } catch (error) { console.error(`服务停止失败：${error.message}`); process.exitCode = 1 }
+  }
+  process.once('SIGTERM', shutdown)
+  process.once('SIGINT', shutdown)
 }

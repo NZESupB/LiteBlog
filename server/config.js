@@ -28,6 +28,7 @@ const ENV_KEYS = {
   'storage.webdav.username': 'WEBDAV_USERNAME',
   'storage.webdav.password': 'WEBDAV_PASSWORD',
   'storage.webdav.folder': 'WEBDAV_FOLDER',
+  'backup.maxImportBytes': 'BACKUP_MAX_IMPORT_BYTES',
   'ai.image.baseUrl': 'IMAGE_API_BASE_URL',
   'ai.image.model': 'IMAGE_MODEL',
   'ai.image.apiKey': 'IMAGE_API_KEY',
@@ -36,6 +37,12 @@ const ENV_KEYS = {
   'ai.llm.apiKey': 'LLM_API_KEY',
   'push.vapidSubject': 'VAPID_SUBJECT',
   'media.maxVideoBytes': 'MAX_VIDEO_BYTES',
+  'media.videoCompression': 'VIDEO_COMPRESSION',
+  'media.videoEncoder': 'VIDEO_ENCODER',
+  'media.videoThreads': 'VIDEO_THREADS',
+  'media.videoMaxJobs': 'VIDEO_MAX_JOBS',
+  'media.ffmpegPath': 'FFMPEG_PATH',
+  'media.ffprobePath': 'FFPROBE_PATH',
 }
 
 export function configValue(pathName, fallback = '') {
