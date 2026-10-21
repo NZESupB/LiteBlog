@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "notes": "零构建本地分发清单。SHA-256 对应本目录中的实际文件；应用自写组件位于 js/ui，不属于 vendor。",
+  "vendors": [
+    {
+      "name": "motion",
+      "version": "14.4.0",
+      "file": "motion.js",
+      "source": "https://registry.npmjs.org/motion/-/motion-14.4.0.tgz",
+      "upstreamFile": "package/dist/motion.js",
+      "license": "MIT",
+      "licenseFile": "motion.LICENSE",
+      "sha256": "4434f5f52912cf24bae1562b93572b8179be1b81d1ce77016977f4a632ba69e1",
+      "modifications": "官方 UMD 分发，未修改；仅由 index.html 加载一次。"
+    },
+    {
+      "name": "marked",
+      "version": "12.0.2",
+      "file": "marked.min.js",
+      "source": "https://github.com/markedjs/marked/tree/v12.0.2",
+      "license": "MIT",
+      "sha256": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894",
+      "modifications": "保留已有压缩分发；版本和许可证来自文件头，本次未更换文件。"
+    },
+    {
+      "name": "DOMPurify",
+      "version": "3.2.6",
+      "file": "purify.min.js",
+      "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.2.6.tgz",
+      "upstreamFile": "package/dist/purify.min.js",
+      "license": "(MPL-2.0 OR Apache-2.0)",
+      "sha256": "89e1fa7647cb495370d3a997ace4387f5d15d9f4c5af12352c53daa400956287",
+      "modifications": "与官方分发逐字节一致。"
+    },
+    {
+      "name": "Artplayer",
+      "version": "5.4.0",
+      "file": "artplayer.min.js",
+      "source": "https://github.com/zhw2590582/ArtPlayer/tree/v5.4.0",
+      "license": "MIT",
+      "sha256": "f1db1fa3406aa6d41baa7c554749429a8e79f99d56a794bde23345eb9c07573f",
+      "modifications": "保留已有完整压缩分发；播放能力的取舍由应用配置完成。"
+    },
+    {
+      "name": "heic2any",
+      "version": "0.0.4",
+      "file": "heic2any.min.js",
+      "source": "https://registry.npmjs.org/heic2any/-/heic2any-0.0.4.tgz",
+      "upstreamFile": "package/dist/heic2any.min.js",
+      "license": "MIT",
+      "sha256": "0963cfa50e9e1e7e6af929a40a81e3e898a673f1270eafa6917dd137e4968164",
+      "modifications": "与官方分发逐字节一致；仅原生 HEIC 解码失败时按需使用。"
+    },
+    {
+      "name": "Lucide",
+      "version": "local-subset-4b95f3190330",
+      "upstreamVersion": null,
+      "file": "icons.js",
+      "source": "https://github.com/lucide-icons/lucide",
+      "license": "ISC",
+      "sha256": "4b95f3190330dc51ed916eca22500f4198bc04b0e75554b9dfd9c98496046c4f",
+      "modifications": "项目维护的 SVG path 子集与 icon() 包装函数。历史文件未记录上游版本，使用内容哈希固定本地修订，不推测版本号。"
+    }
+  ]
+}

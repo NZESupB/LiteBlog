@@ -1,7 +1,12 @@
 // 前端逻辑:hash 路由 + 时间轴 / 相册 / 登录 / 账号 / 设置视图
-import { attachMdToolbar, attachEmojiButton, closeEmojiPanel } from '/vendor/md-toolbar.js'
+import { attachMdToolbar } from '/js/ui/md-toolbar.js'
+import { attachEmojiButton, closeEmojiPanel } from '/js/ui/emoji-picker.js'
 import { icon } from '/vendor/icons.js'
-import { animatePresence, attachSheetMotion } from '/js/sheet-motion.js'
+import { animatePresence, animateElement, motionEasing, motionTiming, revealElement, highlightElement, disposeAnimations, installPressMotion } from '/js/ui/motion.js'
+import { enterSettingsView, settingsTransition } from '/js/ui/settings-motion.js'
+import { attachSheetMotion } from '/js/ui/composer-morph.js'
+import { createDialog } from '/js/ui/dialog.js'
+import { openAvatarCropper as createAvatarCropper } from '/js/ui/avatar-cropper.js'
 import { attachComposerViewport, attachInlineInputViewport } from '/js/composer-viewport.js'
 import { api, streamSse, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
@@ -11,6 +16,9 @@ import { normalizeMediaFiles } from '/js/live-photo.js'
 import { uploadVideo, waitForVideoUpload, cancelVideoUpload, retryVideoUpload, selectVideoVariant, getVideoUploadConfig, formatVideoElapsed, formatVideoBytes } from '/js/video-upload.js'
 import { createBackupSettings } from '/js/backup-settings.js'
 import { createBrowserNotifications } from '/js/browser-notifications.js'
+import { createViewScope } from '/js/views/scope.js'
+import { createDraftStorage } from '/js/features/composer/draft-storage.js'
+import { createGalleryView } from '/js/views/gallery.js'
 const $ = (sel, el = document) => el.querySelector(sel)
 const main = $('#main')
 
@@ -27,13 +35,16 @@ function withinEditWindow(createdAt) {
 }
 let activePostMenu = null
 let activeInlineComposerCleanup = null
-let activeSettingsCleanup = null
 let serviceWorkerRegistration = null
 let activeUserNotificationCleanup = null
 const browserNotifications = createBrowserNotifications({ api, getRegistration: () => serviceWorkerRegistration, getUser: () => site?.user })
 let dayProgressTimer = null
 let hasRenderedView = false
-let pageTransitionToken = 0
+let viewScope = createViewScope()
+let renderedRoute = ''
+let settingsMotionKind = 'none'
+let settingsReturn = null
+let settingsPage = null
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (event) => {
@@ -75,7 +86,7 @@ document.addEventListener('click', () => closeDropdowns())
 const revealObserver = new IntersectionObserver((entries) => {
   for (const entry of entries) {
     if (!entry.isIntersecting) continue
-    entry.target.classList.add('in')
+    revealElement(entry.target)
     revealObserver.unobserve(entry.target)
   }
 }, { threshold: 0, rootMargin: '0px 0px -8% 0px' })
@@ -184,103 +195,16 @@ function newDraftId() {
   return globalThis.crypto?.randomUUID?.() || `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-function composeDraftKey(draftId) {
-  return `compose-draft:${location.origin}:${site?.user?.id || 'guest'}:${draftId}`
-}
-
-function readComposeState(draftId) {
-  try {
-    const raw = localStorage.getItem(composeDraftKey(draftId))
-    if (raw) return JSON.parse(raw)
-    // 早期草稿没有文章 ID,只迁移到新建草稿,不能覆盖已有动态的正文。
-    if (!String(draftId).startsWith('post-')) {
-      const legacy = sessionStorage.getItem(`compose-draft:${site?.user?.id || 'guest'}`)
-      return legacy ? { content: legacy } : null
-    }
-    return null
-  } catch { return null }
-}
-
-function saveComposeState(draftId, state) {
-  try {
-    localStorage.setItem(composeDraftKey(draftId), JSON.stringify({ ...state, savedAt: new Date().toISOString() }))
-    document.querySelector('.draft-save-state')?.replaceChildren(document.createTextNode('已保存到此浏览器'))
-  } catch {
-    document.querySelector('.draft-save-state')?.replaceChildren(document.createTextNode('浏览器缓存不可用'))
-  }
-}
-
-function clearComposeState(draftId) {
-  try {
-    localStorage.removeItem(composeDraftKey(draftId))
-    sessionStorage.removeItem(`compose-draft:${site?.user?.id || 'guest'}`)
-  } catch {}
-}
-
-let draftFileDbPromise = null
-function draftFileDb() {
-  if (draftFileDbPromise) return draftFileDbPromise
-  draftFileDbPromise = new Promise((resolve, reject) => {
-    if (!('indexedDB' in window)) { resolve(null); return }
-    const request = indexedDB.open('couple-blog-drafts', 1)
-    request.onupgradeneeded = () => request.result.createObjectStore('files', { keyPath: 'key' })
-    request.onsuccess = () => resolve(request.result)
-    request.onerror = () => reject(request.error)
-  }).catch(() => null)
-  return draftFileDbPromise
-}
-
-async function saveDraftFile(draftId, file) {
-  const db = await draftFileDb()
-  if (!db || !file?._id) return
-  await new Promise((resolve) => {
-    const tx = db.transaction('files', 'readwrite')
-    tx.objectStore('files').put({ key: `${draftId}:${file._id}`, draftId, id: file._id, name: file.name, type: file.type, blob: file })
-    tx.oncomplete = resolve; tx.onerror = resolve
-  })
-}
-
-async function loadDraftFiles(draftId) {
-  const db = await draftFileDb()
-  if (!db) return []
-  return new Promise((resolve) => {
-    const tx = db.transaction('files', 'readonly')
-    const request = tx.objectStore('files').getAll()
-    request.onsuccess = () => resolve(request.result.filter((row) => row.draftId === draftId).map((row) => Object.assign(new File([row.blob], row.name, { type: row.type }), { _id: row.id })))
-    request.onerror = () => resolve([])
-  })
-}
-
-async function clearDraftFiles(draftId) {
-  const db = await draftFileDb()
-  if (!db) return
-  await new Promise((resolve) => {
-    const tx = db.transaction('files', 'readwrite')
-    const store = tx.objectStore('files')
-    const request = store.getAllKeys()
-    request.onsuccess = () => {
-      for (const key of request.result) if (String(key).startsWith(`${draftId}:`)) store.delete(key)
-    }
-    tx.oncomplete = resolve; tx.onerror = resolve
-  })
-}
-
-async function removeDraftFile(draftId, fileId) {
-  const db = await draftFileDb()
-  if (!db || !fileId) return
-  await new Promise((resolve) => {
-    const tx = db.transaction('files', 'readwrite')
-    tx.objectStore('files').delete(`${draftId}:${fileId}`)
-    tx.oncomplete = resolve; tx.onerror = resolve
-  })
-}
+const { readComposeState, saveComposeState, clearComposeState, draftFileDb, saveDraftFile, loadDraftFiles, clearDraftFiles, removeDraftFile } = createDraftStorage(
+  () => site?.user?.id,
+  (saved) => document.querySelector('.draft-save-state')?.replaceChildren(document.createTextNode(saved ? '已保存到此浏览器' : '浏览器缓存不可用')),
+)
 
 let activeComposerModal = null
 function openComposerModal(post = null, source = null) {
   if (!site?.user) { location.hash = '#/login'; return }
   if (activeComposerModal) return
   const trigger = source instanceof HTMLElement ? source : document.activeElement instanceof HTMLElement ? document.activeElement : null
-  const scrollY = window.scrollY
   const draftId = post ? `post-${post.id}` : (() => {
     const key = `compose-draft-id:${location.origin}:${site.user.id}`
     try {
@@ -290,9 +214,9 @@ function openComposerModal(post = null, source = null) {
     } catch { return newDraftId() }
   })()
   let closeModal = () => {}
-  const overlay = el(`<div class="composer-overlay" role="dialog" aria-modal="true" aria-label="${post ? '编辑日常' : '写日常'}">
+  const overlay = el(`<dialog class="composer-overlay" aria-label="${post ? '编辑日常' : '写日常'}">
     <div class="composer-dialog"><button class="composer-grab" type="button" aria-label="收起写作面板，也可向下拖动"></button><button class="composer-close" type="button" aria-label="关闭">×</button><div class="composer-body"></div></div>
-  </div>`)
+  </dialog>`)
   const body = $('.composer-body', overlay)
   const card = createComposer(post, draftId, async (result = {}) => {
     closeModal(true)
@@ -312,53 +236,29 @@ function openComposerModal(post = null, source = null) {
   body.appendChild(card)
   const closeButton = $('.composer-close', overlay)
   const grabHandle = $('.composer-grab', overlay)
-  const onKeydown = (event) => {
-    if (event.key === 'Escape') { event.preventDefault(); closeModal(); return }
-    if (event.key !== 'Tab') return
-    const focusable = [...overlay.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])')].filter((node) => !node.disabled && node.getClientRects().length > 0)
-    if (!focusable.length) return
-    const first = focusable[0]
-    const last = focusable[focusable.length - 1]
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
-  }
   let motion = null
   let disposeViewport = null
-  const background = [main, $('.site-header'), $('.mobile-nav')].map((node) => ({ node, inert: node.inert }))
   const finishClose = () => {
     if (!overlay.isConnected) return
     motion?.dispose()
     disposeViewport?.()
     card.dispose?.()
-    document.removeEventListener('keydown', onKeydown)
-    for (const { node, inert } of background) node.inert = inert
-    document.body.classList.remove('modal-open')
-    overlay.remove()
+    closeEmojiPanel(true)
+    modal.dispose()
     activeComposerModal = null
-    window.scrollTo({ top: scrollY, behavior: 'instant' })
-    if (trigger?.isConnected) trigger.focus({ preventScroll: true })
   }
-  closeModal = (immediate = false) => immediate === true ? finishClose() : motion?.close()
+  const modal = createDialog(overlay, { remove: true, onRequestClose: () => closeModal() })
+  closeModal = (immediate = false) => {
+    closeEmojiPanel(true)
+    if (immediate === true) finishClose()
+    else { modal.beginClose(); motion?.close() }
+  }
   closeButton.onclick = () => closeModal()
-  overlay.onclick = (event) => { if (event.target === overlay) closeModal() }
-  document.body.appendChild(overlay)
-  const dialog = $('.composer-dialog', overlay)
-  // 触发元素的矩形先量好:桌面端拿它当缩放原点,移动端拿它当容器变形的起点。
-  // 必须在 body 加 modal-open(隐藏滚动条)之前量,否则坐标会偏。
-  const triggerRect = trigger ? trigger.getBoundingClientRect() : null
-  if (triggerRect) {
-    const dialogRect = dialog.getBoundingClientRect()
-    if (dialogRect.width && dialogRect.height) {
-      dialog.style.transformOrigin = `${triggerRect.left + triggerRect.width / 2 - dialogRect.left}px ${triggerRect.top + triggerRect.height / 2 - dialogRect.top}px`
-    }
-  }
-  document.body.classList.add('modal-open')
-  for (const { node } of background) node.inert = true
   activeComposerModal = { close: closeModal, overlay }
+  modal.open({ source: trigger, focus: closeButton })
   disposeViewport = attachComposerViewport(overlay)
-  motion = attachSheetMotion(dialog, overlay, grabHandle, finishClose, { origin: trigger })
-  document.addEventListener('keydown', onKeydown)
-  requestAnimationFrame(() => { if (overlay.isConnected) $('textarea', card)?.focus({ preventScroll: true }) })
+  motion = attachSheetMotion($('.composer-dialog', overlay), overlay, grabHandle, finishClose, { origin: trigger })
+  requestAnimationFrame(() => { if (overlay.isConnected && !overlay.inert) $('textarea', card)?.focus({ preventScroll: true }) })
 }
 
 function installToTop() {
@@ -373,14 +273,13 @@ function installToTop() {
 
 // 时间轴的两个视口观察器:哨兵进入视口即自动续页、列表顶部离开视口即显示回到顶部。
 // 与 revealObserver 分开:那个观察到一次就 unobserve,不能复用于需要反复触发的场景。
-let timelineObservers = []
 
 function observeViewport(target, onChange, options) {
   const observer = new IntersectionObserver((entries) => {
     for (const entry of entries) onChange(entry.isIntersecting)
   }, options)
   observer.observe(target)
-  timelineObservers.push(observer)
+  viewScope.own(() => observer.disconnect())
 }
 
 // 桌面端:页面往下滚、标题里的「写日常」离开视口后,入口交给顶栏那颗按钮,
@@ -399,8 +298,8 @@ function watchHeaderWrite(source) {
 
 // 切换视图即清空主区域;未进过视口的观察目标随之作废,避免观察表越积越长
 function clearMain() {
-  activeSettingsCleanup?.()
-  activeSettingsCleanup = null
+  viewScope.dispose()
+  viewScope = createViewScope()
   activeComposerModal?.close?.(true)
   activeInlineComposerCleanup?.()
   activeInlineComposerCleanup = null
@@ -410,18 +309,23 @@ function clearMain() {
   closePostMenu(true)
   closeDropdowns(null, true)
   revealObserver.disconnect()
-  for (const observer of timelineObservers) observer.disconnect()
-  timelineObservers = []
+  disposeAnimations(main)
   // 顶栏的写入口不在 main 里,切页时要显式收起,否则会留在别的页面上
   animatePresence($('#headerWriteSlot'), false, { className: 'header-write-presence', immediate: true })
   main.innerHTML = ''
+  settingsPage = null
   main.className = 'container'
   if (hasRenderedView) {
-    main.classList.add('page-enter')
-    const token = ++pageTransitionToken
-    setTimeout(() => { if (token === pageTransitionToken) main.classList.remove('page-enter') }, 520)
+    const observer = new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node.nodeType === 1 && node.isConnected && !node.dataset.motionOwned && !node.matches('.archive, .post-list, .to-top, .top-sentinel, .load-sentinel, .load-footer')) revealElement(node)
+      }
+    })
+    observer.observe(main, { childList: true })
+    viewScope.own(() => observer.disconnect())
   }
   hasRenderedView = true
+  return viewScope
 }
 
 function emptyJournal(title, description, cover = false) {
@@ -1528,6 +1432,8 @@ let pendingCommentFocus = null
 
 // 评论区块:使用朋友圈式的扁平回复关联,不渲染嵌套楼层。
 function renderComments(p) {
+  const scope = viewScope
+  let loadVersion = 0
   const wrap = el(`<div class="comments" hidden><div class="comments-list"></div><div class="comment-form" hidden></div></div>`)
   const listEl = $('.comments-list', wrap)
   let form = null
@@ -1539,9 +1445,7 @@ function renderComments(p) {
     const target = listEl.querySelector(`[data-cid="${id}"]`)
     if (!target) return
     target.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' })
-    target.classList.remove('flash')
-    void target.offsetWidth // 强制回流,同一目标可重复触发动画
-    target.classList.add('flash')
+    highlightElement(target)
   }
 
   function setReplyTarget(comment = null) {
@@ -1563,9 +1467,12 @@ function renderComments(p) {
   }
 
   async function load() {
+    const version = ++loadVersion
+    if (!scope.alive()) return
     listEl.innerHTML = ''
     try {
-      const { comments } = await api(`/api/posts/${p.id}/comments`)
+      const { comments } = await api(`/api/posts/${p.id}/comments`, { signal: scope.signal })
+      if (!scope.alive() || version !== loadVersion) return
       if (comments.length === 0) {
         if (!form || form.hidden) animatePresence(wrap, false, { className: 'panel-presence', duration: 200 })
         return
@@ -1610,10 +1517,11 @@ function renderComments(p) {
             if (!confirm('删除这条评论?')) return
             try {
               await api(`/api/posts/${p.id}/comments/${c.id}`, { method: 'DELETE' })
+              if (!scope.alive()) return
               if (replyTarget?.id === c.id) setReplyTarget()
               await load()
             } catch (e) {
-              alert(e.message)
+              if (scope.alive()) alert(e.message)
             }
           }
           actions.appendChild(btn)
@@ -1650,11 +1558,12 @@ function renderComments(p) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         })
+        if (!scope.alive()) return
         input.value = ''
         setReplyTarget()
         await load()
       } catch (e) {
-        alert(e.message)
+        if (scope.alive()) alert(e.message)
       } finally {
         btn.disabled = false
       }
@@ -1735,6 +1644,7 @@ function mediaTile(media) {
 
 // 时间轴与相册共用:图片与实况图交给灯箱,视频在自己格子里播 —— 两种交互不互相穿插
 function mediaTileAction(tile, media, photos) {
+  tile.dataset.mediaUrl = media.url
   const hit = $('.media-hit', tile)
   if (media.type === 'video') {
     hit.onclick = () => playInlineVideo(tile, media, { onError: () => showToast('浏览器或设备无法解码此视频，请尝试支持 HEVC 的浏览器或设备') })
@@ -1749,7 +1659,8 @@ function mediaTileAction(tile, media, photos) {
 function renderMediaGrid(grid, list) {
   const photos = list.filter((media) => media.type !== 'video')
   // 播放器脚本先取回来:iOS 只有在点击手势里同步开始播放才放声音
-  if (list.some((media) => media.type === 'video')) void preloadInlineVideoPlayer()
+  const scope = viewScope
+  if (list.some((media) => media.type === 'video')) void preloadInlineVideoPlayer().catch((error) => { if (scope.alive()) showToast(error.message) })
   for (const media of list) {
     const tile = mediaTile(media)
     mediaTileAction(tile, media, photos)
@@ -1841,7 +1752,7 @@ function renderPost(p) {
 }
 
 async function renderTimeline(month = null) {
-  clearMain()
+  const scope = clearMain()
   main.classList.add('timeline-page')
   const heading = el(`<div class="journal-heading"><div><h1>日常手记</h1><p class="journal-subtitle">把普通的一天，留给以后再看。<span class="journal-count"></span></p></div><div class="journal-heading-actions">${site.user ? `<button class="write-trigger" type="button">${icon('pen-line')}<span>写日常</span></button>` : ''}</div></div>`)
   main.appendChild(heading)
@@ -1850,7 +1761,11 @@ async function renderTimeline(month = null) {
   if (writeInHeading) watchHeaderWrite(writeInHeading)
 
   // 归档导航只在跨月时才有意义,单月站点不渲染
-  const { months, total } = await api(`/api/posts/archive?tz=${tzOffset()}`).catch(() => ({ months: [] }))
+  const { months, total } = await api(`/api/posts/archive?tz=${tzOffset()}`, { signal: scope.signal }).catch((error) => {
+    if (scope.alive()) showToast(error.message)
+    return { months: [] }
+  })
+  if (!scope.alive()) return
   $('.journal-count', heading).textContent = Number.isFinite(total) ? `${total} 篇日常` : ''
   const archive = months.length > 1 ? renderArchive(months, (pick) => renderTimeline(pick)) : null
   if (archive) main.appendChild(archive)
@@ -1881,15 +1796,16 @@ async function renderTimeline(month = null) {
     for (const g of visibleGroups) if (!top || groupOrder.get(g) < groupOrder.get(top)) top = g
     if (top) archive.setHere(top.dataset.month)
   })
-  if (groupObserver) timelineObservers.push(groupObserver)
+  if (groupObserver) scope.own(() => groupObserver.disconnect())
 
   async function loadPage() {
-    if (loading || !hasMore) return
+    if (!scope.alive() || loading || !hasMore) return
     loading = true
     footer.innerHTML = ''
     footer.appendChild(el('<div class="load-more-tip">加载中…</div>'))
     try {
-      const data = await api(`/api/posts?limit=${PAGE_SIZE}&${query}`)
+      const data = await api(`/api/posts?limit=${PAGE_SIZE}&${query}`, { signal: scope.signal })
+      if (!scope.alive()) return
       for (const p of data.posts) {
         const label = dateLabel(p.created_at)
         if (label !== lastDate) {
@@ -1914,6 +1830,7 @@ async function renderTimeline(month = null) {
         footer.appendChild(emptyJournal(month ? '这段时光，还是空白' : '故事，从今天开始', '那些微小却珍贵的瞬间，都值得被记住。'))
       }
     } catch (e) {
+      if (!scope.alive()) return
       // 自动加载失败时回落成手动重试,不把用户卡在转圈里
       footer.innerHTML = ''
       const retry = el(`<button class="btn-ghost load-more">重新加载</button>`)
@@ -1925,6 +1842,7 @@ async function renderTimeline(month = null) {
   }
 
   await loadPage()
+  if (!scope.alive()) return
   // 哨兵进入视口(提前 400px)即自动续页;并发由 loading 守卫,终止由 hasMore 决定,
   // 因此首屏不满一屏时会自动连续补页直到填满或到底
   const sentinel = el('<div class="load-sentinel" aria-hidden="true"></div>')
@@ -1944,68 +1862,28 @@ async function renderTimeline(month = null) {
 // ---------- 单条动态视图(通知跳转的落地页) ----------
 
 async function renderSinglePost(id) {
-  clearMain()
+  const scope = clearMain()
   installToTop()
   main.appendChild(el(`<a class="btn-ghost single-back" href="#/">${icon('arrow-left')}<span>返回时间轴</span></a>`))
   try {
-    const { post } = await api(`/api/posts/${id}`)
+    const { post } = await api(`/api/posts/${id}`, { signal: scope.signal })
+    if (!scope.alive()) return
     main.appendChild(renderPost(post))
   } catch (e) {
+    if (!scope.alive()) return
     main.appendChild(el(`<div class="empty-tip">${esc(e.message)}</div>`))
   }
 }
 
 // ---------- 相册视图 ----------
 
-async function renderGallery() {
-  clearMain()
+function renderGallery() {
+  const scope = clearMain()
   main.classList.add('gallery-page')
   installToTop()
-  const heading = el('<div class="page-heading"><div><p>我们的日常</p><h1>影像集</h1></div><span class="gallery-count"></span></div>')
-  $('p', heading).textContent = site.title
-  main.appendChild(heading)
-  try {
-    const { images } = await api('/api/gallery')
-    const hasVideo = images.some((img) => img.type === 'video')
-    $('.gallery-count', heading).textContent = images.length === 0 ? ''
-      : `${images.length} ${hasVideo ? '项影像' : '张照片'}`
-    if (images.length === 0) {
-      main.appendChild(emptyJournal('等待第一张，一起的照片', '留住眼前的风景，也留住那一刻的心情。', '/images/journal-cover.jpg'))
-      return
-    }
-    // 灯箱只承载图片与实况图;视频有自己的原地播放器,不进灯箱序列
-    const photos = images.filter((media) => media.type !== 'video')
-    if (images.some((media) => media.type === 'video')) void preloadInlineVideoPlayer()
-    // 按年月分段:跨度一大,连续网格就变成了没有时间坐标的缩略图墙
-    const months = new Map()
-    for (const media of images) {
-      const at = parseTime(media.created_at)
-      const key = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}`
-      if (!months.has(key)) months.set(key, [])
-      months.get(key).push(media)
-    }
-    for (const [key, list] of months) {
-      const [year, month] = key.split('-')
-      const section = el(`<section class="gallery-month">
-        <h2 class="gallery-month-heading"><span>${year}年${Number(month)}月</span><span class="gallery-month-count">${list.length}</span></h2>
-        <div class="gallery-grid"></div>
-      </section>`)
-      const grid = $('.gallery-grid', section)
-      // 灯箱序列跨月连续:在相册里可以直接一路翻到上个月
-      list.forEach((media) => {
-        const caption = `${media.author} · ${formatTime(media.created_at)}`
-        const tile = mediaTile(media)
-        tile.classList.add('gallery-photo')
-        tile.append(el(`<span class="media-caption">${esc(caption)}</span>`))
-        const hit = mediaTileAction(tile, media, photos)
-        hit.setAttribute('aria-label', `${media.type === 'video' ? '播放视频' : '查看照片'}：${caption}`)
-        grid.appendChild(tile)
-      })
-      main.appendChild(section)
-    }
-  } catch (e) {
-    main.appendChild(el(`<div class="empty-tip">${esc(e.message)}</div>`))
-  }
+  const view = createGalleryView({ scope, title: site.title, mediaTile, mediaTileAction, emptyJournal, onError: showToast })
+  main.appendChild(view.node)
+  scope.own(view.dispose)
 }
 
 // ---------- 登录视图 ----------
@@ -2048,110 +1926,8 @@ function renderLogin() {
   main.appendChild(form)
 }
 
-async function openAvatarCropper(file, onConfirm, onCancel) {
-  const overlay = el(`<div class="avatar-crop-overlay" role="dialog" aria-modal="true" aria-label="裁剪头像">
-    <div class="avatar-crop-dialog">
-      <div class="avatar-crop-heading"><h2>调整头像</h2><button class="avatar-crop-close" type="button" aria-label="取消">×</button></div>
-      <p class="avatar-crop-hint">拖动图片调整位置，使用滑块缩放</p>
-      <div class="avatar-crop-stage"><canvas width="256" height="256"></canvas></div>
-      <label class="avatar-zoom">缩放<input type="range" min="1" max="3" step="0.01" value="1" /></label>
-      <div class="avatar-crop-actions"><button class="btn-ghost avatar-crop-cancel" type="button">取消</button><button class="btn avatar-crop-confirm" type="button">使用此头像</button></div>
-    </div>
-  </div>`)
-  const canvas = $('canvas', overlay)
-  const ctx = canvas.getContext('2d')
-  const stage = $('.avatar-crop-stage', overlay)
-  const zoomInput = $('input[type=range]', overlay)
-  const confirmButton = $('.avatar-crop-confirm', overlay)
-  const objectUrl = URL.createObjectURL(file)
-  const image = new Image()
-  let baseScale = 1
-  let zoom = 1
-  let offsetX = 0
-  let offsetY = 0
-  let drag = null
-  let closed = false
-  let closing = false
-  let closePromise = null
-
-  const clamp = () => {
-    const width = image.naturalWidth * baseScale * zoom
-    const height = image.naturalHeight * baseScale * zoom
-    offsetX = Math.max(128 - width / 2, Math.min(width / 2 - 128, offsetX))
-    offsetY = Math.max(128 - height / 2, Math.min(height / 2 - 128, offsetY))
-  }
-  const draw = () => {
-    if (!image.complete || !image.naturalWidth) return
-    const width = image.naturalWidth * baseScale * zoom
-    const height = image.naturalHeight * baseScale * zoom
-    clamp()
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.fillStyle = '#f7eaf0'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-    ctx.drawImage(image, 128 + offsetX - width / 2, 128 + offsetY - height / 2, width, height)
-  }
-  const finish = (cancel = false) => {
-    if (closed) return Promise.resolve()
-    if (closing) return closePromise || Promise.resolve()
-    closing = true
-    drag = null
-    closePromise = Promise.all([
-      animatePresence(overlay, false, { className: 'overlay-presence', duration: 220, remove: true }),
-      animatePresence($('.avatar-crop-dialog', overlay), false, { className: 'dialog-presence', duration: 260 }),
-    ]).then(() => {
-      if (closed) return
-      closed = true
-      URL.revokeObjectURL(objectUrl)
-      if (cancel) onCancel?.()
-    })
-    return closePromise
-  }
-  const cleanup = () => { void finish(true) }
-  image.onload = () => {
-    baseScale = 256 / Math.min(image.naturalWidth, image.naturalHeight)
-    draw()
-  }
-  image.onerror = cleanup
-  image.src = objectUrl
-  zoomInput.oninput = () => { zoom = Number(zoomInput.value) || 1; draw() }
-  stage.addEventListener('pointerdown', (event) => {
-    event.preventDefault()
-    drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, offsetX, offsetY }
-    try { stage.setPointerCapture(event.pointerId) } catch {}
-  })
-  stage.addEventListener('pointermove', (event) => {
-    if (!drag || drag.pointerId !== event.pointerId) return
-    const rect = canvas.getBoundingClientRect()
-    const ratio = canvas.width / Math.max(1, rect.width)
-    offsetX = drag.offsetX + (event.clientX - drag.x) * ratio
-    offsetY = drag.offsetY + (event.clientY - drag.y) * ratio
-    draw()
-  })
-  const endDrag = () => { drag = null }
-  stage.addEventListener('pointerup', endDrag)
-  stage.addEventListener('pointercancel', endDrag)
-  $('.avatar-crop-close', overlay).onclick = cleanup
-  $('.avatar-crop-cancel', overlay).onclick = cleanup
-  confirmButton.onclick = async () => {
-    confirmButton.disabled = true
-    try {
-      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9))
-      if (!blob) throw new Error('头像裁剪失败')
-      const result = await onConfirm(new File([blob], 'avatar.jpg', { type: 'image/jpeg' }))
-      if (result !== false) {
-        await finish(false)
-      } else {
-        confirmButton.disabled = false
-      }
-    } catch (error) {
-      confirmButton.disabled = false
-      throw error
-    }
-  }
-  document.body.appendChild(overlay)
-  animatePresence(overlay, true, { className: 'overlay-presence', duration: 220 })
-  animatePresence($('.avatar-crop-dialog', overlay), true, { className: 'dialog-presence', duration: 260 })
-  requestAnimationFrame(() => confirmButton.focus())
+function openAvatarCropper(file, onConfirm, onCancel) {
+  return createAvatarCropper(file, onConfirm, onCancel, viewScope)
 }
 
 // ---------- 账号视图(修改登录账号、显示名称与密码) ----------
@@ -2374,13 +2150,40 @@ function renderAccount({ backHref = '#/', backLabel = '返回时间轴' } = {}) 
     setFormMessage(passwordMessage, '')
   }
 
+  if (backHref === '#/settings') {
+    page.classList.add('settings-page')
+    page.dataset.motionOwned = 'settings'
+  }
   main.appendChild(page)
-  $('h1', page).focus()
+  if (backHref === '#/settings') {
+    window.scrollTo({ top: 0, behavior: 'instant' })
+    void enterSettingsView(page, viewScope, settingsMotionKind)
+  }
+  $('h1', page).focus({ preventScroll: true })
 }
 
 // ---------- 设置视图(登录后可见,即时生效) ----------
 
+function mountSettingsPage() {
+  settingsPage = el('<div class="settings-page" data-motion-owned="settings"></div>')
+  main.appendChild(settingsPage)
+  return settingsPage
+}
+
+function showSettingsPage(page, root = false) {
+  void enterSettingsView(page, viewScope, settingsMotionKind)
+  if (root && settingsMotionKind === 'pop' && settingsReturn) {
+    const entry = [...page.querySelectorAll('a[href]')].find((link) => link.getAttribute('href') === settingsReturn.href)
+    window.scrollTo({ top: settingsReturn.scrollY, behavior: 'instant' })
+    ;(entry || $('h1', page))?.focus({ preventScroll: true })
+  } else {
+    window.scrollTo({ top: 0, behavior: 'instant' })
+    $('h1', page)?.focus({ preventScroll: true })
+  }
+}
+
 function renderSiteSettingsCard() {
+  const scope = viewScope
   const card = el(`
     <section class="settings-card">
       <h2>站点设置</h2>
@@ -2411,7 +2214,7 @@ function renderSiteSettingsCard() {
         }),
       })
       tip.hidden = false
-      setTimeout(() => location.reload(), 600)
+      scope.timeout(() => location.reload(), 600)
     } catch (e) {
       err.textContent = e.message
     }
@@ -2421,12 +2224,11 @@ function renderSiteSettingsCard() {
 }
 
 async function renderVideoSettingsCard() {
-  const pageHash = location.hash
-  const pageHeader = $('.settings-subpage-header', main)
+  const scope = viewScope
   let config
-  try { config = await getVideoUploadConfig() }
-  catch (error) { if (location.hash === pageHash && main.contains(pageHeader)) appendSettingsItem(el(`<p class="form-error">${esc(error.message)}</p>`)); return }
-  if (location.hash !== pageHash || !main.contains(pageHeader)) return
+  try { config = await getVideoUploadConfig(scope.signal) }
+  catch (error) { if (scope.alive()) appendSettingsItem(el(`<p class="form-error">${esc(error.message)}</p>`)); return }
+  if (!scope.alive()) return
   const card = el(`<section class="settings-card video-settings">
     <h2>视频压缩</h2>
     <p class="storage-hint">默认先保存原文件，再由后台自动压缩。完成后对比体积和规格，推荐版本自动采用；发布前仍可切换，未采用版本在发布或丢弃草稿时清理。</p>
@@ -2458,45 +2260,65 @@ function renderSettingsSection(kind) {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
+  const page = mountSettingsPage()
   const titles = { site: '站点设置', ai: 'AI 设置', storage: '图片存储', backup: '备份与恢复' }
   const header = el(`<header class="account-page-header settings-subpage-header"><a class="account-back" href="#/settings" aria-label="返回设置" title="返回设置">${icon('arrow-left')}</a><h1 tabindex="-1">${titles[kind]}</h1></header>`)
-  main.appendChild(header)
+  page.appendChild(header)
   if (kind === 'site') { renderSiteSettingsCard(); renderVideoSettingsCard() }
   else if (kind === 'ai') renderAiCards()
   else if (kind === 'backup') renderBackupCard()
   else renderStorageCard()
-  $('h1', header).focus()
+  showSettingsPage(page)
 }
 
 function renderThemeCard() {
+  const scope = viewScope
+  let pointerChange = false
+  let animateChange = false
   const card = el(`<section class="settings-card theme-card">
     <div class="settings-card-heading"><div><h2>外观</h2><p>浅色、深色，或者跟着系统走。</p></div></div>
-    <fieldset class="theme-options"><legend class="sr-only">选择外观</legend></fieldset>
+    <fieldset class="theme-options"><legend class="sr-only">选择外观</legend><span class="theme-indicator" aria-hidden="true"></span></fieldset>
     <p class="theme-help" aria-live="polite">仅用于当前浏览器，刷新后保留。</p>
   </section>`)
+  const options = $('.theme-options', card)
+  options.onpointerdown = () => { pointerChange = true }
+  options.onkeydown = () => { pointerChange = false }
+  options.onpointercancel = () => { pointerChange = false }
+  const sync = () => {
+    const inputs = [...card.querySelectorAll('input[name="theme"]')]
+    for (const input of inputs) input.checked = input.value === window.JournalTheme.preference
+    const index = inputs.findIndex((input) => input.checked)
+    if (index < 0) throw new Error('外观选项状态不完整')
+    animateElement($('.theme-indicator', card), { transform: `translateX(${index * 100}%)` }, {
+      duration: motionTiming.selection, easing: motionEasing.move, immediate: !animateChange,
+    })
+  }
+  window.addEventListener('journal-theme-change', sync, { signal: scope.signal })
   for (const choice of window.JournalTheme.choices) {
     const option = el(`<label class="theme-option" data-palette="${choice.id}">
       <input type="radio" name="theme" value="${choice.id}" ${window.JournalTheme.preference === choice.id ? 'checked' : ''} />
       <span>${choice.name}</span>
     </label>`)
     $('input', option).onchange = () => {
+      animateChange = pointerChange
       const saved = window.JournalTheme.set(choice.id)
+      animateChange = false
+      pointerChange = false
       $('.theme-help', card).textContent = saved ? `已切换为${choice.name}，刷新后保留。` : '外观已切换；当前浏览器无法保存偏好，刷新后可能恢复原来的设置。'
     }
     $('.theme-options', card).appendChild(option)
   }
+  sync()
   return card
 }
-window.addEventListener('journal-theme-change', () => {
-  document.querySelectorAll('.theme-option input').forEach((input) => { input.checked = input.value === window.JournalTheme.preference })
-})
 
 function renderSettings() {
   if (!site.user) return renderLogin()
   clearMain()
   installToTop()
-  main.appendChild(el('<header class="page-heading settings-heading"><div><p>让日常，更合心意</p><h1>设置</h1></div></header>'))
-  main.appendChild(renderThemeCard())
+  const page = mountSettingsPage()
+  page.appendChild(el('<header class="page-heading settings-heading"><div><p>让日常，更合心意</p><h1 tabindex="-1">设置</h1></div></header>'))
+  page.appendChild(renderThemeCard())
   const profileCard = el(`<section class="settings-card settings-profile">
     <div class="settings-card-heading settings-profile-heading"><h2>个人资料</h2><a class="btn-ghost settings-profile-edit" href="#/settings/profile">${icon('user')}<span>编辑资料</span></a><p>头像和显示名称会展示给另一位成员及访客。</p></div>
     <div class="settings-profile-summary"><span class="settings-profile-avatar"></span><div><strong class="settings-profile-name"></strong><span class="settings-profile-username"></span></div></div>
@@ -2511,7 +2333,7 @@ function renderSettings() {
   $('.settings-profile-avatar', profileCard).replaceWith(avatarNode(site.user.name, site.user.avatarUrl, 'settings-profile-avatar'))
   $('.settings-profile-name', profileCard).textContent = site.user.name
   $('.settings-profile-username', profileCard).textContent = `登录账号：${site.user.username || site.user.name}`
-  main.appendChild(profileCard)
+  page.appendChild(profileCard)
 
   const notificationCard = el(`<section class="settings-card notification-card">
     <div class="settings-card-heading"><div><h2>通知</h2><p class="notification-intro">评论和回复可以通过浏览器系统通知提醒你。</p></div></div>
@@ -2520,8 +2342,8 @@ function renderSettings() {
   </section>`)
   const notificationAction = browserNotificationAction({ settings: true, help: $('.notification-help', notificationCard) })
   $('.notification-action-slot', notificationCard).appendChild(notificationAction.button)
-  activeSettingsCleanup = notificationAction.dispose
-  main.appendChild(notificationCard)
+  viewScope.own(notificationAction.dispose)
+  page.appendChild(notificationCard)
 
   const sections = [
     ['#/settings/site', 'settings', '站点设置', '站名、纪念日和访客可见范围'],
@@ -2530,7 +2352,7 @@ function renderSettings() {
     ['#/settings/backup', 'settings', '备份与恢复', '自动备份到 WebDAV，导入数据库恢复'],
   ]
   for (const [href, iconName, title, description] of sections) {
-    main.appendChild(el(`<a class="settings-link settings-card" href="${href}"><span class="settings-link-icon">${icon(iconName)}</span><span class="settings-link-copy"><strong>${title}</strong><small>${description}</small></span><span class="settings-link-arrow">${icon('arrow-right')}</span></a>`))
+    page.appendChild(el(`<a class="settings-link settings-card" href="${href}"><span class="settings-link-icon">${icon(iconName)}</span><span class="settings-link-copy"><strong>${title}</strong><small>${description}</small></span><span class="settings-link-arrow">${icon('arrow-right')}</span></a>`))
   }
 
   const accountActions = el(`<section class="settings-card settings-account-actions"><button class="btn-ghost settings-logout" type="button">${icon('log-out')}<span>退出登录</span></button></section>`)
@@ -2541,11 +2363,12 @@ function renderSettings() {
     await api('/api/logout', { method: 'POST' })
     location.reload()
   }
-  main.appendChild(accountActions)
+  page.appendChild(accountActions)
+  showSettingsPage(page, true)
 }
 
 function appendSettingsItem(node) {
-  main.appendChild(node)
+  if (node) settingsPage.appendChild(node)
 }
 
 function renderBackupCard() {
@@ -2572,18 +2395,21 @@ function renderBackupCard() {
     location.reload()
   })
   appendSettingsItem(view.node)
-  activeSettingsCleanup = view.dispose
+  viewScope.own(view.dispose)
 }
 
 // AI 优化与 AI 配图共用一张接口配置卡:共享 API 可各自选模型,也可使用独立 API。
 // 两个模块的接口同形(GET/PUT 配置、POST /models、POST /test),文案与额外状态行由调用方给出。
 async function createApiConfigCard({ key, title, intro, path, modelHint, extraStatus = '', testMessage, thinking = false }) {
+  const scope = viewScope
   let s
   try {
-    s = await api(path)
+    s = await api(path, { signal: scope.signal })
   } catch (e) {
+    if (!scope.alive()) return null
     return el(`<div class="empty-tip">${esc(title)}配置读取失败：${esc(e.message)}</div>`)
   }
+  if (!scope.alive()) return null
   const custom = s.mode === 'custom'
   const listId = `${key}-model-list`
   const card = el(`
@@ -2591,8 +2417,8 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
       <h2>${esc(title)}</h2>
       <div class="storage-status">${intro}</div>
       <div role="radiogroup" aria-label="${esc(title)}配置来源">
-        <label class="row"><input name="mode" type="radio" value="shared" ${custom ? '' : 'checked'} /><span>使用已配置的共享 API</span></label>
-        <label class="row"><input name="mode" type="radio" value="custom" ${custom ? 'checked' : ''} /><span>配置独立 API</span></label>
+        <label class="row"><input name="${key}-mode" type="radio" value="shared" ${custom ? '' : 'checked'} /><span>使用已配置的共享 API</span></label>
+        <label class="row"><input name="${key}-mode" type="radio" value="custom" ${custom ? 'checked' : ''} /><span>配置独立 API</span></label>
       </div>
       <div class="llm-shared" ${custom ? 'hidden' : ''}>
         <div class="llm-global-hint">${s.shared.baseUrl ? `共享接口：${esc(s.shared.baseUrl)} · 默认模型：${esc(s.shared.model || '未设模型')}` : '尚未配置共享接口，可由任一账号首次填写'}</div>
@@ -2642,16 +2468,25 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
   if (thinkingSelect) thinkingSelect.value = s.thinking || ''
   const sharedWrap = $('.llm-shared', card)
   const customWrap = $('.llm-custom', card)
-  const selectedMode = () => $('[name=mode]:checked', card).value
+  const selectedMode = () => $(`[name="${key}-mode"]:checked`, card).value
   const modelInput = (mode = selectedMode()) => $(`[name=${mode === 'shared' ? 'sharedModel' : 'customModel'}]`, card)
   const modelPicker = (mode = selectedMode()) => $(`[name=${mode === 'shared' ? 'sharedModelPicker' : 'customModelPicker'}]`, card)
-  const message = (text, ok) => { err.textContent = text; err.style.color = ok === undefined ? '' : ok ? 'var(--success)' : '#a56a25' }
+  const message = (text, ok) => setFormMessage(err, text, ok === undefined ? 'error' : ok ? 'success' : 'warning')
   const updateMode = () => {
     const shared = selectedMode() === 'shared'
-    sharedWrap.hidden = !shared
-    customWrap.hidden = shared
+    const outgoing = shared ? customWrap : sharedWrap
+    const incoming = shared ? sharedWrap : customWrap
+    disposeAnimations(outgoing)
+    outgoing.inert = true
+    outgoing.hidden = true
+    incoming.inert = false
+    const first = incoming.hidden
+    incoming.hidden = false
+    animateElement(incoming, { opacity: 1 }, {
+      duration: motionTiming.content, initial: first ? { opacity: 0 } : undefined,
+    })
   }
-  for (const modeBox of card.querySelectorAll('[name=mode]')) modeBox.onchange = updateMode
+  for (const modeBox of card.querySelectorAll(`[name="${key}-mode"]`)) modeBox.onchange = updateMode
   for (const picker of card.querySelectorAll('.llm-model-picker')) picker.onchange = () => {
     if (picker.value) modelInput(picker.name === 'sharedModelPicker' ? 'shared' : 'custom').value = picker.value
   }
@@ -2719,7 +2554,8 @@ async function createApiConfigCard({ key, title, intro, path, modelHint, extraSt
 }
 
 async function renderAiCards() {
-  appendSettingsItem(await createApiConfigCard({
+  const scope = viewScope
+  const textCard = await createApiConfigCard({
     key: 'llm',
     title: 'AI 优化',
     intro: '在发布框点「AI 优化」即可调用，凭据只存本服务器。',
@@ -2727,9 +2563,11 @@ async function renderAiCards() {
     modelHint: 'gpt-4o-mini',
     thinking: true,
     testMessage: () => ({ text: '连接成功' }),
-  }))
+  })
+  if (!scope.alive()) return
+  appendSettingsItem(textCard)
 
-  appendSettingsItem(await createApiConfigCard({
+  const imageCard = await createApiConfigCard({
     key: 'image',
     title: 'AI 配图',
     intro: '根据正文生成一张配图，结果先预览再决定是否使用；图片保存到 WebDAV 的 <code>ai-generated/</code> 子目录。',
@@ -2739,18 +2577,22 @@ async function renderAiCards() {
     testMessage: ({ supportsModel }) => supportsModel
       ? { text: '连接成功，已找到所选模型' }
       : { text: '连接成功，但接口未返回所选模型', ok: false },
-  }))
+  })
+  if (scope.alive()) appendSettingsItem(imageCard)
 }
 
 // 图片存储配置(本地磁盘 / WebDAV)
 async function renderStorageCard() {
+  const scope = viewScope
   let s
   try {
-    s = await api('/api/storage')
+    s = await api('/api/storage', { signal: scope.signal })
   } catch (e) {
+    if (!scope.alive()) return
     appendSettingsItem(el(`<div class="empty-tip">${esc(e.message)}</div>`))
     return
   }
+  if (!scope.alive()) return
   const wd = s.webdav
   const counts = Object.fromEntries(s.counts.map((r) => [r.storage, r.count]))
   const card = el(`
@@ -2795,18 +2637,18 @@ async function renderStorageCard() {
 
   $('.save', card).onclick = async () => {
     storageErr.textContent = ''
-    storageErr.style.color = ''
+    setFormMessage(storageErr, '')
     try {
       await save($('[name=backend]', card).value)
       $('.save-tip', card).hidden = false
-      setTimeout(renderSettings, 600)
+      scope.timeout(() => { location.hash = '#/settings' }, 600)
     } catch (e) {
       storageErr.textContent = e.message
     }
   }
   $('.test', card).onclick = async () => {
     storageErr.textContent = ''
-    storageErr.style.color = ''
+    setFormMessage(storageErr, '')
     try {
       await api('/api/storage/webdav/test', {
         method: 'POST',
@@ -2818,11 +2660,9 @@ async function renderStorageCard() {
           folder: $('[name=folder]', card).value,
         }),
       })
-      storageErr.textContent = '连接成功'
-      storageErr.style.color = '#2a9d4a'
+      setFormMessage(storageErr, '连接成功', 'success')
     } catch (e) {
-      storageErr.textContent = e.message
-      storageErr.style.color = '#c33'
+      setFormMessage(storageErr, e.message)
     }
   }
   appendSettingsItem(card)
@@ -2990,6 +2830,10 @@ function plainNavigation(event) {
 function route() {
   if (!site) return
   const hash = location.hash || '#/'
+  settingsMotionKind = settingsTransition(renderedRoute, hash)
+  if (settingsMotionKind === 'push') settingsReturn = { href: hash, scrollY: window.scrollY }
+  else if (!hash.startsWith('#/settings')) settingsReturn = null
+  renderedRoute = hash
   document.querySelectorAll('[data-nav]').forEach((a) => {
     const active = a.getAttribute('href') === hash || (a.dataset.nav === 'timeline' && hash.startsWith('#/post/'))
     a.classList.toggle('active', active)
@@ -3049,6 +2893,7 @@ async function init() {
   $('.site-heart').innerHTML = icon('heart')
   trackHeaderHeight()
   trackHeaderMaterial()
+  installPressMotion()
   startDayProgress()
   if ('serviceWorker' in navigator) {
     // 推送订阅要求 registration 已激活,统一等到 ready 再交给通知开关使用

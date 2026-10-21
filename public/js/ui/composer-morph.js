@@ -1,3 +1,6 @@
+import { animatePresence, disposeAnimations } from './motion.js'
+
+// 仅写作容器的液态变形允许自定义物理与材质插值，普通显隐不使用此控制器。
 // 临界阻尼的解析解：更新目标时保留当前位移与速度，不依赖固定时长过渡。
 export function stepSpring(position, velocity, target, seconds, response = .32) {
   const omega = 2 * Math.PI / response
@@ -130,75 +133,6 @@ export function createSpringController({
   }
 }
 
-const presenceStates = new WeakMap()
-
-// Presence 动效负责 hidden/remove 的时序。重复调用会取消上一段退出，
-// 让快速打开/关闭从当前 CSS presentation state 接续，而不会留下幽灵节点。
-export function animatePresence(node, visible, {
-  className = 'motion-presence',
-  duration = 220,
-  remove = false,
-  hidden = true,
-  immediate = false,
-  reducedMotion = null,
-  onComplete = null,
-} = {}) {
-  if (!node) return Promise.resolve()
-  let state = presenceStates.get(node)
-  if (!state) {
-    state = { token: 0, timer: null, className, remove, hidden }
-    presenceStates.set(node, state)
-  }
-  state.className = className
-  state.remove = remove
-  state.hidden = hidden
-  state.token += 1
-  const token = state.token
-  if (state.timer) clearTimeout(state.timer)
-  state.timer = null
-  const presentClass = `${className}-present`
-  const closingClass = `${className}-closing`
-  node.classList.add(className)
-
-  if (visible) {
-    if (hidden) {
-      node.hidden = false
-      // 从 hidden 里出来先强制一次样式计算:否则浏览器可能把「显示」与「加 present 类」
-      // 合并成一次样式变更,于是 opacity / transform / max-width 的过渡被整段跳过,
-      // 表现就是菜单或顶栏按钮「啪」地出现而不是淡入(桌面端顶栏写入口就踩过这条)。
-      void node.offsetWidth
-    }
-    if (node.classList.contains(presentClass) && !node.classList.contains(closingClass)) return Promise.resolve()
-    node.classList.remove(closingClass)
-    node.classList.remove(presentClass)
-    if (reducedMotionValue(reducedMotion)) {
-      node.classList.add(presentClass)
-      return Promise.resolve()
-    }
-    globalThis.requestAnimationFrame?.(() => {
-      if (state.token === token && node.isConnected !== false) node.classList.add(presentClass)
-    })
-    return Promise.resolve()
-  }
-
-  node.classList.remove(presentClass)
-  node.classList.add(closingClass)
-  const finish = () => {
-    if (state.token !== token) return
-    state.timer = null
-    node.classList.remove(className, presentClass, closingClass)
-    if (remove) node.remove()
-    else if (hidden) node.hidden = true
-    onComplete?.()
-  }
-  if (immediate || reducedMotionValue(reducedMotion)) {
-    finish()
-    return Promise.resolve()
-  }
-  return new Promise((resolve) => {
-    state.timer = setTimeout(() => { finish(); resolve() }, Math.max(0, duration))
-  })
-}
 
 export function shouldDismiss(position, velocity, height) {
   // 0.99 的指数衰减投影；明显向上反拉时回到展开态。
@@ -220,6 +154,13 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
   // 材质全部由一块没有子节点的圆角矩形承担,面板本体不缩放、内容按进度淡入:文字不会被
   // 非等比拉伸,面板事后随内容改高也不会跟变形层错位 —— 静止时表面交还给面板本体。
   const originNode = origin?.isConnected ? origin : null
+  if (!originNode) {
+    animatePresence(dialog, true, { className: 'dialog-presence' })
+    return {
+      close() { return animatePresence(dialog, false, { className: 'dialog-presence', onComplete: onClose }) },
+      dispose() { disposeAnimations(dialog) },
+    }
+  }
   const morph = originNode ? document.createElement('div') : null
   const base = { left: 0, top: 0 }
   let restRect = null
@@ -239,13 +180,9 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
     overlay.appendChild(morph)
   }
   // 收起目标位移:变形路径拿它当进度量程(拖拽要有行程,所以按面板高度取),回退路径才是真的位移。
-  const distance = () => morph
-    ? Math.min(320, Math.max(120, dialog.offsetHeight * .3))
-    : mobile.matches ? Math.min(96, Math.max(48, dialog.offsetHeight * .1)) : 24
+  const distance = () => Math.min(320, Math.max(120, dialog.offsetHeight * .3))
   // 宽屏触屏(iPad 横屏等)展开时给材质变化更多时间,避免桌面布局下显得生硬;收起仍保持快速。
-  const response = (closing) => morph
-    ? closing ? .3 : coarse.matches && !mobile.matches ? .42 : .3
-    : mobile.matches ? .38 : .34
+  const response = (closing) => closing ? .3 : coarse.matches && !mobile.matches ? .42 : .3
   let position = reduced.matches ? 0 : distance()
   let velocity = 0
   let pointer = null
@@ -303,18 +240,9 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
 
   function render() {
     const progress = clamp01(position / Math.max(1, distance()))
-    if (morph) {
-      setMorphActive(progress > .002)
-      if (morphActive) renderMorph(progress)
-      overlay.style.backgroundColor = `rgba(22, 22, 28, ${.3 * (1 - progress)})`
-      return
-    }
-    dialog.style.transform = reduced.matches ? 'none' : `translateY(${position}px)`
-    const scale = mobile.matches ? .94 + .06 * (1 - progress) : 1
-    dialog.style.scale = reduced.matches ? '1' : String(scale)
-    // 大面板只渐变遮罩，小弹窗同时淡入；移动端全屏面板再同步缩放，输入区始终保持清晰。
-    dialog.style.opacity = mobile.matches ? '1' : String(1 - progress)
-    overlay.style.backgroundColor = `rgba(22, 22, 28, ${.3 * (1 - progress)})`
+    setMorphActive(progress > .002)
+    if (morphActive) renderMorph(progress)
+    overlay.style.backgroundColor = `color-mix(in srgb, var(--scrim) ${(1 - progress) * 100}%, transparent)`
   }
   const spring = createSpringController({
     value: position,
@@ -392,13 +320,6 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
   let resizedFrame = 0
   function resized() {
     pointer = null
-    if (!morph) {
-      if (spring.getTarget() > 0) { onClose(); return }
-      position = velocity = 0
-      spring.set(0, 0)
-      render()
-      return
-    }
     // 视口尺寸是下一帧才写进 CSS 变量的(attachComposerViewport 自己排了一帧),
     // 所以这里也等一帧再量:既量到重排后的几何,又把输入法一次升降里的十几个 resize 合成一次。
     if (resizedFrame) return

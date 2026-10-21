@@ -1,35 +1,43 @@
-// 媒体灯箱:图片、视频、实况图共用一个序列。刻意不自动播放 ——
-// 视频只有 cover 图,进灯箱也停在封面等用户点播放;实况图的动态部分要点 LIVE 角标才播。
-import { animatePresence } from '/js/sheet-motion.js'
+// 媒体灯箱：先加载解码，再提交画面；视频和实况图始终由用户主动播放。
+import { animatePresence, animateElement, disposeAnimations, prefersReducedMotion, motionTiming, motionEasing } from './ui/motion.js'
+import { createDialog } from './ui/dialog.js'
 
 const lightbox = document.getElementById('lightbox')
 const stage = document.getElementById('lightboxStage')
 const viewport = document.getElementById('lightboxViewport')
-const imageEl = document.getElementById('lightboxImg')
-const videoEl = document.getElementById('lightboxVideo')
+let imageEl = document.getElementById('lightboxImg')
+let videoEl = document.getElementById('lightboxVideo')
 const liveBtn = document.getElementById('lightboxLive')
+const statusText = document.getElementById('lightboxStatus')
+const retryBtn = document.getElementById('lightboxRetry')
 const closeBtn = document.querySelector('.lb-close')
 const prevBtn = document.querySelector('.lb-prev')
 const nextBtn = document.querySelector('.lb-next')
+const modal = createDialog(lightbox, { closeOnBackdrop: false, onRequestClose: () => closeLightbox() })
+const restTransform = 'translate(0px, 0px) scale(1)'
 
 let items = []
 let index = 0
+let requestedIndex = 0
 let trigger = null
+let originUrl = ''
 let motionToken = 0
 let switchToken = 0
 let livePlaying = false
+let mediaReady = false
+let closing = false
+let closePromise = null
+let retryAction = null
 let zoom = 1
 let pinch = null
 let ignoreBackdropUntil = 0
+let mediaLoad = null
+let warmLoad = null
+let warmImages = []
 
-const reducedMotion = () => Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
-const wait = (duration) => new Promise((resolve) => setTimeout(resolve, duration))
-
-// 当前真正占据画面中心、参与展开/收起动画的节点
 const activeNode = () => (videoEl.hidden ? imageEl : videoEl)
 const currentItem = () => items[index] || null
 
-// 用真实布局尺寸承载缩放，放大的四边和长图底部都在滚动范围内。
 function layoutImage() {
   if (imageEl.hidden || !imageEl.naturalWidth) return
   const width = Math.min(imageEl.naturalWidth, viewport.clientWidth) * zoom
@@ -49,7 +57,7 @@ function resetView() {
 }
 
 function zoomAt(value, clientX, clientY) {
-  if (imageEl.hidden || !imageEl.naturalWidth) return
+  if (closing || imageEl.hidden || !imageEl.naturalWidth) return
   const before = imageEl.getBoundingClientRect()
   const x = (clientX - before.left) / before.width
   const y = (clientY - before.top) / before.height
@@ -61,272 +69,367 @@ function zoomAt(value, clientX, clientY) {
   ignoreBackdropUntil = performance.now() + 350
 }
 
-function waitForImage(image, url) {
-  image.src = url
-  if (image.complete && image.naturalWidth) return Promise.resolve()
-  return new Promise((resolve) => {
-    const done = () => { image.removeEventListener('load', done); image.removeEventListener('error', done); resolve() }
-    image.addEventListener('load', done)
-    image.addEventListener('error', done)
-  })
+function setStatus(message = '', busy = false, retry = null) {
+  statusText.textContent = message
+  viewport.setAttribute('aria-busy', String(busy))
+  retryAction = retry
+  retryBtn.hidden = !retry
 }
 
-function preloadImage(url) {
-  const image = new Image()
-  image.src = url
-  if (image.complete && image.naturalWidth) return Promise.resolve()
-  return new Promise((resolve) => { image.onload = resolve; image.onerror = resolve })
-}
-
-function waitForVideo(node, src, poster) {
-  node.poster = poster || ''
-  node.src = src
-  node.load()
-  // 只要元数据到手就能定位尺寸;拿不到(编码不支持)时也让灯箱照常打开,停在封面上
+// 加载失败与取消分别结束等待；取消不进入错误展示路径。
+function waitForMedia(node, ready, start, signal) {
   return new Promise((resolve) => {
-    const done = () => {
-      node.removeEventListener('loadeddata', done)
-      node.removeEventListener('error', done)
-      resolve()
+    const finish = (status) => {
+      node.removeEventListener(ready, loaded)
+      node.removeEventListener('error', failed)
+      signal?.removeEventListener('abort', aborted)
+      resolve({ status, node })
     }
-    node.addEventListener('loadeddata', done)
-    node.addEventListener('error', done)
+    const loaded = () => finish('ready')
+    const failed = () => finish('error')
+    const aborted = () => finish('cancelled')
+    if (signal.aborted) { aborted(); return }
+    node.addEventListener(ready, loaded, { once: true })
+    node.addEventListener('error', failed, { once: true })
+    signal.addEventListener('abort', aborted, { once: true })
+    try {
+      start()
+      if (ready === 'load' && node.complete) (node.naturalWidth ? loaded : failed)()
+    } catch { failed() }
   })
+}
+
+function decodeImage(image, signal) {
+  return new Promise((resolve) => {
+    const finish = (status) => { signal.removeEventListener('abort', abort); resolve({ status, node: image }) }
+    const abort = () => finish('cancelled')
+    if (signal.aborted) { abort(); return }
+    signal.addEventListener('abort', abort, { once: true })
+    image.decode().then(() => finish(signal.aborted ? 'cancelled' : 'ready'), () => finish(signal.aborted ? 'cancelled' : 'error'))
+  })
+}
+
+async function prepareImage(image, url, signal) {
+  let result = await waitForMedia(image, 'load', () => { image.src = url }, signal)
+  if (result.status === 'ready') result = await decodeImage(image, signal)
+  if (result.status !== 'ready') image.removeAttribute('src')
+  return result
+}
+
+function releaseVideo(node) {
+  node.pause()
+  node.removeAttribute('src')
+  node.removeAttribute('poster')
+  node.load()
+}
+
+async function prepareMedia(item, signal) {
+  if (item.type !== 'video') return prepareImage(new Image(), item.url, signal)
+  const node = document.createElement('video')
+  node.playsInline = true
+  const result = await waitForMedia(node, 'loadeddata', () => {
+    node.poster = item.poster || ''
+    node.src = item.url
+    node.load()
+  }, signal)
+  if (result.status !== 'ready') releaseVideo(node)
+  return result
+}
+
+function clearWarmImages() {
+  warmLoad?.abort()
+  warmLoad = null
+  for (const image of warmImages) image.removeAttribute('src')
+  warmImages = []
+}
+
+function warmAdjacent() {
+  clearWarmImages()
+  warmLoad = new AbortController()
+  const urls = new Set()
+  for (const step of [-1, 1]) {
+    const item = items[(index + step + items.length) % items.length]
+    const url = item?.type === 'video' ? item.poster : item?.url
+    if (!url || url === currentItem()?.url || urls.has(url)) continue
+    urls.add(url)
+    const image = new Image()
+    warmImages.push(image)
+    void prepareImage(image, url, warmLoad.signal)
+  }
 }
 
 function measureNode(node) {
+  disposeAnimations(node)
   const transform = node.style.transform
-  const transition = node.style.transition
-  node.style.transition = 'none'
-  node.style.transform = 'none'
+  node.style.transform = restTransform
   const rect = node.getBoundingClientRect()
-  node.style.transform = transform
-  node.style.transition = transition
+  node.style.transform = transform || restTransform
   return rect
 }
 
+// 统一比例避免把缩略图裁切比例拉伸到原图；几何只在动画开始前读取。
 function transformToRect(from, to) {
-  if (!from || !to || !to.width || !to.height) return 'translateY(12px) scale(.98)'
-  const scaleX = Math.max(.01, from.width / to.width)
-  const scaleY = Math.max(.01, from.height / to.height)
+  const scale = Math.max(.01, Math.min(from.width / to.width, from.height / to.height))
   const x = from.left + from.width / 2 - (to.left + to.width / 2)
   const y = from.top + from.height / 2 - (to.top + to.height / 2)
-  return `translate(${x}px, ${y}px) scale(${scaleX}, ${scaleY})`
+  return `translate(${x}px, ${y}px) scale(${scale})`
 }
 
-function setNodeTransition(node, enabled = true) {
-  node.style.transition = enabled && !reducedMotion()
-    ? 'transform var(--motion-spring-duration) var(--motion-ease), opacity var(--motion-standard-duration) var(--motion-ease)'
-    : 'none'
+function visibleRect(node) {
+  if (!node?.isConnected) return null
+  const rect = node.getBoundingClientRect()
+  return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth ? rect : null
+}
+
+function currentOrigin() {
+  const tile = [...document.querySelectorAll('[data-media-url]')].find((node) => node.dataset.mediaUrl === currentItem()?.url && visibleRect(node))
+  if (tile) return visibleRect(tile.querySelector('img') || tile)
+  return currentItem()?.url === originUrl ? visibleRect(trigger) : null
 }
 
 function resetVideo() {
-  try { videoEl.pause() } catch {}
-  videoEl.removeAttribute('src')
-  videoEl.removeAttribute('poster')
+  releaseVideo(videoEl)
   videoEl.hidden = true
 }
 
-// 灯箱一次只呈现一个媒体项:视频项停在封面,实况图先给静帧
-async function applyItem() {
-  const item = currentItem()
-  if (!item) return
+// 将已解码节点原子替换进画面；旧图片在准备阶段始终保留。
+function commitMedia(item, node) {
   resetView()
-  for (const node of [imageEl, videoEl]) {
-    node.style.transition = 'none'
-    node.style.transform = 'none'
-    node.style.opacity = '1'
-  }
+  disposeAnimations(imageEl)
+  disposeAnimations(videoEl)
+  resetVideo()
   livePlaying = false
   liveBtn.hidden = true
   liveBtn.setAttribute('aria-pressed', 'false')
+  node.style.transform = restTransform
+  node.style.opacity = '0'
   if (item.type === 'video') {
     imageEl.hidden = true
-    videoEl.hidden = false
-    videoEl.controls = true
-    videoEl.loop = false
-    return waitForVideo(videoEl, item.url, item.poster)
-  }
-  resetVideo()
-  imageEl.hidden = false
-  if (item.live && item.motion) {
-    liveBtn.hidden = false
+    node.id = 'lightboxVideo'
+    node.controls = true
+    videoEl.replaceWith(node)
+    videoEl = node
+  } else {
+    node.id = 'lightboxImg'
+    node.alt = `第 ${index + 1} 张图片`
+    node.draggable = false
+    const previous = imageEl
+    previous.replaceWith(node)
+    imageEl = node
+    previous.removeAttribute('src')
+    liveBtn.hidden = !(item.live && item.motion)
     liveBtn.textContent = 'LIVE'
+    layoutImage()
   }
-  // 切图时已经用 preloadImage 预热过,这里直接换 src 不会闪
-  await waitForImage(imageEl, item.url)
-  if (currentItem() === item && !lightbox.hidden) layoutImage()
+  mediaReady = true
 }
 
-function playLive() {
-  const item = currentItem()
-  if (!item?.motion) return
-  livePlaying = true
+function animateImageStep(node, direction, entering) {
+  return animateElement(node, entering ? { opacity: 1, transform: restTransform } : {
+    opacity: 0, transform: `translate(${-direction * 14}px, 0px) scale(1)`,
+  }, {
+    duration: entering ? motionTiming.imageIn : motionTiming.imageOut,
+    initial: entering ? { opacity: 0, transform: `translate(${direction * 14}px, 0px) scale(1)` } : undefined,
+  }).finished
+}
+
+async function loadItem(targetIndex, step = 0, origin = null) {
+  const token = ++switchToken
+  mediaLoad?.abort()
+  clearWarmImages()
+  mediaLoad = new AbortController()
+  const signal = mediaLoad.signal
+  const valid = () => token === switchToken && !signal.aborted && !lightbox.hidden && !closing
+  if (mediaReady) animateElement(activeNode(), { opacity: 1, transform: restTransform }, { duration: motionTiming.content })
+  setStatus('正在加载…', true)
+  const result = await prepareMedia(items[targetIndex], signal)
+  if (!valid()) {
+    if (result.status === 'ready') {
+      if (result.node instanceof HTMLVideoElement) releaseVideo(result.node)
+      else result.node.removeAttribute('src')
+    }
+    return
+  }
+  if (result.status !== 'ready') {
+    requestedIndex = index
+    setStatus('影像加载或解码失败，请重试。', false, () => { requestedIndex = targetIndex; void loadItem(targetIndex, step, origin) })
+    return
+  }
+  if (step && mediaReady && !prefersReducedMotion()) {
+    const outgoing = await animateImageStep(activeNode(), Math.sign(step), false)
+    if (!valid() || outgoing.status !== 'finished') {
+      if (result.node instanceof HTMLVideoElement) releaseVideo(result.node)
+      else result.node.removeAttribute('src')
+      return
+    }
+  }
+  if (!valid()) return
+  index = targetIndex
+  commitMedia(currentItem(), result.node)
+  setStatus()
+  const node = activeNode()
+  if (step) {
+    animateImageStep(node, Math.sign(step), true)
+  } else {
+    const target = measureNode(node)
+    const source = visibleRect(origin)
+    const longImage = target.height > viewport.clientHeight * 2
+    const initial = longImage ? restTransform : source && target.width && target.height
+      ? transformToRect(source, target) : 'translate(0px, 0px) scale(.98)'
+    animateElement(node, { opacity: 1, transform: restTransform }, {
+      duration: longImage ? motionTiming.content : motionTiming.imageOpen,
+      easing: longImage ? motionEasing.out : motionEasing.move,
+      initial: { opacity: 0, transform: initial },
+    })
+  }
+  warmAdjacent()
+}
+
+export function openLightbox(list, startIndex = 0, source = null) {
+  if (!Array.isArray(list) || !list.length) return
+  ++motionToken
+  ++switchToken
+  closing = false
+  closePromise = null
+  mediaLoad?.abort()
+  clearWarmImages()
+  disposeAnimations(imageEl)
+  disposeAnimations(videoEl)
+  resetVideo()
   imageEl.hidden = true
-  videoEl.hidden = false
+  mediaReady = false
+  livePlaying = false
+  liveBtn.hidden = true
+  liveBtn.setAttribute('aria-pressed', 'false')
+  items = list
+  index = Math.max(0, Math.min(list.length - 1, startIndex))
+  requestedIndex = index
+  trigger = source instanceof Element ? source.closest('button, a') || source : null
+  originUrl = currentItem().url
+  modal.open({ source: trigger, focus: closeBtn })
+  animatePresence(lightbox, true, { className: 'lightbox-presence', duration: motionTiming.backdrop })
+  const tile = trigger?.closest('[data-media-url]')
+  void loadItem(index, 0, tile?.querySelector('img') || trigger)
+  prevBtn.hidden = nextBtn.hidden = items.length <= 1
+}
+
+export function closeLightbox(immediate = false) {
+  if (lightbox.hidden) return Promise.resolve({ status: 'finished' })
+  if (closing && !immediate) return closePromise
+  const token = ++motionToken
+  ++switchToken
+  closing = true
+  mediaLoad?.abort()
+  clearWarmImages()
+  videoEl.pause()
+  const node = activeNode()
+  const finish = () => {
+    if (token !== motionToken) return { status: 'interrupted' }
+    disposeAnimations(lightbox)
+    resetVideo()
+    imageEl.removeAttribute('src')
+    imageEl.hidden = true
+    resetView()
+    liveBtn.hidden = true
+    livePlaying = mediaReady = false
+    setStatus()
+    modal.finish()
+    lightbox.classList.remove('lightbox-presence', 'lightbox-presence-present', 'lightbox-presence-closing')
+    lightbox.style.opacity = ''
+    trigger = null
+    items = []
+    closing = false
+    return { status: 'finished' }
+  }
+  if (immediate || prefersReducedMotion()) return Promise.resolve(finish())
+  modal.beginClose()
+  const target = currentOrigin()
+  const current = mediaReady ? measureNode(node) : null
+  const transform = target && current?.width && current?.height && current.height <= viewport.clientHeight * 2
+    ? transformToRect(target, current) : restTransform
+  closePromise = Promise.all([
+    mediaReady ? animateElement(node, { transform, opacity: 0 }, { duration: motionTiming.imageClose, easing: motionEasing.move }).finished : Promise.resolve(),
+    animatePresence(lightbox, false, { className: 'lightbox-presence', hidden: false, duration: motionTiming.backdrop }),
+  ]).then(finish)
+  return closePromise
+}
+
+function move(step) {
+  if (!items.length || lightbox.hidden || closing) return
+  requestedIndex = (requestedIndex + step + items.length) % items.length
+  stopLive()
+  videoEl.pause()
+  void loadItem(requestedIndex, step)
+}
+
+async function playLive() {
+  const item = currentItem()
+  if (closing || !mediaReady || !item?.motion) return
+  const token = ++switchToken
+  requestedIndex = index
+  mediaLoad?.abort()
+  mediaLoad = new AbortController()
+  const signal = mediaLoad.signal
+  setStatus('正在加载实况…', true)
+  const result = await prepareMedia({ type: 'video', url: item.motion, poster: item.url }, signal)
+  if (token !== switchToken || signal.aborted || closing || lightbox.hidden) {
+    if (result.status === 'ready') releaseVideo(result.node)
+    return
+  }
+  if (result.status !== 'ready') { setStatus('实况加载失败，请重试。', false, () => { void playLive() }); return }
+  disposeAnimations(imageEl)
   resetView()
-  // 实况片段是几秒的环境音录像,不做进度条,点画面暂停/继续,播完自动回到静帧
-  videoEl.controls = false
+  resetVideo()
+  const node = result.node
+  node.id = 'lightboxVideo'
+  node.style.transform = restTransform
+  videoEl.replaceWith(node)
+  videoEl = node
+  imageEl.hidden = true
+  livePlaying = true
   liveBtn.hidden = true
   liveBtn.setAttribute('aria-pressed', 'true')
-  void waitForVideo(videoEl, item.motion, item.url).then(() => {
-    if (lightbox.hidden || currentItem() !== item || !livePlaying) return
-    // 声音保留:是用户主动点击触发的播放
-    videoEl.play().catch(() => {})
-  })
+  setStatus()
+  try { await node.play() }
+  catch {
+    if (token === switchToken && !closing && !lightbox.hidden) { stopLive(); setStatus('浏览器无法播放此实况，请重试。', false, () => { void playLive() }) }
+  }
 }
 
 function stopLive() {
   if (!livePlaying) return
   livePlaying = false
   resetVideo()
-  const item = currentItem()
-  if (item?.type === 'image') {
+  if (currentItem()?.type === 'image') {
     imageEl.hidden = false
-    liveBtn.hidden = !item.live
+    imageEl.style.opacity = '1'
+    imageEl.style.transform = restTransform
+    liveBtn.hidden = !currentItem().live
     liveBtn.setAttribute('aria-pressed', 'false')
     layoutImage()
   }
 }
 
-function startOpen(origin, token) {
-  if (token !== motionToken || lightbox.hidden) return
-  const node = activeNode()
-  const target = measureNode(node)
-  const source = origin?.isConnected ? origin.getBoundingClientRect() : null
-  node.style.transition = 'none'
-  node.style.transform = transformToRect(source, target)
-  node.style.opacity = source ? '.01' : '0'
-  if (reducedMotion()) {
-    node.style.transform = 'none'
-    node.style.opacity = '1'
-    return
-  }
-  void node.offsetWidth
-  setNodeTransition(node)
-  requestAnimationFrame(() => {
-    if (token !== motionToken || lightbox.hidden) return
-    node.style.transform = 'none'
-    node.style.opacity = '1'
-  })
-}
-
-// items: [{ type: 'image'|'video', url, poster?, motion?, live? }]
-export function openLightbox(list, startIndex = 0, source = null) {
-  if (!Array.isArray(list) || !list.length) return
-  items = list
-  index = Math.max(0, Math.min(list.length - 1, startIndex))
-  const node = source instanceof Element ? source : null
-  trigger = node?.closest('button, a') || node
-  const token = ++motionToken
-  ++switchToken
-  lightbox.hidden = false
-  document.body.classList.add('lightbox-open')
-  closeBtn.focus({ preventScroll: true })
-  const item = currentItem()
-  void Promise.all([
-    item.type === 'video' && item.poster ? preloadImage(item.poster) : Promise.resolve(),
-    applyItem(),
-  ]).then(() => startOpen(trigger, token))
-  animatePresence(lightbox, true, { className: 'lightbox-presence', duration: 220 })
-  syncNavButtons()
-}
-
-export function closeLightbox(immediate = false) {
-  if (lightbox.hidden) return
-  const token = ++motionToken
-  ++switchToken
-  const node = activeNode()
-  const returnFocus = trigger
-  const target = trigger?.isConnected ? trigger.getBoundingClientRect() : null
-  const current = measureNode(node)
-  setNodeTransition(node, !(immediate || reducedMotion()))
-  node.style.transform = transformToRect(target, current)
-  node.style.opacity = target ? '.01' : '0'
-  const closing = animatePresence(lightbox, false, {
-    className: 'lightbox-presence',
-    duration: 340,
-    immediate: immediate || reducedMotion(),
-  })
-  Promise.resolve(closing).then(() => {
-    if (token !== motionToken) return
-    node.style.transform = ''
-    node.style.opacity = ''
-    node.style.transition = ''
-    resetVideo()
-    livePlaying = false
-    resetView()
-    document.body.classList.remove('lightbox-open')
-    returnFocus?.focus?.({ preventScroll: true })
-    trigger = null
-  })
-}
-
-function syncNavButtons() {
-  const single = items.length <= 1
-  prevBtn.hidden = single
-  nextBtn.hidden = single
-}
-
-async function move(step) {
-  if (!items.length || lightbox.hidden || lightbox.classList.contains('lightbox-presence-closing')) return
-  ++motionToken
-  const nextIndex = (index + step + items.length) % items.length
-  const nextItem = items[nextIndex]
-  const token = ++switchToken
-  const node = activeNode()
-  const preload = nextItem.type === 'video'
-    ? (nextItem.poster ? preloadImage(nextItem.poster) : Promise.resolve())
-    : preloadImage(nextItem.url)
-  await preload
-  if (token !== switchToken || lightbox.hidden) return
-  if (reducedMotion()) {
-    index = nextIndex
-    await applyItem()
-    return
-  }
-  const direction = step > 0 ? 1 : -1
-  setNodeTransition(node)
-  node.style.opacity = '0'
-  node.style.transform = `translateX(${direction * 14}px) scale(.985)`
-  await wait(140)
-  if (token !== switchToken || lightbox.hidden) return
-  index = nextIndex
-  await applyItem()
-  if (token !== switchToken || lightbox.hidden) return
-  const next = activeNode()
-  next.style.transition = 'none'
-  next.style.transform = `translateX(${-direction * 14}px) scale(.985)`
-  next.style.opacity = '0'
-  void next.offsetWidth
-  setNodeTransition(next)
-  requestAnimationFrame(() => {
-    if (token !== switchToken || lightbox.hidden) return
-    next.style.transform = 'none'
-    next.style.opacity = '1'
-  })
-}
-
 function togglePlayback() {
   const item = currentItem()
-  if (!item) return
-  if (item.type !== 'video' && !livePlaying) { playLive(); return }
-  if (videoEl.paused) videoEl.play().catch(() => {})
+  if (closing || !mediaReady || !item) return
+  if (item.type !== 'video' && !livePlaying) { void playLive(); return }
+  if (videoEl.paused) videoEl.play().catch(() => setStatus('浏览器无法播放此视频。'))
   else videoEl.pause()
 }
 
-closeBtn.onclick = () => closeLightbox()
-prevBtn.onclick = () => { void move(-1) }
-nextBtn.onclick = () => { void move(1) }
-liveBtn.onclick = (event) => { event.stopPropagation(); playLive() }
-// 实况片段播完自动回到静帧,iPhone 上就是这么收尾的
-videoEl.onended = () => stopLive()
-// 点画面暂停/继续实况片段(视频项用原生控件,不接管)
-videoEl.onclick = () => { if (livePlaying) { if (videoEl.paused) videoEl.play().catch(() => {}); else videoEl.pause() } }
-imageEl.ondblclick = (event) => {
+closeBtn.onclick = () => { void closeLightbox() }
+prevBtn.onclick = () => move(-1)
+nextBtn.onclick = () => move(1)
+liveBtn.onclick = (event) => { event.stopPropagation(); void playLive() }
+retryBtn.onclick = () => retryAction?.()
+stage.addEventListener('ended', (event) => { if (event.target === videoEl) stopLive() }, true)
+viewport.addEventListener('click', (event) => { if (event.target === videoEl && livePlaying) togglePlayback() })
+viewport.addEventListener('dblclick', (event) => {
+  if (event.target !== imageEl) return
   event.preventDefault()
   zoomAt(zoom > 1 ? 1 : 2, event.clientX, event.clientY)
-}
+})
 viewport.addEventListener('wheel', (event) => {
   if (!event.ctrlKey || imageEl.hidden) return
   event.preventDefault()
@@ -338,7 +441,7 @@ const touchGeometry = (touches) => ({
   distance: Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY),
 })
 viewport.addEventListener('touchstart', (event) => {
-  if (event.touches.length !== 2 || imageEl.hidden) return
+  if (event.touches.length !== 2 || imageEl.hidden || closing) return
   event.preventDefault()
   pinch = { ...touchGeometry(event.touches), zoom }
 }, { passive: false })
@@ -362,13 +465,13 @@ viewport.addEventListener('scroll', () => { ignoreBackdropUntil = performance.no
 window.addEventListener('resize', () => { if (!lightbox.hidden) layoutImage() })
 lightbox.onclick = (event) => {
   if (performance.now() < ignoreBackdropUntil) return
-  if (event.target === lightbox || event.target === viewport || event.target === stage) closeLightbox()
+  if (event.target === lightbox || event.target === viewport || event.target === stage) void closeLightbox()
 }
 document.addEventListener('keydown', (event) => {
-  if (lightbox.hidden) return
-  if (event.key === 'Escape') { closeLightbox(); return }
-  if (event.key === 'ArrowLeft') { event.preventDefault(); void move(-1); return }
-  if (event.key === 'ArrowRight') { event.preventDefault(); void move(1); return }
+  if (lightbox.hidden || closing) return
+  if (event.key === 'Escape') return
+  if (event.key === 'ArrowLeft') { event.preventDefault(); move(-1); return }
+  if (event.key === 'ArrowRight') { event.preventDefault(); move(1); return }
   if (['+', '=', '-', '0'].includes(event.key) && !imageEl.hidden) {
     event.preventDefault()
     const rect = viewport.getBoundingClientRect()

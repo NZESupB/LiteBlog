@@ -1,4 +1,4 @@
-// 媒体判定、同步同名兼容分组与视频封面工具；上传入口使用 live-photo.js 的异步解析。
+// 媒体类型判定与视频封面工具；实况照片归一化统一走 live-photo.js。
 // 浏览器抽帧仅用于即时预览；正式视频与封面由服务端处理。
 
 const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm'])
@@ -30,54 +30,6 @@ export function isImageFile(file) {
   return String(file.type || '').startsWith('image/') || IMAGE_EXTENSIONS.has(extension(file.name))
 }
 
-// 同步接口仅保留无歧义的同名配对；上传路径须先读取 live-photo.js 的内容标识与内嵌视频。
-// 返回 [{ still, motion, video }]，每个文件只出现一次。
-export function groupMediaFiles(files) {
-  const list = [...new Set(files)]
-  const buckets = new Map()
-  for (const file of list) {
-    const stem = mediaStem(file.name)
-    if (!buckets.has(stem)) buckets.set(stem, { stills: [], videos: [] })
-    const bucket = buckets.get(stem)
-    if (isVideoFile(file)) bucket.videos.push(file)
-    else if (isImageFile(file)) bucket.stills.push(file)
-  }
-  // 多个同名候选均保留为独立项，避免错误挂载。
-  const motionByStill = new Map()
-  const stillByMotion = new Map()
-  for (const bucket of buckets.values()) {
-    if (bucket.stills.length !== 1 || bucket.videos.length !== 1) continue
-    const [still] = bucket.stills
-    const [motion] = bucket.videos
-    motionByStill.set(still, motion)
-    stillByMotion.set(motion, still)
-  }
-  const items = []
-  const emitted = new Set()
-  for (const file of list) {
-    if (emitted.has(file)) continue
-    // 先遇到配对视频时,把整对放在视频的位置上,静帧不再单独出现
-    const stillPair = stillByMotion.get(file)
-    if (stillPair) {
-      if (emitted.has(stillPair)) continue
-      emitted.add(stillPair)
-      emitted.add(file)
-      items.push({ still: stillPair, motion: file, video: null })
-      continue
-    }
-    emitted.add(file)
-    const motion = motionByStill.get(file)
-    if (motion) {
-      emitted.add(motion)
-      items.push({ still: file, motion, video: null })
-      continue
-    }
-    items.push(isVideoFile(file)
-      ? { still: null, motion: null, video: file }
-      : { still: file, motion: null, video: null })
-  }
-  return items
-}
 
 // 上传要带准确的 Content-Type:部分浏览器给 .mov 的 type 是空的
 export function videoContentType(file) {

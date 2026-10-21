@@ -7,19 +7,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
-// 实况图配对规则是纯函数,先在 Node 里把边界钉死(浏览器里跑的是同一份代码)
-const { groupMediaFiles, mediaStem, isVideoFile, videoContentType } = await import('../public/js/media.js')
+// 类型工具和生产 normalizeMediaFiles 入口分别覆盖，避免保留测试专用的旧配对实现。
+const { mediaStem, isVideoFile, videoContentType } = await import('../public/js/media.js')
 const file = (name, type) => new File([new Uint8Array([1, 2, 3])], name, type ? { type } : undefined)
-const shape = (files) => groupMediaFiles(files).map((g) => [g.still?.name, g.motion?.name, g.video?.name].filter(Boolean).join('+'))
-assert.deepEqual(shape([file('IMG_0001.JPG', 'image/jpeg'), file('IMG_0001.MOV', 'video/quicktime')]), ['IMG_0001.JPG+IMG_0001.MOV'])
-assert.deepEqual(shape([file('IMG_0001.MOV', 'video/quicktime'), file('IMG_0001.JPG', 'image/jpeg')]), ['IMG_0001.JPG+IMG_0001.MOV'])
-assert.deepEqual(shape([file('a.jpg', 'image/jpeg'), file('b.mp4', 'video/mp4')]), ['a.jpg', 'b.mp4'])
-// 同名多个候选不能任取第一对，所有文件均保留为独立项。
-assert.deepEqual(shape([file('x.jpg', 'image/jpeg'), file('x.png', 'image/png'), file('x.mp4', 'video/mp4')]), ['x.jpg', 'x.png', 'x.mp4'])
-// 浏览器给 HEIC / MOV 的 type 可能是空的,这时候要靠扩展名判断
-assert.deepEqual(shape([file('IMG_1.HEIC'), file('IMG_1.MOV')]), ['IMG_1.HEIC+IMG_1.MOV'])
-// Google Takeout 导出的实况图是 jpg + mp4 同名配对
-assert.deepEqual(shape([file('IMG_0002.jpg', 'image/jpeg'), file('IMG_0002.mp4', 'video/mp4')]), ['IMG_0002.jpg+IMG_0002.mp4'])
 assert.equal(mediaStem('IMG_0001.HEIC'), 'IMG_0001')
 assert.equal(isVideoFile(file('IMG_0001.MOV')), true)
 assert.equal(videoContentType(file('a.MOV')), 'video/quicktime')
@@ -126,6 +116,36 @@ assert.equal(tileC.container.hidden, true)
 stopInlineVideo()
 assert.equal(FakeArtplayer.instances.every((art) => art.destroyed), true)
 assert.ok((await preloadInlineVideoPlayer()) === FakeArtplayer, '已经有了就不要再插脚本标签')
+
+// 脚本延迟完成时，停止/切页必须使旧点击失效，连续点击只执行最后一次。
+const originalDocument = globalThis.document
+try {
+  delete globalThis.Artplayer
+  let script
+  globalThis.document = { createElement: () => ({}), head: { appendChild(node) { script = node } } }
+  const stale = fakeTile()
+  playInlineVideo(stale, clip)
+  stopInlineVideo()
+  stale.isConnected = false
+  globalThis.Artplayer = FakeArtplayer
+  const count = FakeArtplayer.instances.length
+  script.onload()
+  await Promise.resolve()
+  assert.equal(FakeArtplayer.instances.length, count, '停止后延迟回调不能创建播放器')
+  delete globalThis.Artplayer
+  const first = fakeTile(), last = fakeTile()
+  playInlineVideo(first, clip)
+  playInlineVideo(last, clip)
+  globalThis.Artplayer = FakeArtplayer
+  await Promise.resolve()
+  assert.equal(FakeArtplayer.instances.length, count + 1, '同一加载 Promise 仅执行最后一次点击')
+  assert.equal(first.playing(), false)
+  assert.equal(last.playing(), true)
+  stopInlineVideo()
+} finally {
+  globalThis.document = originalDocument
+  globalThis.Artplayer = FakeArtplayer
+}
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 mkdirSync(path.join(root, 'data'), { recursive: true })

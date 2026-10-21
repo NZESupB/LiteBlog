@@ -8,6 +8,7 @@ const FALLBACK_THEME = '#e5636f'
 
 let active = null // { tile, container, art, collapse }
 let loading = null
+let playRequest = 0
 
 const playerCtor = () => globalThis.Artplayer || globalThis.window?.Artplayer || null
 
@@ -30,6 +31,7 @@ export function preloadInlineVideoPlayer() {
 // 收起当前视频:销毁播放器并退回封面。destroy 会连 <video> 的 src 一起清掉,
 // 否则元素虽然没了,浏览器还在后台把整个文件拉完。
 export function stopInlineVideo() {
+  playRequest += 1
   if (!active) return
   const { tile, container, art, collapse } = active
   active = null
@@ -98,9 +100,11 @@ function openPlayer(Ctor, tile, container, media, onError) {
 }
 
 export function playInlineVideo(tile, media, { onError } = {}) {
-  if (!media?.url || active?.tile === tile) return
+  if (!media?.url || tile.isConnected === false || active?.tile === tile) return
   const container = tile.querySelector('.media-player')
   if (!container) return
+  const request = ++playRequest
+  const alive = () => request === playRequest && tile.isConnected !== false && container.isConnected !== false
   const Ctor = playerCtor()
   if (Ctor) {
     openPlayer(Ctor, tile, container, media, onError)
@@ -108,7 +112,7 @@ export function playInlineVideo(tile, media, { onError } = {}) {
   }
   // 刚进页面就点、脚本还在路上:到了以后再建;失败就把提示交回给界面
   void preloadInlineVideoPlayer().then((Loaded) => {
-    if (!Loaded || active?.tile === tile) return
+    if (!Loaded || !alive()) return
     openPlayer(Loaded, tile, container, media, onError)
-  }).catch(() => onError?.())
+  }).catch(() => { if (alive()) onError?.() })
 }

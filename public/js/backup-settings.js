@@ -1,5 +1,5 @@
 // 备份设置页：轮询只在本页存活期间运行，恢复成功后交给主应用清理会话与草稿。
-import { api, el, esc, formatBytes } from './utils.js'
+import { api, el, esc, formatBytes, setFormMessage } from './utils.js'
 
 export function createBackupSettings(onRestored) {
   const node = el(`<div class="backup-settings">
@@ -38,8 +38,7 @@ export function createBackupSettings(onRestored) {
   const message = (selector, text, ok = false) => {
     if (!alive()) return
     const target = find(selector)
-    target.textContent = text
-    target.style.color = ok ? 'var(--success)' : 'var(--danger)'
+    setFormMessage(target, text, ok ? 'success' : 'error')
   }
   const timeLabel = (value) => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—'
   const render = () => {

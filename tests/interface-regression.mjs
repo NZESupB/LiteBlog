@@ -3,7 +3,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { stepSpring, shouldDismiss, attachSheetMotion, projectMomentum, createSpringController, animatePresence } from '../public/js/sheet-motion.js'
+import { stepSpring, shouldDismiss, attachSheetMotion, projectMomentum, createSpringController } from '../public/js/ui/composer-morph.js'
+import { animatePresence, animateElement, disposeAnimations, motionTiming, motionEasing } from '../public/js/ui/motion.js'
+import { enterSettingsView, settingsTransition } from '../public/js/ui/settings-motion.js'
+import { createViewScope } from '../public/js/views/scope.js'
 
 const source = readFileSync(new URL('../public/js/theme.js', import.meta.url), 'utf8')
 // system 档由系统偏好决定,这里用可控的 matchMedia 模拟深色系统
@@ -54,11 +57,11 @@ synced.events.dispatchEvent(Object.assign(new Event('storage'), { key: null, new
 assert.equal(synced.theme.current, 'light')
 
 const css = readFileSync(new URL('../public/style.css', import.meta.url), 'utf8')
-assert.match(css, /--motion-standard-duration/)
+assert.equal(motionTiming.standard, 220)
 assert.match(css, /\.menu-presence-closing/)
-assert.match(css, /\.page-enter/)
+assert.doesNotMatch(css, /@keyframes page-in/)
 assert.doesNotMatch(css, /@keyframes pop/)
-// 容器变形:类名由 js/sheet-motion.js 写入,样式必须和它对得上
+// 容器变形由 ui/composer-morph.js 管理，样式必须和它对得上。
 assert.match(css, /\.composer-morph\s*\{/)
 assert.match(css, /\.composer-overlay\.morph\s*>\s*\.composer-dialog/)
 assert.match(css, /\.composer-origin-hidden\s*\{/)
@@ -88,7 +91,7 @@ function contrast(a, b) {
 const light = tokens(css.match(/:root \{([^}]+)\}/)[1])
 const dark = { ...light, ...tokens(css.match(/\[data-theme="dark"\] \{([^}]+)\}/)[1]) }
 for (const [scheme, colors, onAccent] of [['light', light, '#ffffff'], ['dark', dark, '#2a0d18']]) {
-  for (const foreground of ['--ink', '--text', '--muted', '--faint']) {
+  for (const foreground of ['--ink', '--text', '--muted', '--faint', '--danger', '--success', '--warning']) {
     for (const background of ['--bg', '--surface']) {
       assert.ok(contrast(colors[foreground], colors[background]) >= 4.5, `${scheme} ${foreground}/${background}`)
     }
@@ -110,7 +113,7 @@ assert.equal(shouldDismiss(40, 0, 500), false, '短距离慢拖回位')
 assert.ok(Math.abs(projectMomentum(1000, .99) - 99) < .001)
 assert.equal(projectMomentum(0), 0)
 
-const original = { window: globalThis.window, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, performance: globalThis.performance }
+const original = { window: globalThis.window, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, performance: globalThis.performance, Motion: globalThis.Motion }
 let time = 0
 let nextFrame = 0
 let reduced = false
@@ -118,11 +121,29 @@ const frames = new Map()
 const fakeWindow = new EventTarget()
 // narrow = 窄屏(移动端);容器变形在移动端与桌面端都要生效,所以两档各测一遍
 let narrow = true
-fakeWindow.matchMedia = (query) => ({ get matches() { return query.includes('reduced-motion') ? reduced : query.includes('max-width') ? narrow : true } })
+const reducedMedia = new EventTarget()
+Object.defineProperty(reducedMedia, 'matches', { get: () => reduced })
+fakeWindow.matchMedia = (query) => query.includes('reduced-motion') ? reducedMedia : ({ get matches() { return query.includes('max-width') ? narrow : true } })
 globalThis.window = fakeWindow
 globalThis.performance = { now: () => time }
 globalThis.requestAnimationFrame = (callback) => { const id = ++nextFrame; frames.set(id, callback); return id }
 globalThis.cancelAnimationFrame = (id) => frames.delete(id)
+// 可控的库边界：只模拟 Motion 完成/停止信号，业务层必须正确处理所有结果。
+const motionCalls = []
+globalThis.Motion = { animate(node, values, options) {
+  motionCalls.push({ node, values, options })
+  const { duration } = options
+  let resolve, frame
+  const finished = new Promise((done) => { resolve = done })
+  const started = time
+  const tick = () => {
+    if (time - started < duration * 1000) { frame = requestAnimationFrame(tick); return }
+    for (const [key, value] of Object.entries(values)) node.style[key] = Array.isArray(value) ? value.at(-1) : value
+    resolve()
+  }
+  frame = requestAnimationFrame(tick)
+  return { then: (callback) => finished.then(callback), stop: () => cancelAnimationFrame(frame) }
+} }
 function advance(count = 90) {
   for (let i = 0; i < count; i++) {
     time += 1000 / 60
@@ -135,7 +156,7 @@ function panel() {
   const handle = new EventTarget()
   handle.setPointerCapture = () => {}
   handle.releasePointerCapture = () => {}
-  const dialog = { offsetHeight: 500, style: {} }
+  const dialog = Object.assign(presenceNode(), { offsetHeight: 500 })
   const overlay = { style: {} }
   let closed = false
   const motion = attachSheetMotion(dialog, overlay, handle, () => { closed = true; motion.dispose() })
@@ -193,6 +214,11 @@ function morphPanel() {
   const motion = attachSheetMotion(dialog, overlay, handle, () => { closed = true; motion.dispose() }, { origin })
   return {
     motion, dialog, morph, morphStyles, overlayStyles, overlayClasses, appended,
+    send(type, y) {
+      const event = Object.assign(new Event(type), { clientY: y, pointerId: 1, isPrimary: true, button: 0 })
+      Object.defineProperty(event, 'timeStamp', { value: time })
+      handle.dispatchEvent(event)
+    },
     fillAlpha: () => {
       const match = /rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)/.exec(morph.style.background || '')
       return match && match[4] !== undefined ? Number(match[4]) : 1
@@ -212,10 +238,12 @@ function presenceNode() {
     hidden: true,
     isConnected: true,
     removed: false,
+    style: { setProperty(key, value) { this[key] = value } },
     classList: {
       add: (...values) => values.forEach((value) => names.add(value)),
       remove: (...values) => values.forEach((value) => names.delete(value)),
       contains: (value) => names.has(value),
+      toggle: (value, on) => on ? names.add(value) : names.delete(value),
     },
     remove() { this.removed = true; this.isConnected = false },
     hasClass(value) { return names.has(value) },
@@ -267,6 +295,40 @@ try {
   paced.dispose()
   controller.dispose()
 
+  for (const child of ['site', 'ai', 'storage', 'backup', 'profile']) {
+    assert.equal(settingsTransition('#/settings', `#/settings/${child}`), 'push')
+    assert.equal(settingsTransition(`#/settings/${child}`, '#/settings'), 'pop')
+    assert.equal(settingsTransition('', `#/settings/${child}`), 'none', '直达不补播层级动画')
+  }
+  assert.equal(settingsTransition('#/settings/ai', '#/settings/storage'), 'replace')
+  assert.equal(settingsTransition('#/gallery', '#/settings'), 'none')
+  assert.equal(settingsTransition('#/settings', '#/settings'), 'none')
+  const easingNode = presenceNode()
+  const customEasing = animateElement(easingNode, { opacity: 1 }, { duration: 180, easing: motionEasing.move })
+  assert.equal(motionCalls.at(-1).options.duration, .18, '毫秒仅在库边界换算成秒')
+  assert.equal(motionCalls.at(-1).options.ease, motionEasing.move, '调用方缓动透传到 Motion')
+  customEasing.cancel()
+  assert.deepEqual(await customEasing.finished, { status: 'interrupted' })
+  const settingsScope = createViewScope()
+  const settingsNode = Object.assign(presenceNode(), { dataset: {}, isConnected: true })
+  const pushedSettings = enterSettingsView(settingsNode, settingsScope, 'push')
+  assert.equal(settingsNode.style.transform, 'translateX(16px)')
+  assert.equal(motionCalls.at(-1).options.duration, .22)
+  assert.equal(motionCalls.at(-1).options.ease, motionEasing.out)
+  settingsScope.dispose()
+  assert.deepEqual(await pushedSettings, { status: 'disposed' }, '切页立即结束设置入场')
+  const poppedScope = createViewScope()
+  const poppedSettings = enterSettingsView(settingsNode, poppedScope, 'pop')
+  assert.equal(settingsNode.style.transform, 'translateX(-16px)')
+  advance(30)
+  assert.deepEqual(await poppedSettings, { status: 'finished' })
+  assert.equal(settingsNode.style.transform, 'translateX(0px)', '终值保持单位变换')
+  poppedScope.dispose()
+  const deadScope = createViewScope()
+  deadScope.dispose()
+  assert.deepEqual(await enterSettingsView(settingsNode, deadScope), { status: 'disposed' })
+  assert.equal(motionTiming.press, 100)
+  assert.equal(motionTiming.release, 160)
   const presence = presenceNode()
   animatePresence(presence, true, { className: 'test-presence', duration: 20 })
   advance(1)
@@ -274,50 +336,68 @@ try {
   assert.equal(presence.hasClass('test-presence-present'), true)
   const closePresence = animatePresence(presence, false, { className: 'test-presence', duration: 1, remove: true })
   assert.equal(presence.removed, false, '退出动画完成前保留节点')
+  advance(3)
   await closePresence
   assert.equal(presence.removed, true, '退出动画完成后移除节点')
 
   const interruptedPresence = presenceNode()
   animatePresence(interruptedPresence, true, { className: 'test-presence', duration: 20 })
   advance(1)
-  animatePresence(interruptedPresence, false, { className: 'test-presence', duration: 50, remove: true })
+  const interruptedExit = animatePresence(interruptedPresence, false, { className: 'test-presence', duration: 50, remove: true })
   animatePresence(interruptedPresence, true, { className: 'test-presence', duration: 20 })
   advance(1)
   assert.equal(interruptedPresence.removed, false, '重新打开会取消上一段退出')
   assert.equal(interruptedPresence.hasClass('test-presence-present'), true)
+  assert.deepEqual(await interruptedExit, { status: 'interrupted' }, '退出被重开打断后 Promise 仍必须结束')
+  const disposedExit = animatePresence(interruptedPresence, false, { duration: 50, remove: true })
+  disposeAnimations(interruptedPresence)
+  assert.deepEqual(await disposedExit, { status: 'disposed' }, '销毁也结束等待')
+  const reopened = animatePresence(interruptedPresence, true)
+  advance(30)
+  assert.deepEqual(await reopened, { status: 'finished' }, '销毁后重新打开建立新的生命周期')
+  const concurrent = presenceNode()
+  const appearance = animateElement(concurrent, { opacity: 1 })
+  const press = animateElement(concurrent, { '--press-scale': .97 }, { channel: 'press' })
+  advance(30)
+  assert.deepEqual(await appearance.finished, { status: 'finished' }, '按压不取消同节点的入场')
+  assert.deepEqual(await press.finished, { status: 'finished' })
+  const runtime = animateElement(presenceNode(), { opacity: 1 })
+  reduced = true
+  reducedMedia.dispatchEvent(new Event('change'))
+  assert.deepEqual(await runtime.finished, { status: 'finished' }, '运行时改成减少动态立即落定')
 
   reduced = true
   const reducedPresence = presenceNode()
-  animatePresence(reducedPresence, true, { className: 'test-presence', reducedMotion: () => reduced })
+  animatePresence(reducedPresence, true, { className: 'test-presence' })
   assert.equal(reducedPresence.hasClass('test-presence-present'), true)
-  animatePresence(reducedPresence, false, { className: 'test-presence', reducedMotion: () => reduced, remove: true })
+  animatePresence(reducedPresence, false, { className: 'test-presence', remove: true })
   assert.equal(reducedPresence.removed, true, '减少动态立即完成 presence 清理')
   reduced = false
 
-  const first = panel()
-  assert.ok(Number(first.dialog.style.scale) < 1, '面板入场从缩放状态开始')
-  advance()
-  first.send('pointerdown', 200)
-  time += 50
-  first.send('pointermove', 420)
-  first.send('pointercancel', 420)
-  advance()
-  assert.equal(first.closed, false, '系统取消手势不能关闭写作面板')
-  assert.equal(first.dialog.style.transform, 'translateY(0px)')
-  assert.equal(first.dialog.style.scale, '1', '面板打开后缩放回到原始尺寸')
-  first.motion.close()
-  advance(3)
-  const position = parseFloat(first.dialog.style.transform.slice(11))
-  first.send('pointerdown', 400)
-  assert.equal(parseFloat(first.dialog.style.transform.slice(11)), position, '抓住关闭中的面板时不跳动')
-  time += 30
-  first.send('pointermove', 250)
-  first.send('pointerup', 250)
-  advance()
-  assert.equal(first.closed, false, '关闭途中可反拉打开')
-  first.motion.close()
-  advance()
-  assert.equal(first.closed, true)
+  const first = morphPanel()
+  try {
+    advance()
+    first.send('pointerdown', 200)
+    time += 50
+    first.send('pointermove', 420)
+    first.send('pointercancel', 420)
+    advance()
+    assert.equal(first.closed, false, '系统取消手势不能关闭写作面板')
+    assert.equal(first.morph.style.display, 'none', '取消后表面回到展开态')
+    first.motion.close()
+    advance(3)
+    const position = first.morph.style.top
+    first.send('pointerdown', 400)
+    assert.equal(first.morph.style.top, position, '抓住关闭中的面板时不跳动')
+    time += 30
+    first.send('pointermove', 250)
+    first.send('pointerup', 250)
+    advance()
+    assert.equal(first.closed, false, '关闭途中可反拉打开')
+    first.motion.close()
+    advance()
+    assert.equal(first.closed, true)
+  } finally { first.restore() }
 
   // 容器变形:移动端面板从触发元素长出来,关闭时收回同一处
   const morphing = morphPanel()
@@ -415,12 +495,26 @@ try {
   }
   const second = panel()
   advance(1)
-  assert.equal(second.dialog.style.transform, 'none')
-  assert.equal(second.dialog.style.scale, '1')
+  // 静止态写显式变换而非 'none':本地 Motion 会把 'none' 插值成 scale(0)(登录页白屏的根因)。
+  assert.equal(second.dialog.style.transform, 'translateY(0) scale(1)')
+  assert.equal(second.dialog.style.opacity, 1)
   second.motion.close()
   advance(1)
   assert.equal(second.closed, true, '减少动态立即结束位移')
   assert.equal(frames.size, 0, '关闭后清理动画帧')
+  const oldScope = createViewScope()
+  let release, writes = 0, cleaned = 0
+  const response = new Promise((done) => { release = done })
+  const delayed = response.then(() => { if (oldScope.alive()) writes++ })
+  oldScope.own(() => cleaned++)
+  oldScope.timeout(() => writes++, 0)
+  oldScope.dispose()
+  release()
+  await delayed
+  await new Promise((done) => setTimeout(done, 5))
+  assert.equal(oldScope.signal.aborted, true)
+  assert.equal(cleaned, 1)
+  assert.equal(writes, 0, '旧视图响应和计时器都不能提交')
 } finally {
   Object.assign(globalThis, original)
 }
