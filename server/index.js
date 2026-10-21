@@ -528,6 +528,8 @@ function claimUploads(items, userId, draftId = null) {
     const motionName = String(item.motion || '')
     const posterName = String(item.poster || '')
     if (motionName && !isVideoName(motionName)) throw new Error('实况配对文件必须是视频')
+    if (motionName && isVideoName(filename)) throw new Error('实况封面必须是图片')
+    if (motionName && posterName) throw new Error('实况图片不能另挂视频封面')
     if (posterName && isVideoName(posterName)) throw new Error('视频封面必须是图片')
     const duration = Number(item.duration)
     return {

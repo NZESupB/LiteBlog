@@ -976,6 +976,11 @@ body.modal-open .to-top { visibility: hidden; }
 .public-chip:has(input:checked) { background: var(--accent-soft); color: var(--accent-deep); }
 .preview-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .preview-grid:empty { display: none; }
+.live-photo-help { line-height: 1.6; margin-top: 10px; }
+.live-photo-notice { margin: 10px 0; padding: 8px 0; color: var(--ink); overflow-wrap: anywhere; }
+.live-photo-notice p { margin: 0 0 6px; line-height: 1.6; }
+.live-photo-notice .btn { margin: 3px 8px 3px 0; min-height: 44px; }
+.live-photo-notice[hidden] { display: none; }
 .preview-item { position: relative; width: 92px; height: 92px; border-radius: var(--radius-sm); overflow: hidden; background: var(--surface-2); box-shadow: inset 0 0 0 var(--hairline) var(--separator); }
 .preview-item img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .preview-item.no-poster { background: var(--surface-3); }

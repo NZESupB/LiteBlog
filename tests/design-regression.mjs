@@ -164,6 +164,8 @@ try {
   assert.ok(toolbarJs.includes('keyboardInset'), '底部表情盘跟随键盘位移')
   console.log('通过：登录、图文发布、读取、相册、归档、私密边界、页面资源、灯箱外壳与主题。')
 } finally {
+  const { stopVideoJobs } = await import('../server/video-jobs.js')
+  await stopVideoJobs()
   db?.close()
   rmSync(dataDir, { recursive: true, force: true })
 }

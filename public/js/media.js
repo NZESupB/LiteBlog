@@ -1,9 +1,10 @@
-// 媒体采集工具:判定图片/视频、按文件名主干配对实况图、抽视频封面帧与读时长。
+// 媒体判定、同步同名兼容分组与视频封面工具；上传入口使用 live-photo.js 的异步解析。
 // 浏览器抽帧仅用于即时预览；正式视频与封面由服务端处理。
 
 const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm'])
 const VIDEO_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v'])
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif'])
+const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'avif'])
 
 function extension(name) {
   const match = /\.([a-z0-9]+)$/i.exec(String(name || ''))
@@ -26,27 +27,26 @@ export function isVideoFile(file) {
 export function isImageFile(file) {
   if (!file) return false
   if (isVideoFile(file)) return false
-  return String(file.type || '').startsWith('image/') || IMAGE_TYPES.has(String(file.type).toLowerCase())
+  return String(file.type || '').startsWith('image/') || IMAGE_EXTENSIONS.has(extension(file.name))
 }
 
-// 把一次选择里的文件按主干分组:同一主干上同时出现静帧与视频时,视频就是这张实况图的动态部分。
-// 配不上配对视频的视频一律当普通视频;不做提示、不要求用户手动挂载。
-// 返回 [{ still, motion, video }],顺序与用户选择顺序一致,每个文件只会出现在一个结果里。
+// 同步接口仅保留无歧义的同名配对；上传路径须先读取 live-photo.js 的内容标识与内嵌视频。
+// 返回 [{ still, motion, video }]，每个文件只出现一次。
 export function groupMediaFiles(files) {
-  const list = [...files]
+  const list = [...new Set(files)]
   const buckets = new Map()
   for (const file of list) {
     const stem = mediaStem(file.name)
     if (!buckets.has(stem)) buckets.set(stem, { stills: [], videos: [] })
     const bucket = buckets.get(stem)
     if (isVideoFile(file)) bucket.videos.push(file)
-    else bucket.stills.push(file)
+    else if (isImageFile(file)) bucket.stills.push(file)
   }
-  // 每个主干只认第一对:多出来的静帧/视频当作独立媒体项,避免一张图挂多个动态部分
+  // 多个同名候选均保留为独立项，避免错误挂载。
   const motionByStill = new Map()
   const stillByMotion = new Map()
   for (const bucket of buckets.values()) {
-    if (!bucket.stills.length || !bucket.videos.length) continue
+    if (bucket.stills.length !== 1 || bucket.videos.length !== 1) continue
     const [still] = bucket.stills
     const [motion] = bucket.videos
     motionByStill.set(still, motion)

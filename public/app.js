@@ -6,7 +6,8 @@ import { attachComposerViewport, attachInlineInputViewport } from '/js/composer-
 import { api, streamSse, formatBytes, el, esc, setFormMessage, avatarColor, parseTime, formatTime, dateLabel } from '/js/utils.js'
 import { openLightbox, closeLightbox } from '/js/lightbox.js'
 import { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } from '/js/inline-video.js'
-import { groupMediaFiles, isVideoFile, readVideoPoster, formatDuration } from '/js/media.js'
+import { isVideoFile, readVideoPoster, formatDuration } from '/js/media.js'
+import { normalizeMediaFiles } from '/js/live-photo.js'
 import { uploadVideo, waitForVideoUpload, cancelVideoUpload, retryVideoUpload, selectVideoVariant, getVideoUploadConfig, formatVideoElapsed, formatVideoBytes } from '/js/video-upload.js'
 import { createBackupSettings } from '/js/backup-settings.js'
 import { createBrowserNotifications } from '/js/browser-notifications.js'
@@ -231,7 +232,7 @@ function draftFileDb() {
 
 async function saveDraftFile(draftId, file) {
   const db = await draftFileDb()
-  if (!db || !file._id) return
+  if (!db || !file?._id) return
   await new Promise((resolve) => {
     const tx = db.transaction('files', 'readwrite')
     tx.objectStore('files').put({ key: `${draftId}:${file._id}`, draftId, id: file._id, name: file.name, type: file.type, blob: file })
@@ -455,31 +456,50 @@ function loadHeic2any() {
   return heic2anyLoading
 }
 
-async function normalizeHeic(file) {
-  const isHeic = file.type === 'image/heic' || file.type === 'image/heif' ||
-    /\.(heic|heif)$/i.test(file.name)
-  if (!isHeic) return file
-  const convert = await loadHeic2any()
-  const blob = await convert({ blob: file, toType: 'image/jpeg', quality: 0.9 })
-  if (!blob || blob.size === 0) throw new Error('HEIC 图片转换失败,请改用 JPEG/PNG')
-  return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' })
-}
-
-async function compressImage(file) {
-  if (file.type === 'image/gif' || file.size < 300 * 1024) return file
+async function decodeImage(file) {
   try {
     const bitmap = await createImageBitmap(file)
-    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height))
-    const canvas = document.createElement('canvas')
-    canvas.width = Math.round(bitmap.width * scale)
-    canvas.height = Math.round(bitmap.height * scale)
-    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-    const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.85))
-    if (!blob || blob.size >= file.size) return file
-    return new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' })
+    return { image: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() }
   } catch {
-    return file
+    const url = URL.createObjectURL(file), image = new Image()
+    try {
+      image.src = url
+      await image.decode()
+      if (!image.naturalWidth || !image.naturalHeight) throw new Error('图片没有有效尺寸')
+      return { image, width: image.naturalWidth, height: image.naturalHeight, close: () => URL.revokeObjectURL(url) }
+    } catch { URL.revokeObjectURL(url); throw new Error('图片无法解码，请重新选择原件或使用 JPEG/PNG') }
   }
+}
+async function imageJpeg(file, decoded, maxEdge = Infinity, quality = 0.9) {
+  const scale = Math.min(1, maxEdge / Math.max(decoded.width, decoded.height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(decoded.width * scale)); canvas.height = Math.max(1, Math.round(decoded.height * scale))
+  canvas.getContext('2d').drawImage(decoded.image, 0, 0, canvas.width, canvas.height)
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality))
+  if (!blob?.size) throw new Error('图片转换失败，请使用 JPEG/PNG')
+  return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' })
+}
+async function normalizeHeic(file) {
+  if (!/image\/hei[cf]/i.test(file.type) && !/\.(heic|heif)$/i.test(file.name)) return file
+  try {
+    const decoded = await decodeImage(file)
+    try { return await imageJpeg(file, decoded) } finally { decoded.close() }
+  } catch {
+    const convert = await loadHeic2any()
+    const result = await convert({ blob: file, toType: 'image/jpeg', quality: 0.9 })
+    const blob = Array.isArray(result) ? result[0] : result
+    if (!blob?.size) throw new Error('HEIC 主图转换失败，请重新选择原件或使用 JPEG/PNG')
+    return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' })
+  }
+}
+async function compressImage(file) {
+  const decoded = await decodeImage(file)
+  try {
+    const supported = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type)
+    if (supported && (file.type === 'image/gif' || file.size < 300 * 1024)) return file
+    const compressed = await imageJpeg(file, decoded, 1600, 0.85)
+    return supported && compressed.size >= file.size ? file : compressed
+  } finally { decoded.close() }
 }
 
 // ---------- 发布 / 编辑组件 ----------
@@ -566,6 +586,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         </div>
       </div>
       <div class="preview-grid"></div>
+      <p class="storage-hint live-photo-help">实况照片请选择原件；iPhone 请同时选择照片和配对 MOV。系统只提供静态图时，无法恢复动态内容。</p>
       <div class="form-error"></div>
       <div class="compose-actions">
         <button class="btn-ghost pick" type="button" title="从相册选择照片或视频" aria-label="从相册选择照片或视频">${icon('image')}</button>
@@ -579,7 +600,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         ${post ? '<button class="btn-ghost cancel">取消</button>' : '<button class="btn-ghost discard-draft" type="button">丢弃草稿</button>'}
         <button class="btn submit">${post ? '保存' : '发布'}</button>
       </div>
-      <input class="album-input" type="file" accept="image/*,video/*" multiple hidden />
+      <input class="album-input" type="file" accept="image/*,video/*,.heic,.heif,.avif,.mov,.mp4" multiple hidden />
       <input class="camera-input" type="file" accept="image/*" capture="environment" hidden />
     </div>`)
   const textarea = $('textarea', card)
@@ -701,6 +722,7 @@ function createComposer(post, draftId, onDone, onCancel) {
   const keepImages = post ? post.images.map((img) => ({ ...img })) : [] // 保留的已有图片(已就绪,不显示处理动画)
   const newFiles = [] // 新增文件,含 _status: processing/uploading/done/error
   const videoControllers = new Map()
+  const parseControllers = new Set()
   const videoResults = el('<div class="storage-hint" aria-live="polite" hidden></div>')
   previews.insertAdjacentElement('afterend', videoResults)
   const savedDraft = readComposeState(draftId) || {}
@@ -708,11 +730,12 @@ function createComposer(post, draftId, onDone, onCancel) {
   let imageJobId = savedDraft.imageJobId || ''
   let imagePollTimer = null
   let disposed = false
+  let restoringMedia = true, mediaRestoreError = ''
   const draftState = () => ({
     content: textarea.value,
     publicText: $('[name=publicText]', card)?.checked ?? false,
     publicImages: $('[name=publicImages]', card)?.checked ?? false,
-    files: newFiles.map((file) => ({
+    files: newFiles.filter((file) => !file._parsing).map((file) => ({
       id: file._id, name: file.name || '', type: file.type || '', status: file._status,
       filename: file._name || '', jobId: file._jobId || '',
       kind: file._kind || 'image', poster: file._poster || '', duration: file._duration || null,
@@ -721,11 +744,13 @@ function createComposer(post, draftId, onDone, onCancel) {
       clientUploadId: file._clientUploadId || '', fingerprint: file._fingerprint || '',
       motionJobId: file._motion?._videoJobId || '', motionResult: file._motion?._videoResult || null,
       motionClientUploadId: file._motion?._clientUploadId || '', motionFingerprint: file._motion?._fingerprint || '',
+      source: file._source || null, warnings: file._warnings || [], needsReview: Boolean(file._needsReview),
+      motionName: file._motion?.name || '', error: file._errMsg || '',
     })),
     keep: keepImages.map((image) => image.id),
     imageJobId: imageTask?.id || savedDraft.imageJobId || '',
   })
-  const persistDraft = () => { if (!disposed) saveComposeState(draftId, draftState()) }
+  const persistDraft = () => { if (!disposed && !restoringMedia && !mediaRestoreError) saveComposeState(draftId, draftState()) }
   window.addEventListener('pagehide', persistDraft)
   const savedKeep = new Set(Array.isArray(savedDraft.keep) ? savedDraft.keep : keepImages.map((image) => image.id))
   if (post) {
@@ -741,17 +766,19 @@ function createComposer(post, draftId, onDone, onCancel) {
   const draftReady = api('/api/drafts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: draftId, postId: post?.id || null }) }).catch(() => null)
 
   // 原视频不写入 IndexedDB；已完整接收的视频通过任务 ID 恢复后台轮询。
-  ;(async () => {
+  const restoreReady = (async () => {
     await draftReady
     if (disposed) return
     const snapshot = await api(`/api/drafts/${encodeURIComponent(draftId)}`)
     if (disposed) return
     const serverJobs = new Map((snapshot.videoJobs || []).map((job) => [job.uploadId, job]))
-    const restoredIds = new Set()
+    // 原照片 blob 与已上传封面通过同一个媒体 ID 对账。
     const savedFiles = Array.isArray(savedDraft.files) ? savedDraft.files : []
     function restoreMotion(file, saved) {
       if (!saved?.motion && !saved?.motionJobId && !saved?.motionStatus) return
       file._motion = { _id: newDraftId(), name: '实况视频', _status: saved.motion ? 'done' : 'uploading', _name: saved.motion || '', _videoJobId: saved.motionJobId || '', _videoResult: saved.motionResult || null }
+      file._motion._parent = file
+      file._motion.name = saved.motionName || '实况视频'
       file._motion._clientUploadId = saved.motionClientUploadId || ''; file._motion._fingerprint = saved.motionFingerprint || ''
       const state = serverJobs.get(saved.motionJobId)
       if (state?.status === 'done') applyVideoResult(file._motion, state, false)
@@ -760,17 +787,16 @@ function createComposer(post, draftId, onDone, onCancel) {
     }
     for (const saved of savedFiles) {
       const kind = saved.kind || 'image'
-      if (!saved.filename && kind !== 'video') continue
       const thumb = kind === 'video' ? saved.poster : saved.filename
       const file = {
-        _id: saved.id || newDraftId(), _name: saved.filename || '', _status: saved.filename ? 'done' : 'uploading', _jobId: saved.jobId || '',
+        _id: saved.id || newDraftId(), _name: saved.filename || '', _status: saved.filename ? 'done' : kind === 'video' ? 'uploading' : 'error', _jobId: saved.jobId || '',
         name: saved.name, type: saved.type, _kind: kind, _poster: saved.poster || '', _duration: saved.duration || null,
         _videoJobId: saved.videoJobId || '', _videoResult: saved.videoResult || null,
         _clientUploadId: saved.clientUploadId || '', _fingerprint: saved.fingerprint || '',
+        _source: saved.source || null, _warnings: saved.warnings || [], _needsReview: Boolean(saved.needsReview), _errMsg: saved.error || (saved.filename ? '' : '请重新选择原始照片继续处理'),
         _url: thumb ? `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(thumb)}` : '',
       }
       newFiles.push(file)
-      restoredIds.add(file._id)
       restoreMotion(file, saved)
       if (kind === 'video') {
         const state = serverJobs.get(saved.videoJobId)
@@ -791,15 +817,28 @@ function createComposer(post, draftId, onDone, onCancel) {
     const blobs = await loadDraftFiles(draftId)
     if (disposed) return
     for (const file of blobs) {
-      if (restoredIds.has(file._id)) continue
-      newFiles.push(file)
-      restoreMotion(file, savedFiles.find((saved) => saved.id === file._id))
-      processFile(file)
+      const restored = newFiles.find((item) => item._id === file._id)
+      if (restored?._name) {
+        restored._originalFile = file
+        if (restored._motion?._needsFile && restored._source?.pairing === 'embedded') resumeMotionFromFile(restored, file)
+        continue
+      }
+      const saved = savedFiles.find((item) => item.id === file._id)
+      const [group] = await normalizeMediaFiles([file])
+      if (disposed) return
+      const item = restored || file
+      item._originalFile = file; item._uploadStill = group.still; item._source = saved?.source || group.source
+      item._warnings = saved?.warnings || group.warnings; item._needsReview = saved?.needsReview ?? group.warnings.some((w) => w.blocking)
+      if (!restored) { newFiles.push(item); restoreMotion(item, saved) }
+      if (group.motion && !item._motion && item._source?.pairing !== 'static') item._motion = makeMotion(item, group.motion)
+      processFile(item)
+      if (group.motion && item._motion && (!item._motion._videoJobId || item._motion._needsFile)) runVideoTask(item._motion, group.motion, false)
     }
     renderPreviews()
     updatePublishGuard()
     persistDraft()
-  })().catch((error) => { if (!disposed) errorLine.textContent = `恢复草稿失败：${error.message}` })
+  })().catch((error) => { mediaRestoreError = error.message || '媒体状态读取失败'; if (!disposed) errorLine.textContent = `恢复草稿失败：${mediaRestoreError}` })
+    .finally(() => { restoringMedia = false; if (!disposed) { updatePublishGuard(); persistDraft() } })
 
   function formatElapsed(startedAt) {
     const start = startedAt ? parseTime(startedAt).getTime() : Date.now()
@@ -931,8 +970,11 @@ function createComposer(post, draftId, onDone, onCancel) {
     imagePollTimer = null
     polishAbort?.abort()
     polishAbort = null
+    for (const controller of parseControllers) controller.abort()
+    parseControllers.clear()
     for (const controller of videoControllers.values()) controller.abort()
     videoControllers.clear()
+    for (const item of newFiles) for (const url of [item._url, item._posterUrl]) if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
     // 关闭编辑器时，未加入发布内容的 AI 结果没有保留价值；运行中的任务也一并取消。
     if (imageJobId && !newFiles.some((file) => file._jobId === imageJobId)) {
       api(`/api/image-jobs/${encodeURIComponent(imageJobId)}`, { method: 'DELETE' }).catch(() => {})
@@ -958,13 +1000,14 @@ function createComposer(post, draftId, onDone, onCancel) {
     item._needsFile = false; item._canRetry = false; item._errMsg = ''
   }
   async function runVideoTask(item, source, needsPoster) {
-    if (disposed || item._removed) return
+    if (disposed || item._removed || videoControllers.has(item)) return
     const controller = new AbortController()
     videoControllers.set(item, controller)
     item._status = 'uploading'
     item._needsFile = false; item._canRetry = false; item._errMsg = ''
     let lastPaint = 0
     const onState = (state) => {
+      if (item._removed && state.uploadId) { cancelVideoUpload(state.uploadId).catch((error) => { if (!disposed) errorLine.textContent = `取消视频失败：${error.message}` }); return }
       if (disposed || item._removed) return
       const newId = state.uploadId && item._videoJobId !== state.uploadId
       if (state.uploadId) item._videoJobId = state.uploadId
@@ -990,6 +1033,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       const result = source ? await uploadVideo(source, options) : await waitForVideoUpload(item._videoJobId, options)
       if (disposed || item._removed) return
       applyVideoResult(item, result, needsPoster)
+      if (item._parent?._status === 'done' && !item._parent._needsReview) await removeDraftFile(draftId, item._parent._id)
     } catch (error) {
       if (disposed || item._removed) return
       item._status = 'error'
@@ -1018,41 +1062,77 @@ function createComposer(post, draftId, onDone, onCancel) {
     if (!disposed && !file._removed) await runVideoTask(file, file, true)
   }
 
-  async function attachMotion(still, motionFile) {
-    still._motion = { _id: newDraftId(), name: motionFile.name, _status: 'uploading' }
-    await runVideoTask(still._motion, motionFile, false)
+  function makeMotion(still, motionFile) {
+    return { _id: newDraftId(), name: motionFile.name, _status: 'processing', _parent: still, _file: motionFile }
+  }
+  async function resumeMotionFromFile(still, selected) {
+    try {
+      let motion = selected
+      if (!isVideoFile(selected)) {
+        const [group] = await normalizeMediaFiles([selected])
+        if (!group?.motion) throw new Error('此原件没有可提取的完整实况视频')
+        motion = group.motion
+      }
+      if (disposed || still._removed || still._motion?._removed) return
+      still._motion._file = motion
+      await runVideoTask(still._motion, motion, false)
+    } catch (error) { if (!disposed && !still._removed) { errorLine.textContent = error.message; renderPreviews(); updatePublishGuard() } }
+  }
+  async function keepStillOnly(item) {
+    const motion = item._motion
+    errorLine.textContent = ''
+    item._discarding = true; renderPreviews(); updatePublishGuard()
+    try {
+      if (motion) {
+        motion._removed = true
+        videoControllers.get(motion)?.abort()
+        if (motion._videoJobId) await cancelVideoUpload(motion._videoJobId)
+        else if (motion._name) await api(`/api/uploads/${encodeURIComponent(motion._name)}`, { method: 'DELETE' })
+      }
+      if (disposed || item._removed) return
+      item._motion = null; item._needsReview = false
+      item._warnings = [{ code: 'STATIC_ONLY', message: '已选择仅保留静态图', blocking: false }]
+      item._source = { ...item._source, pairing: 'static' }
+      await removeDraftFile(draftId, item._id)
+    } catch (error) {
+      errorLine.textContent = `仅保留静态图失败：${error.message}`
+      if (motion) { motion._removed = false; motion._status = 'error'; motion._errMsg = error.message }
+    } finally { item._discarding = false; if (!disposed && !item._removed) { renderPreviews(); updatePublishGuard(); persistDraft() } }
   }
 
   // 选完图立刻处理(HEIC 转码 + 压缩)并上传到存储后端,发布时只提交文件名
   async function processFile(file) {
     file._id ||= newDraftId()
     file._kind = 'image'
-    await saveDraftFile(draftId, file)
+    await saveDraftFile(draftId, file instanceof Blob ? file : file._originalFile)
     file._status = 'processing'
     persistDraft()
     renderPreviews()
     updatePublishGuard()
     try {
-      const normalized = await normalizeHeic(file)
+      const normalized = await normalizeHeic(file._uploadStill || file._originalFile || file)
       const compressed = await compressImage(normalized)
+      if (disposed || file._removed) return
+      if (file._url?.startsWith('blob:')) URL.revokeObjectURL(file._url)
       file._url = URL.createObjectURL(compressed)
       file._status = 'uploading'
       renderPreviews()
+      if (!(await draftReady)) throw new Error('草稿初始化失败，请重新打开编辑器')
+      if (disposed || file._removed) return
       const form = new FormData()
       form.append('image', compressed)
       form.append('draftId', draftId)
       const { filename } = await api('/api/uploads', { method: 'POST', body: form })
+      if (file._removed) { await api(`/api/uploads/${encodeURIComponent(filename)}`, { method: 'DELETE' }); return }
       file._name = filename
-      file._status = 'done'
-      await removeDraftFile(draftId, file._id)
+      file._status = 'done'; file._errMsg = ''
+      if (!disposed && !file._needsReview && (!file._motion || file._motion._status === 'done')) await removeDraftFile(draftId, file._id)
       persistDraft()
     } catch (e) {
       file._status = 'error'
       file._errMsg = e.message || '处理失败'
     }
-    renderPreviews()
-    updatePublishGuard()
-    persistDraft()
+    if (!disposed && !file._removed) { renderPreviews(); updatePublishGuard(); persistDraft() }
   }
 
   function uploadProgressText(item) {
@@ -1113,6 +1193,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       }
       $('.remove', node).onclick = () => {
         item._removed = true
+        item._parseController?.abort()
         if (item._motion) item._motion._removed = true
         for (const video of [item, item._motion]) {
           if (!video) continue
@@ -1136,6 +1217,32 @@ function createComposer(post, draftId, onDone, onCancel) {
         persistDraft()
       }
       previews.appendChild(node)
+      if (item._warnings?.length || (kind !== 'video' && (item._motion || item._status === 'error'))) {
+        const notice = el('<div class="live-photo-notice"></div>')
+        const message = el('<p></p>')
+        message.textContent = `${item.name || '照片'}：${(item._warnings || []).map((w) => w.message).join('；') || item._errMsg || '实况照片'}`
+        notice.appendChild(message)
+        if (kind !== 'video' && item._status === 'done' && (item._motion || item._needsReview)) {
+          const button = el('<button class="btn btn-ghost" type="button">仅保留静态图</button>')
+          button.disabled = Boolean(item._discarding); button.onclick = () => keepStillOnly(item)
+          notice.appendChild(button)
+        }
+        if (kind !== 'video' && item._status === 'error' && !item._parsing) {
+          const button = el('<button class="btn btn-ghost" type="button">重试图片</button>')
+          button.onclick = () => processFile(item)
+          notice.appendChild(button)
+        }
+        if (kind !== 'video' && (item._status === 'error' || item._needsReview) && !item._parsing) {
+          const button = el('<button class="btn btn-ghost" type="button">重新选择原件</button>')
+          button.onclick = () => {
+            const input = document.createElement('input'); input.type = 'file'; input.multiple = true; input.accept = fileInput.accept
+            input.onchange = () => { if (input.files.length) { $('.remove', node).click(); handleFiles(input) } }
+            input.click()
+          }
+          notice.appendChild(button)
+        }
+        videoResults.appendChild(notice)
+      }
       for (const video of [item, item._motion]) {
         const result = video?._videoResult
         if (video?._progress && video._status === 'uploading') {
@@ -1143,13 +1250,15 @@ function createComposer(post, draftId, onDone, onCancel) {
           line.textContent = `${video.name || '视频'}：${uploadProgressText(video)}。原件上传后会先保存，后台继续处理。`
           videoResults.appendChild(line)
         }
-        if (video?._needsFile || video?._canRetry) {
+        if (video?._needsFile || video?._canRetry || (video !== item && video?._status === 'error' && video._file)) {
           const line = el('<p></p>'), button = el('<button class="btn btn-ghost" type="button"></button>')
-          button.textContent = video._needsFile ? '选择原件续传' : '从检查点重试'
+          button.textContent = video._needsFile ? '选择原件续传' : video._canRetry ? '从检查点重试' : '重试实况视频'
           button.onclick = async () => {
+            if (!video._needsFile && !video._canRetry && video._file) { runVideoTask(video, video._file, false); return }
             if (video._needsFile) {
-              const input = document.createElement('input'); input.type = 'file'; input.accept = 'video/*,.mov,.mp4,.webm'
-              input.onchange = () => { if (input.files[0]) runVideoTask(video, input.files[0], video === item && kind === 'video') }
+              const input = document.createElement('input'); input.type = 'file'
+              input.accept = video !== item ? 'image/*,video/*,.heic,.heif,.avif,.mov,.mp4' : 'video/*,.mov,.mp4,.webm'
+              input.onchange = () => { if (input.files[0]) video !== item ? resumeMotionFromFile(item, input.files[0]) : runVideoTask(video, input.files[0], true) }
               input.click()
             } else {
               button.disabled = true
@@ -1196,12 +1305,13 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   // 发布守卫:任一媒体(含实况配对视频)还在处理或上传中则禁用发布
   const MEDIA_PENDING = ['processing', 'uploading', 'selecting']
-  const videoUnresolved = () => newFiles.some((file) => (file._kind === 'video' && file._status === 'error') || file._motion?._status === 'error')
+  const videoUnresolved = () => newFiles.some((file) => file._status === 'error' || file._needsReview || file._discarding || file._motion?._status === 'error')
   function updatePublishGuard() {
-    const pending = newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))
+    const pending = restoringMedia || newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))
     const generating = imageTask && ['queued', 'running', 'uploading'].includes(imageTask.status)
-    submitBtn.disabled = pending || generating || videoUnresolved()
-    if (videoUnresolved()) submitBtn.textContent = '请处理或移除失败视频'
+    submitBtn.disabled = Boolean(mediaRestoreError) || pending || generating || videoUnresolved()
+    if (mediaRestoreError) submitBtn.textContent = '恢复失败，请重新打开编辑器'
+    else if (videoUnresolved()) submitBtn.textContent = '请处理失败或待确认的媒体'
     else if (pending) submitBtn.textContent = '媒体处理中…'
     else if (generating) submitBtn.textContent = 'AI 配图生成中…'
     else submitBtn.textContent = post ? '保存' : '发布'
@@ -1211,29 +1321,47 @@ function createComposer(post, draftId, onDone, onCancel) {
 
   $('.pick', card).onclick = () => fileInput.click()
   $('.camera', card).onclick = () => cameraInput.click()
-  const handleFiles = (input) => {
-    // 先取出文件再清空 input(清空 value 会同时清掉 input.files)
+  const handleFiles = async (input) => {
     const picked = [...input.files]
     input.value = ''
-    // 实况图 = 同名主干上的静帧 + 配对视频。分组在改名之前按原始文件名做,
-    // 因为 HEIC 转码与压缩都会把文件名换成 .jpg,之后再配就配不上了。
-    const groups = groupMediaFiles(picked)
-    const queued = []
-    for (const group of groups) {
-      if (group.video) {
-        newFiles.push(group.video)
-        queued.push(() => processVideo(group.video))
-        continue
+    if (!picked.length) return
+    const controller = new AbortController()
+    parseControllers.add(controller)
+    const placeholder = { _id: newDraftId(), name: `解析 ${picked.length} 个文件`, _parsing: true, _status: 'processing', _kind: 'image', _parseController: controller }
+    newFiles.push(placeholder); renderPreviews(); updatePublishGuard()
+    try {
+      await restoreReady
+      controller.signal.throwIfAborted()
+      for (const original of picked) {
+        if (isVideoFile(original)) continue
+        original._id ||= newDraftId()
+        await saveDraftFile(draftId, original)
       }
-      if (!group.still) continue
-      newFiles.push(group.still)
-      queued.push(() => processFile(group.still))
-      if (group.motion) queued.push(() => attachMotion(group.still, group.motion))
+      const groups = await normalizeMediaFiles(picked, { signal: controller.signal })
+      if (disposed || placeholder._removed) return
+      const index = newFiles.indexOf(placeholder)
+      if (index >= 0) newFiles.splice(index, 1)
+      const work = []
+      for (const group of groups) {
+        const item = group.original || group.video || group.still
+        item._id ||= newDraftId(); item._source = group.source; item._warnings = group.warnings
+        item._needsReview = group.kind !== 'video' && group.warnings.some((w) => w.blocking)
+        item._status = 'processing'; item._kind = group.video ? 'video' : 'image'
+        item._uploadStill = group.still
+        if (group.motion) item._motion = makeMotion(item, group.motion)
+        newFiles.push(item)
+        work.push(() => group.video ? processVideo(item) : processFile(item))
+        if (group.motion) work.push(() => runVideoTask(item._motion, group.motion, false))
+      }
+      renderPreviews(); updatePublishGuard(); persistDraft()
+      for (const task of work) task()
+    } catch (error) {
+      if (!controller.signal.aborted && !disposed) { placeholder._status = 'error'; placeholder._errMsg = error.message; errorLine.textContent = error.message }
+    } finally {
+      parseControllers.delete(controller)
+      if (placeholder._removed) for (const original of picked) if (original._id) await removeDraftFile(draftId, original._id)
+      if (!disposed) { renderPreviews(); updatePublishGuard(); persistDraft() }
     }
-    renderPreviews()
-    updatePublishGuard()
-    // 处理与上传异步进行,完成后各自刷新状态
-    for (const task of queued) task()
   }
   fileInput.onchange = () => handleFiles(fileInput)
   cameraInput.onchange = () => handleFiles(cameraInput)
@@ -1245,7 +1373,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       errorLine.textContent = '写点什么或传张图吧'
       return
     }
-    if (videoUnresolved() || newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))) return
+    if (restoringMedia || mediaRestoreError || videoUnresolved() || newFiles.some((f) => MEDIA_PENDING.includes(f._status) || MEDIA_PENDING.includes(f._motion?._status))) return
     submitBtn.disabled = true
     submitBtn.textContent = '发布中…'
     errorLine.textContent = ''
