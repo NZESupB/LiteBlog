@@ -24,13 +24,13 @@
     },
     {
       "name": "DOMPurify",
-      "version": "3.2.6",
+      "version": "3.4.17",
       "file": "purify.min.js",
-      "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.2.6.tgz",
+      "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz",
       "upstreamFile": "package/dist/purify.min.js",
       "license": "(MPL-2.0 OR Apache-2.0)",
-      "sha256": "89e1fa7647cb495370d3a997ace4387f5d15d9f4c5af12352c53daa400956287",
-      "modifications": "与官方分发逐字节一致。"
+      "sha256": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31",
+      "modifications": "与官方分发逐字节一致；3.2.6 → 3.4.17 为 CVE（默认配置 XSS/mXSS/mXSS 绕过）修复升级，调用方式仍是 DOMPurify.sanitize(string)。"
     },
     {
       "name": "Artplayer",
