@@ -146,9 +146,54 @@ test('真实视频分片、后台处理、版本选择与发布', async ({ page 
   await expect(page.locator('.composer-overlay')).toHaveCount(0)
   await expect(page.locator('.post-content').first()).toContainText('视频迁移回归')
   expect(await page.locator('.media-tile video').count()).toBe(0)
+  const mediaUrl = await page.locator('.media-tile.is-video').first().getAttribute('data-media-url')
+  expect(mediaUrl).toMatch(/^\/uploads\//)
+  const range = await page.request.get(mediaUrl!, { headers: { Range: 'bytes=0-15' } })
+  expect(range.status()).toBe(206)
+  expect((await range.body()).length).toBe(16)
+})
+
+test('播放器实际播放、失败提示与离页销毁', async ({ page }) => {
+  await login(page)
+  await page.route('**/api/gallery', (route) =>
+    route.fulfill({
+      json: {
+        images: [
+          {
+            id: 9001,
+            type: 'video',
+            url: '/__test/playable.webm',
+            author: 'user1',
+            created_at: '2026-10-22 00:00:00',
+          },
+          {
+            id: 9002,
+            type: 'video',
+            url: '/__test/invalid-video',
+            author: 'user1',
+            created_at: '2026-10-22 00:00:00',
+          },
+        ],
+      },
+    }),
+  )
+  await page.route('**/__test/invalid-video', (route) =>
+    route.fulfill({ contentType: 'video/webm', body: 'invalid video' }),
+  )
+  await page.goto('/#/gallery')
+  expect(await page.locator('.media-tile video').count()).toBe(0)
   await page.getByRole('button', { name: '播放视频' }).first().click()
-  await expect(page.locator('.is-playing')).toBeVisible()
-  await page.locator('.site-title').click()
+  const player = page.locator('.is-playing video')
+  await expect(player).toBeVisible()
+  await expect.poll(() => player.evaluate((video: HTMLVideoElement) => video.currentTime)).toBeGreaterThan(0)
+  await page.getByRole('button', { name: '收起视频' }).first().click()
+  await expect(page.locator('.art-video')).toHaveCount(0)
+  await page.getByRole('button', { name: '播放视频' }).nth(1).click()
+  await expect(page.getByRole('status').filter({ hasText: '浏览器或设备无法解码此视频' })).toBeVisible()
+  await expect(page.locator('.is-playing')).toHaveCount(0)
+  await expect(page.locator('.art-video')).toHaveCount(0)
+  await page.getByRole('button', { name: '播放视频' }).first().click()
+  await expect(page.locator('.is-playing video')).toBeVisible()
   await page.goto('/#/settings')
   await expect(page.locator('.art-video')).toHaveCount(0)
 })

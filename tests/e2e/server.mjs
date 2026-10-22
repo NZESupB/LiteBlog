@@ -74,6 +74,29 @@ app.get('/__test/video', (c) => {
   ])
   return c.body(readFileSync(filename), 200, { 'Content-Type': 'video/mp4' })
 })
+app.get('/__test/playable.webm', (c) => {
+  const filename = path.join(dataDir, 'playable.webm')
+  execFileSync('ffmpeg', [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=c=pink:s=320x240:r=24',
+    '-t',
+    '3',
+    '-c:v',
+    'libvpx',
+    '-deadline',
+    'realtime',
+    '-pix_fmt',
+    'yuv420p',
+    filename,
+  ])
+  return c.body(readFileSync(filename), 200, { 'Content-Type': 'video/webm' })
+})
 app.get('/__test/snapshot', async (c) => {
   const filename = path.join(dataDir, 'fixture.db')
   await backup(getDatabase(), filename)

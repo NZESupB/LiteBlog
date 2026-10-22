@@ -18,12 +18,14 @@ jobs:
         with:
           node-version: '24.22.1'
           cache: npm
-      - name: Install dependencies and FFmpeg
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Install FFmpeg
         run: |
-          npm ci
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          npx playwright install --with-deps chromium
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
       - name: Validate source, build, API and media
         run: npm run check
       - name: Validate browser interactions and PWA upgrades
