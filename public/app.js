@@ -220,18 +220,17 @@ function openComposerModal(post = null, source = null) {
   const body = $('.composer-body', overlay)
   const card = createComposer(post, draftId, async (result = {}) => {
     closeModal(true)
-    if (post) {
-      clearComposeState(draftId)
-      await clearDraftFiles(draftId)
-      showToast('动态已保存')
-      renderTimeline()
-    } else {
-      clearComposeState(draftId)
-      await clearDraftFiles(draftId)
+    clearComposeState(draftId)
+    const message = post ? '动态已保存' : '发布成功'
+    const viewPost = post ? null : () => { location.hash = `#/post/${result.id}` }
+    if (!post) {
       try { localStorage.removeItem(`compose-draft-id:${location.origin}:${site.user.id}`) } catch {}
-      if (!location.hash || location.hash === '#/') renderTimeline()
-      showToast('发布成功', () => { location.hash = `#/post/${result.id}` })
     }
+    if (post || !location.hash || location.hash === '#/') void renderTimeline()
+    showToast(message, viewPost)
+    // 发布结果已经确认，本地缓存清理不能阻断成功提示与视图刷新。
+    try { await clearDraftFiles(draftId) }
+    catch (error) { showToast(`${message}，但浏览器草稿缓存清理失败：${error.message}`, viewPost) }
   }, () => closeModal())
   body.appendChild(card)
   const closeButton = $('.composer-close', overlay)
@@ -903,6 +902,14 @@ function createComposer(post, draftId, onDone, onCancel) {
     item._progress = null
     item._needsFile = false; item._canRetry = false; item._errMsg = ''
   }
+  async function removeCachedFile(id) {
+    try { await removeDraftFile(draftId, id) }
+    catch (error) {
+      const message = `浏览器草稿缓存清理失败：${error.message}`
+      if (disposed) showToast(message)
+      else errorLine.textContent = message
+    }
+  }
   async function runVideoTask(item, source, needsPoster) {
     if (disposed || item._removed || videoControllers.has(item)) return
     const controller = new AbortController()
@@ -937,7 +944,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       const result = source ? await uploadVideo(source, options) : await waitForVideoUpload(item._videoJobId, options)
       if (disposed || item._removed) return
       applyVideoResult(item, result, needsPoster)
-      if (item._parent?._status === 'done' && !item._parent._needsReview) await removeDraftFile(draftId, item._parent._id)
+      if (item._parent?._status === 'done' && !item._parent._needsReview) await removeCachedFile(item._parent._id)
     } catch (error) {
       if (disposed || item._removed) return
       item._status = 'error'
@@ -997,7 +1004,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       item._motion = null; item._needsReview = false
       item._warnings = [{ code: 'STATIC_ONLY', message: '已选择仅保留静态图', blocking: false }]
       item._source = { ...item._source, pairing: 'static' }
-      await removeDraftFile(draftId, item._id)
+      await removeCachedFile(item._id)
     } catch (error) {
       errorLine.textContent = `仅保留静态图失败：${error.message}`
       if (motion) { motion._removed = false; motion._status = 'error'; motion._errMsg = error.message }
@@ -1008,12 +1015,13 @@ function createComposer(post, draftId, onDone, onCancel) {
   async function processFile(file) {
     file._id ||= newDraftId()
     file._kind = 'image'
-    await saveDraftFile(draftId, file instanceof Blob ? file : file._originalFile)
     file._status = 'processing'
     persistDraft()
     renderPreviews()
     updatePublishGuard()
     try {
+      await saveDraftFile(draftId, file instanceof Blob ? file : file._originalFile)
+      if (disposed || file._removed) return
       const normalized = await normalizeHeic(file._uploadStill || file._originalFile || file)
       const compressed = await compressImage(normalized)
       if (disposed || file._removed) return
@@ -1030,7 +1038,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       if (file._removed) { await api(`/api/uploads/${encodeURIComponent(filename)}`, { method: 'DELETE' }); return }
       file._name = filename
       file._status = 'done'; file._errMsg = ''
-      if (!disposed && !file._needsReview && (!file._motion || file._motion._status === 'done')) await removeDraftFile(draftId, file._id)
+      if (!disposed && !file._needsReview && (!file._motion || file._motion._status === 'done')) await removeCachedFile(file._id)
       persistDraft()
     } catch (e) {
       file._status = 'error'
@@ -1111,7 +1119,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         const idx = list.indexOf(item)
         if (idx >= 0) list.splice(idx, 1)
         if (item._jobId) api(`/api/image-jobs/${encodeURIComponent(item._jobId)}`, { method: 'DELETE' }).catch(() => {})
-        removeDraftFile(draftId, item._id)
+        void removeCachedFile(item._id)
         renderPreviews()
         updatePublishGuard()
         if (item._motion?._name) api(`/api/uploads/${item._motion._name}`, { method: 'DELETE' }).catch(() => {})
@@ -1263,7 +1271,7 @@ function createComposer(post, draftId, onDone, onCancel) {
       if (!controller.signal.aborted && !disposed) { placeholder._status = 'error'; placeholder._errMsg = error.message; errorLine.textContent = error.message }
     } finally {
       parseControllers.delete(controller)
-      if (placeholder._removed) for (const original of picked) if (original._id) await removeDraftFile(draftId, original._id)
+      if (placeholder._removed) for (const original of picked) if (original._id) await removeCachedFile(original._id)
       if (!disposed) { renderPreviews(); updatePublishGuard(); persistDraft() }
     }
   }
@@ -1304,7 +1312,7 @@ function createComposer(post, draftId, onDone, onCancel) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      onDone(result)
+      await onDone(result)
     } catch (e) {
       errorLine.textContent = e.message
       submitBtn.disabled = false
@@ -1317,7 +1325,8 @@ function createComposer(post, draftId, onDone, onCancel) {
     onCancel()
     await api(`/api/drafts/${encodeURIComponent(draftId)}`, { method: 'DELETE' }).catch(() => {})
     clearComposeState(draftId)
-    await clearDraftFiles(draftId)
+    try { await clearDraftFiles(draftId) }
+    catch (error) { showToast(`草稿已丢弃，但浏览器缓存清理失败：${error.message}`) }
   }
   return card
 }

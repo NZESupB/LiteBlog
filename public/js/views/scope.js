@@ -10,6 +10,7 @@ export function createViewScope() {
       else cleanups.add(cleanup)
       return cleanup
     },
+    disown(cleanup) { cleanups.delete(cleanup) },
     timeout(callback, milliseconds) {
       const timer = setTimeout(() => { cleanups.delete(cancel); if (!controller.signal.aborted) callback() }, milliseconds)
       const cancel = () => clearTimeout(timer)

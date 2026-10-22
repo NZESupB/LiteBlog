@@ -182,6 +182,8 @@ export function installPressMotion(root = document) {
     const node = event.target.closest?.('button, a.btn, a.btn-ghost, .mobile-nav a')
     if (!node || node.disabled || node.closest('[inert]')) return
     release()
+    // CSS var() 的回退值不是 Motion 读取自定义属性时的初值。
+    if (!node.style.getPropertyValue('--press-scale')) node.style.setProperty('--press-scale', '1')
     node.setAttribute('data-press-motion', '')
     pressed = node
     animateElement(node, { '--press-scale': .97 }, { duration: motionTiming.press, channel: 'press' })

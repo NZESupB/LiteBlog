@@ -4,9 +4,10 @@ import { replaceSelection } from './text-selection.js'
 const EMOJIS = '😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 🤔 🫡 🤗 😴 🥺 😢 😭 😤 😡 🤬 😱 😮 😲 🫠 😶‍🌫️ ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💕 💞 💓 💗 💖 💘 💝 💟 👍 👎 👏 🙌 👐 🤝 💪 🔥 ✨ 🎉 🎊 🌹 🌸 🌞 🌙 ⭐ 🎈 🍰 🍷 ☕ 🍽️ 📷 🌈 🍃 🐱 🐶'.split(' ')
 let current = null
 let sequence = 0
-const keyboardInset = () => {
+const keyboardInset = (host) => {
   const viewport = window.visualViewport
-  return viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0
+  const bottom = host === document.body ? window.innerHeight : host.getBoundingClientRect().bottom
+  return viewport ? Math.max(0, bottom - viewport.height - viewport.offsetTop) : 0
 }
 function dockVisible(visible) {
   const dock = document.querySelector('.mobile-nav')
@@ -41,7 +42,7 @@ export function toggleEmojiPanel(input, trigger) {
   const position = () => {
     if (closed || !panel.isConnected) return
     if (coarse) {
-      panel.style.setProperty('--emoji-keyboard-offset', `${keyboardInset()}px`)
+      panel.style.setProperty('--emoji-keyboard-offset', `${keyboardInset(host)}px`)
       const delta = input.getBoundingClientRect().bottom - panel.getBoundingClientRect().top + 12
       if (delta > 0) {
         const scroller = input.closest('.composer-body') || document.scrollingElement

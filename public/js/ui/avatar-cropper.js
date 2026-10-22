@@ -3,6 +3,7 @@ import { createDialog } from './dialog.js'
 import { animatePresence } from './motion.js'
 
 export function openAvatarCropper(file, onConfirm, onCancel, scope) {
+  if (scope && !scope.alive()) return null
   const overlay = el(`<dialog class="avatar-crop-overlay" aria-label="裁剪头像"><div class="avatar-crop-dialog">
     <div class="avatar-crop-heading"><h2>调整头像</h2><button class="avatar-crop-close" type="button" aria-label="取消">×</button></div>
     <p class="avatar-crop-hint">拖动图片调整位置，使用滑块缩放</p>
@@ -22,6 +23,9 @@ export function openAvatarCropper(file, onConfirm, onCancel, scope) {
     onClosed() {
       closed = true
       image.onload = image.onerror = null
+      image.removeAttribute('src')
+      canvas.width = canvas.height = 0
+      scope?.disown(disposeOnLeave)
       URL.revokeObjectURL(url)
       if (!accepted) onCancel?.()
     },
@@ -80,7 +84,8 @@ export function openAvatarCropper(file, onConfirm, onCancel, scope) {
       if (!closed) { setFormMessage(find('.form-message'), error.message); confirm.disabled = false }
     }
   }
-  scope?.own(() => modal.dispose({ restoreFocus: false }))
+  const disposeOnLeave = () => modal.dispose({ restoreFocus: false })
+  scope?.own(disposeOnLeave)
   modal.open({ focus: find('.avatar-crop-close') })
   animatePresence(overlay, true, { className: 'overlay-presence' })
   animatePresence(surface, true, { className: 'dialog-presence', duration: 260 })
