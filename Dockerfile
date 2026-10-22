@@ -1,4 +1,7 @@
-FROM node:24-alpine
+# 固定 Node 补丁版本：Node 24.22.1 修复了 CVE-2026-105482/105483/106069/111497
+# （dns.resolve NUL 截断、TLS hostname 绕过 ×2、Brotli 解码越界写 RCE）。
+# 不要退回浮动的 node:24-alpine，否则构建会随上游漂移并可能落回受影响版本。
+FROM node:24.22.1-alpine
 
 WORKDIR /app
 # 视频压缩使用系统 FFmpeg，不增加 Node 依赖；构建时确认所需编码器与滤镜。
