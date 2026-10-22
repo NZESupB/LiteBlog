@@ -11,9 +11,7 @@ export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads')
 export const AVATAR_DIR = path.join(DATA_DIR, 'avatars')
 // 视频先流式落到这里再转存最终后端,避免把大文件整体读进内存
 export const TMP_DIR = path.join(DATA_DIR, 'tmp')
-mkdirSync(UPLOAD_DIR, { recursive: true })
-mkdirSync(AVATAR_DIR, { recursive: true })
-mkdirSync(TMP_DIR, { recursive: true })
+// 目录由显式初始化创建，单纯导入模块不写入数据。
 
 export const DB_PATH = path.join(DATA_DIR, 'blog.db')
 export const RESTORE_MARKER = path.join(DATA_DIR, '.restore-state.json')
@@ -303,6 +301,7 @@ export function recoverInterruptedRestore() {
 }
 
 export function openDatabase() {
+  for (const directory of [UPLOAD_DIR, AVATAR_DIR, TMP_DIR]) mkdirSync(directory, { recursive: true })
   const connection = new DatabaseSync(DB_PATH)
   try {
     initializeDatabase(connection)
@@ -317,8 +316,17 @@ export function closeDatabase() {
   db.close()
 }
 
-recoverInterruptedRestore()
-openDatabase()
+export function initializeStorage() {
+  if (db?.isOpen) return
+  mkdirSync(DATA_DIR, { recursive: true })
+  recoverInterruptedRestore()
+  openDatabase()
+}
+
+export function getDatabase() {
+  if (!db?.isOpen) throw new Error('数据库尚未初始化')
+  return db
+}
 
 // 站点设置:数据库可后台修改,优先于环境变量(环境变量视为初始值)
 export function getSetting(key, envFallback = '') {

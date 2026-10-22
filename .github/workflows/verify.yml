@@ -1,0 +1,49 @@
+name: Verify application
+
+on:
+  push:
+    branches-ignore: [dev_react]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          cache: npm
+      - name: Install dependencies and FFmpeg
+        run: |
+          npm ci
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          npx playwright install --with-deps chromium
+      - name: Validate source, build, API and media
+        run: npm run check
+      - name: Validate browser interactions and PWA upgrades
+        run: npm run test:e2e
+      - name: Build production image
+        run: docker build --tag couple-blog:ci .
+      - name: Smoke test production image
+        run: |
+          docker run -d --name couple-blog-ci -p 3000:3000 couple-blog:ci
+          trap 'docker logs couple-blog-ci; docker rm -f couple-blog-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/api/site > /dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3000/ > /dev/null
+          curl --fail --silent http://127.0.0.1:3000/sw.js > /dev/null
+      - name: Preserve browser traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-traces
+          path: data/e2e-results
+          retention-days: 7

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "notes": "零构建本地分发清单。SHA-256 对应本目录中的实际文件；应用自写组件位于 js/ui，不属于 vendor。",
+  "notes": "保留必须以独立脚本加载的本地分发。SHA-256 对应实际文件；React、Lucide、marked、DOMPurify 由 package-lock.json 锁定并经 Vite 打包。应用自写组件位于 frontend/src/native。",
   "vendors": [
     {
       "name": "motion",
@@ -12,25 +12,6 @@
       "licenseFile": "motion.LICENSE",
       "sha256": "4434f5f52912cf24bae1562b93572b8179be1b81d1ce77016977f4a632ba69e1",
       "modifications": "官方 UMD 分发，未修改；仅由 index.html 加载一次。"
-    },
-    {
-      "name": "marked",
-      "version": "12.0.2",
-      "file": "marked.min.js",
-      "source": "https://github.com/markedjs/marked/tree/v12.0.2",
-      "license": "MIT",
-      "sha256": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894",
-      "modifications": "保留已有压缩分发；版本和许可证来自文件头，本次未更换文件。"
-    },
-    {
-      "name": "DOMPurify",
-      "version": "3.4.17",
-      "file": "purify.min.js",
-      "source": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz",
-      "upstreamFile": "package/dist/purify.min.js",
-      "license": "(MPL-2.0 OR Apache-2.0)",
-      "sha256": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31",
-      "modifications": "与官方分发逐字节一致；3.2.6 → 3.4.17 为 CVE（默认配置 XSS/mXSS/mXSS 绕过）修复升级，调用方式仍是 DOMPurify.sanitize(string)。"
     },
     {
       "name": "Artplayer",
@@ -50,16 +31,6 @@
       "license": "MIT",
       "sha256": "0963cfa50e9e1e7e6af929a40a81e3e898a673f1270eafa6917dd137e4968164",
       "modifications": "与官方分发逐字节一致；仅原生 HEIC 解码失败时按需使用。"
-    },
-    {
-      "name": "Lucide",
-      "version": "local-subset-4b95f3190330",
-      "upstreamVersion": null,
-      "file": "icons.js",
-      "source": "https://github.com/lucide-icons/lucide",
-      "license": "ISC",
-      "sha256": "4b95f3190330dc51ed916eca22500f4198bc04b0e75554b9dfd9c98496046c4f",
-      "modifications": "项目维护的 SVG path 子集与 icon() 包装函数。历史文件未记录上游版本，使用内容哈希固定本地修订，不推测版本号。"
     }
   ]
 }

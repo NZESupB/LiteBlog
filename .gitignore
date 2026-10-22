@@ -36,3 +36,9 @@ tmp/
 
 # 本地临时验证输出
 work/
+
+# React 构建与浏览器测试产物
+dist/
+playwright-report/
+test-results/
+coverage/

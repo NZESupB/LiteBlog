@@ -24,6 +24,9 @@ let operation = null
 let scheduler = null
 let scheduleVersion = 0
 let lastResult = null
+let activeBackup = null
+
+export async function waitForBackup() { if (activeBackup) await Promise.allSettled([activeBackup]) }
 
 function fail(message, status = 400) { return Object.assign(new Error(message), { status }) }
 function parts(now) { return Object.fromEntries(formatter.formatToParts(new Date(now)).map((part) => [part.type, part.value])) }
@@ -84,7 +87,8 @@ export function startBackup(trigger = 'manual', now = Date.now()) {
     operation = null
     throw error
   }
-  const promise = performBackup(storage, trigger, now).finally(() => { operation = null })
+  const promise = performBackup(storage, trigger, now).finally(() => { operation = null; activeBackup = null })
+  activeBackup = promise
   // HTTP 首响应不等待上传；失败通过持久化状态呈现。
   promise.catch((error) => console.warn(`数据库备份失败：${error.message}`))
   return promise

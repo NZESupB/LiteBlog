@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-import { stepSpring, shouldDismiss, attachSheetMotion, projectMomentum, createSpringController } from '../public/js/ui/composer-morph.js'
-import { animatePresence, animateElement, disposeAnimations, motionTiming, motionEasing } from '../public/js/ui/motion.js'
-import { enterSettingsView, settingsTransition } from '../public/js/ui/settings-motion.js'
-import { createViewScope } from '../public/js/views/scope.js'
+import { stepSpring, shouldDismiss, attachSheetMotion, projectMomentum, createSpringController } from '../frontend/src/native/ui/composer-morph.js'
+import { animatePresence, animateElement, disposeAnimations, motionTiming, motionEasing } from '../frontend/src/native/ui/motion.js'
+import { enterSettingsView, settingsTransition } from '../frontend/src/native/ui/settings-motion.js'
+import { createViewScope } from '../frontend/src/native/views/scope.js'
 
 const source = readFileSync(new URL('../public/js/theme.js', import.meta.url), 'utf8')
 // system 档由系统偏好决定,这里用可控的 matchMedia 模拟深色系统

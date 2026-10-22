@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
 // 类型工具和生产 normalizeMediaFiles 入口分别覆盖，避免保留测试专用的旧配对实现。
-const { mediaStem, isVideoFile, videoContentType } = await import('../public/js/media.js')
+const { mediaStem, isVideoFile, videoContentType } = await import('../frontend/src/native/media.js')
 const file = (name, type) => new File([new Uint8Array([1, 2, 3])], name, type ? { type } : undefined)
 assert.equal(mediaStem('IMG_0001.HEIC'), 'IMG_0001')
 assert.equal(isVideoFile(file('IMG_0001.MOV')), true)
@@ -34,7 +34,7 @@ class FakeArtplayer {
 }
 globalThis.Artplayer = FakeArtplayer
 
-const { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } = await import('../public/js/inline-video.js')
+const { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } = await import('../frontend/src/native/inline-video.js')
 
 function fakeTile({ singleColumn = false, poster = null, player = true } = {}) {
   const classes = new Set()
@@ -220,7 +220,7 @@ try {
   const videoBytes = new Uint8Array(readFileSync(fixturePath))
   assert.ok(videoBytes.length < 4096)
   // 原始照片必须在压缩前拆分，提取视频保持原始字节；缺失、关闭标记和歧义均不误配。
-  const { normalizeMediaFiles } = await import('../public/js/live-photo.js')
+  const { normalizeMediaFiles } = await import('../frontend/src/native/live-photo.js')
   const motionXmp = `<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:g="http://ns.google.com/photos/1.0/camera/" g:MicroVideo="1" g:MicroVideoOffset="${videoBytes.length}"/>`
   const metadata = Buffer.from(`http://ns.adobe.com/xap/1.0/\0${motionXmp}`)
   const segment = Buffer.alloc(4); segment[0] = 255; segment[1] = 225; segment.writeUInt16BE(metadata.length + 2, 2)

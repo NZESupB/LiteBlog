@@ -151,9 +151,18 @@ async function initialize() {
   // 只处理有持久化任务的目录；未知残留不冒充恢复成功，也不删除未确认所有权的文件。
   return capability
 }
-const ready = (() => { const release = enterOperation('media'); return initialize().finally(release) })()
-const tools = ready.catch((error) => ({ available: false, error: `视频任务恢复失败：${error.message}`, supported: [] }))
-void tools.then(() => drain()).catch((error) => console.warn(`恢复视频队列失败：${error.message}`))
+let tools
+let cleanupTimer
+export function startVideoJobs() {
+  if (tools) return tools
+  stopping = false
+  const release = enterOperation('media')
+  tools = initialize().finally(release)
+  void tools.then(() => drain()).catch((error) => console.warn(`恢复视频队列失败：${error.message}`))
+  cleanupTimer = setInterval(() => cleanup().catch((error) => console.warn(`清理视频任务失败：${error.message}`)), 60000)
+  cleanupTimer.unref()
+  return tools
+}
 
 export async function draftVideoJobs(userId, draftId) {
   await tools
@@ -230,8 +239,6 @@ async function cleanup() {
       AND NOT EXISTS (SELECT 1 FROM drafts WHERE drafts.id = video_jobs.draft_id AND drafts.user_id = video_jobs.user_id AND drafts.status = 'active')`).run(Date.now() - RETENTION_MS)
   } finally { release() }
 }
-const cleanupTimer = setInterval(() => cleanup().catch((error) => console.warn(`清理视频任务失败：${error.message}`)), 60000)
-cleanupTimer.unref()
 
 function validateIdentity(body) {
   if (!body.fingerprint && !body.hashes) return null
@@ -636,6 +643,7 @@ export async function stopVideoJobs() {
   for (const job of jobs.values()) if (ACTIVE.has(job.status)) job.controller.abort(new DOMException('服务停止，保留检查点', 'AbortError'))
   await Promise.allSettled([...jobs.values()].flatMap((job) => [job.runPromise, job.receivingPromise]).filter(Boolean))
   for (const job of jobs.values()) if (ACTIVE.has(job.status)) persistJob(job)
+  jobs.clear(); running = false; tools = null; cleanupTimer = null
 }
 export async function resetVideoJobsAfterRestore() {
   if (videoJobsBusy()) throw fail('仍有视频任务未结束，无法清空恢复前状态', 409)

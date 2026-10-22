@@ -18,6 +18,8 @@ const AI_FOLDER = 'ai-generated'
 const MAX_GENERATED_BYTES = 20 * 1024 * 1024
 const JOB_TIMEOUT_MS = 10 * 60 * 1000
 const controllers = new Map()
+const runningJobs = new Set()
+let stopping = false
 
 function imageMode(userId) {
   return getUserSetting(userId, 'image_mode', 'shared') === 'custom' ? 'custom' : 'shared'
@@ -297,13 +299,23 @@ async function runJob(id) {
 
 function startJob(row) {
   const release = enterOperation('media')
-  queueMicrotask(() => runJob(row.id)
+  const promise = Promise.resolve().then(() => { if (!stopping) return runJob(row.id) })
     .catch((error) => updateJob(row.id, { status: 'failed', error: error.message || 'AI 配图失败' }))
-    .finally(release))
+    .finally(() => { runningJobs.delete(promise); release() })
+  runningJobs.add(promise)
+}
+
+export async function stopImageJobs() {
+  stopping = true
+  for (const controller of controllers.values()) controller.abort(new Error('服务停止，请重新生成配图'))
+  await Promise.allSettled([...runningJobs])
 }
 
 // 进程重启时不能假装这些任务仍在执行,让用户明确重试。
-db.prepare("UPDATE image_jobs SET status = 'failed', error = '服务重启时任务中断，请点击重试', updated_at = datetime('now') WHERE status IN ('queued', 'running', 'uploading')").run()
+export function initializeImageJobs() {
+  stopping = false
+  db.prepare("UPDATE image_jobs SET status = 'failed', error = '服务重启时任务中断，请点击重试', updated_at = datetime('now') WHERE status IN ('queued', 'running', 'uploading')").run()
+}
 
 imageJobsApp.get('/', requireAuth, (c) => {
   const rows = db.prepare('SELECT * FROM image_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20').all(c.get('user').id)

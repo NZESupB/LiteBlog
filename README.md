@@ -2,12 +2,12 @@
 
 轻量自托管的多人共享博客:多账号发图文动态、时间轴、相册、天数计数,支持在线发布与编辑。
 
-- 后端:Node 24 + Hono,SQLite 用 Node 内置模块,**npm 依赖仅 2 个包,无原生编译**；视频处理使用系统 FFmpeg
-- 前端:原生 HTML/CSS/JS,无构建步骤,支持 Markdown
+- 后端：Node 24.22.1 + Hono，SQLite 使用 Node 内置模块；生产 npm 依赖仅 Hono 与 Node 适配器，视频使用系统 FFmpeg。
+- 前端：React + TypeScript + Vite，React Router hash 路由，支持 Markdown；生产产物由同一个 Hono 服务提供。
 - 图片:浏览器端自动压缩(最长边 1600px)后上传,按内容哈希去重存储
 - 视频与实况图：原件先保存、后台压缩、两版指标对比与发布前选择；支持分片续传和处理检查点，实况照片在压缩前解析内嵌视频或按内容标识配对
 - 外观:跟随系统 / 浅色 / 深色三档,只作用于当前浏览器
-- 资源占用：普通图文服务内存约 40~60MB；视频转码额外使用 CPU、内存和临时磁盘，默认单任务，线程按 CPU/内存限额适配
+- 构建与运行分离：前端工具只参与开发和镜像构建；视频转码仍额外使用 CPU、内存和临时磁盘，默认单任务，线程按 CPU/内存限额适配。
 
 ## VPS 部署(Docker)
 
@@ -61,12 +61,37 @@ blog.example.com {
 
 ## 本地开发
 
+需要 Node **24.22.1 或更高版本**，使用锁文件安装：
+
 ```bash
-npm install
-npm start          # http://localhost:3000,默认账号 user1/pass1、user2/pass2
+npm ci
+npm run dev       # Vite 开发页面，终端显示地址；API 在 localhost:3000
 ```
 
-本地视频功能需要 `ffmpeg` 和 `ffprobe` 在 PATH 中，并包含 `libx265`、AAC、MJPEG 编码器与 `zscale`、`tonemap` 滤镜。Dockerfile 已加入 FFmpeg 系统包及构建时能力检查；从源代码部署时需重新构建镜像。工具缺失会在视频上传前明确提示。
+本地生产模式：
+
+```bash
+npm run build     # 生成 dist/，包含所有懒加载 chunk、Worker 与离线缓存清单
+npm start         # http://localhost:3000，服务 dist/ 与同源 API
+```
+
+构建不读取数据库和站点密钥；运行配置、原数据库与上传文件仍沿用 `data/`。初始账号为 `user1/pass1`、`user2/pass2`，只在空数据库创建。开发模式会注销本机该站点的 Service Worker；离线及升级验证应使用生产构建。
+
+本地视频功能需要 `ffmpeg` 和 `ffprobe` 在 PATH 中，并包含 `libx265`、AAC、MJPEG 编码器与 `zscale`、`tonemap` 滤镜。工具缺失时图文服务仍可启动，视频入口会明确提示。Dockerfile 使用多阶段构建：构建阶段安装前端工具，运行阶段仅保留生产依赖、`server/`、`dist/` 与系统 FFmpeg。
+
+### 检查与回归
+
+```bash
+npm run check     # JavaScript 语法、类型、lint、格式、构建、六项回归和发布器单元测试
+npx playwright install chromium   # 没有本机 Chrome 的开发环境安装一次
+npm run test:e2e  # 生产产物上的真实 Chromium 交互、视频、恢复与 PWA 升级
+```
+
+回归只使用 `data/` 下独立测试目录，不读取或覆盖真实 `config.json`。临时数据库与媒体由测试服务退出时清理；失败 trace 位于 `data/e2e-results/`。GitHub Actions 执行相同检查并构建镜像。
+
+前端业务在 `frontend/src/features/`；媒体协议、灯箱和动效适配在 `frontend/src/native/`，由 Vite 统一打包。后端由 `server/app.js` 构造应用、`server/routes/` 注册领域 API、`server/bootstrap.js` 管理初始化与停机。`public/` 只保留样式、图标、图片、主题预初始化和必须独立加载的 vendor。
+
+PWA 只缓存静态应用壳，不缓存 API、私人图片、视频或头像。更新安装完成后显示提示，点击「更新并重新加载」才接管；写作面板打开时先关闭以保留草稿。单标签页激活时保留上一版缓存，多标签页保留仍可能使用的旧缓存；其他标签页不会被强制重载。离线可打开应用壳，但动态数据仍需要联网。
 
 ### 图片、视频与实况图
 
@@ -136,3 +161,14 @@ git push origin v1.2.3
 ```
 
 也可以在 GitHub Actions 页面手动运行工作流并填写版本号。
+
+### React 开发版镜像
+
+推送 `dev_react` 分支会先执行完整源码、浏览器与镜像冒烟检查，通过后自动发布独立开发镜像包：
+
+```text
+ghcr.io/nzesupb/liteblog-dev:latest
+ghcr.io/nzesupb/liteblog-dev:sha-<提交短哈希>
+```
+
+测试部署时，将部署者自己的 Compose `image` 改为 `ghcr.io/nzesupb/liteblog-dev:latest`。开发版与稳定版 `ghcr.io/nzesupb/liteblog` 分开发布；稳定版分支、版本标签和 `latest` 不受此流程影响。
