@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Link, Navigate, useLocation, useParams } from 'react-router-dom'
-import { Bell } from 'lucide-react'
+import { Bell, ChevronRight, Database, Globe, HardDrive, Sparkles } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
 import { json } from '../../lib/api'
 import { errorMessage } from '../../lib/types'
@@ -14,31 +14,59 @@ declare global {
     JournalTheme: { preference: string; current: string; set: (value: string) => boolean }
   }
 }
-export function NotificationToggle({ inMenu = false }: { inMenu?: boolean } = {}) {
+export function NotificationToggle({
+  inMenu = false,
+  compact = false,
+}: { inMenu?: boolean; compact?: boolean } = {}) {
   const { notifications } = useApp()
   const state = useSyncExternalStore(notifications.subscribe, notifications.getState)
   const [error, setError] = useState('')
-  return inMenu ? (
-    <div className="browser-notify-slot">
-      <button
-        type="button"
-        className="dropdown-item notification-toggle"
-        disabled={state.busy}
-        onClick={() => {
-          setError('')
-          void notifications.toggle().catch((error: Error) => setError(error.message))
-        }}
-      >
-        <Bell className="icon" />
-        <span>{state.label}</span>
-      </button>
-      {(error || state.error || state.help) && (
-        <p className="notification-help browser-notify-help" role="status">
-          {error || state.error || state.help}
-        </p>
-      )}
-    </div>
-  ) : (
+  if (inMenu) {
+    return (
+      <div className="browser-notify-slot">
+        <button
+          type="button"
+          className="dropdown-item notification-toggle"
+          disabled={state.busy}
+          onClick={() => {
+            setError('')
+            void notifications.toggle().catch((error: Error) => setError(error.message))
+          }}
+        >
+          <Bell className="icon" />
+          <span>{state.label}</span>
+        </button>
+        {(error || state.error || state.help) && (
+          <p className="notification-help browser-notify-help" role="status">
+            {error || state.error || state.help}
+          </p>
+        )}
+      </div>
+    )
+  }
+  if (compact) {
+    return (
+      <div className="compact-notify-action">
+        <button
+          type="button"
+          className="btn-ghost btn-sm"
+          disabled={state.busy}
+          onClick={() => {
+            setError('')
+            void notifications.toggle().catch((error: Error) => setError(error.message))
+          }}
+        >
+          {state.label}
+        </button>
+        {(error || state.error || state.help) && (
+          <span className="compact-notify-hint" role="status">
+            {error || state.error || state.help}
+          </span>
+        )}
+      </div>
+    )
+  }
+  return (
     <>
       <button
         type="button"
@@ -76,33 +104,70 @@ export function Settings() {
         )[section || ''] || '设置'}
       </h1>
       {!section && (
-        <>
-          <div className="card settings-card">
-            <h2>个人资料</h2>
-            <p>{site.user.name}</p>
-            <Link className="btn-ghost" to="/settings/profile" state={{ profileReturn: true }}>
-              编辑资料
-            </Link>
-          </div>
-          <Theme />
-          <section className="card settings-card">
-            <h2>浏览器通知</h2>
-            <NotificationToggle />
-          </section>
-          <nav className="settings-links">
-            {[
-              ['site', '站点设置'],
-              ['ai', 'AI 设置'],
-              ['storage', '媒体存储'],
-              ['backup', '备份与恢复'],
-            ].map(([path, label]) => (
-              <Link className="settings-entry" key={path} to={`/settings/${path}`}>
-                <strong>{label}</strong>
-                <span>›</span>
+        <div className="settings-groups">
+          {/* 分组一：个人中心与首选项 */}
+          <section className="settings-group-card">
+            <div className="settings-profile-compact">
+              <div className="profile-info-left">
+                {site.user.avatarUrl ? (
+                  <img src={site.user.avatarUrl} alt={site.user.name} className="avatar compact-avatar" />
+                ) : (
+                  <span className="avatar compact-avatar fallback">
+                    {(site.user.name || '?').slice(0, 1).toUpperCase()}
+                  </span>
+                )}
+                <div className="profile-text">
+                  <strong className="profile-name">{site.user.name}</strong>
+                  <span className="profile-username">@{site.user.username}</span>
+                </div>
+              </div>
+              <Link className="btn-ghost btn-sm" to="/settings/profile" state={{ profileReturn: true }}>
+                编辑资料
               </Link>
-            ))}
-          </nav>
-        </>
+            </div>
+
+            <div className="settings-divider" />
+
+            <div className="settings-row">
+              <span className="settings-row-label">外观</span>
+              <Theme compact />
+            </div>
+
+            <div className="settings-divider" />
+
+            <div className="settings-row">
+              <div className="settings-row-label-group">
+                <span className="settings-row-label">浏览器通知</span>
+                <small className="settings-row-desc">评论与回复时提醒</small>
+              </div>
+              <NotificationToggle compact />
+            </div>
+          </section>
+
+          {/* 分组二：系统管理功能导航 */}
+          <section className="settings-group-card">
+            <div className="settings-group-title">系统管理</div>
+            <nav className="settings-links-compact">
+              {[
+                { path: 'site', label: '站点设置', desc: '站名、起始日与私密模式', icon: Globe },
+                { path: 'ai', label: 'AI 设置', desc: '语言模型与图像生成配置', icon: Sparkles },
+                { path: 'storage', label: '媒体存储', desc: '本地磁盘与 WebDAV 同步', icon: HardDrive },
+                { path: 'backup', label: '备份与恢复', desc: '定时快照与数据库导入', icon: Database },
+              ].map(({ path, label, desc, icon: Icon }) => (
+                <Link className="settings-entry-compact" key={path} to={`/settings/${path}`}>
+                  <div className={`entry-icon-box icon-${path}`}>
+                    <Icon size={18} />
+                  </div>
+                  <div className="entry-copy">
+                    <strong>{label}</strong>
+                    <small>{desc}</small>
+                  </div>
+                  <ChevronRight size={16} className="entry-arrow" />
+                </Link>
+              ))}
+            </nav>
+          </section>
+        </div>
       )}
       {section === 'site' && (
         <>
@@ -121,7 +186,7 @@ export function Settings() {
     </div>
   )
 }
-function Theme() {
+function Theme({ compact = false }: { compact?: boolean } = {}) {
   const [value, setValue] = useState(window.JournalTheme.preference)
   const indicator = useRef<HTMLSpanElement>(null)
   const pointer = useRef(false)
@@ -140,41 +205,45 @@ function Theme() {
     window.addEventListener('journal-theme-change', sync)
     return () => window.removeEventListener('journal-theme-change', sync)
   }, [])
+  const optionsContent = (
+    <div
+      className="theme-options"
+      role="radiogroup"
+      aria-label="外观"
+      onPointerDown={() => {
+        pointer.current = true
+      }}
+      onKeyDown={() => {
+        pointer.current = false
+      }}
+    >
+      <span ref={indicator} className="theme-indicator" aria-hidden="true" />
+      {[
+        ['system', '跟随系统'],
+        ['light', '浅色'],
+        ['dark', '深色'],
+      ].map(([id, label]) => (
+        <label key={id} className="theme-option">
+          <input
+            type="radio"
+            name="theme"
+            value={id}
+            checked={value === id}
+            onChange={() => {
+              window.JournalTheme.set(id)
+              setValue(id)
+            }}
+          />
+          {label}
+        </label>
+      ))}
+    </div>
+  )
+  if (compact) return optionsContent
   return (
     <section className="card settings-card">
       <h2>外观</h2>
-      <div
-        className="theme-options"
-        role="radiogroup"
-        aria-label="外观"
-        onPointerDown={() => {
-          pointer.current = true
-        }}
-        onKeyDown={() => {
-          pointer.current = false
-        }}
-      >
-        <span ref={indicator} className="theme-indicator" aria-hidden="true" />
-        {[
-          ['system', '跟随系统'],
-          ['light', '浅色'],
-          ['dark', '深色'],
-        ].map(([id, label]) => (
-          <label key={id} className="theme-option">
-            <input
-              type="radio"
-              name="theme"
-              value={id}
-              checked={value === id}
-              onChange={() => {
-                window.JournalTheme.set(id)
-                setValue(id)
-              }}
-            />
-            {label}
-          </label>
-        ))}
-      </div>
+      {optionsContent}
     </section>
   )
 }

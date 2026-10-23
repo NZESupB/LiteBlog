@@ -1,11 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Smile, X } from 'lucide-react'
+import { Reply, Smile, Trash2, X } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
 import { api, json } from '../../lib/api'
 import { errorMessage, parseTime, type Comment, type Post } from '../../lib/types'
 import { attachInlineInputViewport } from '../../native/composer-viewport.js'
 import { attachEmojiButton, closeEmojiPanel } from '../../native/ui/emoji-picker.js'
+function formatCommentTime(createdAt: string): string {
+  const time = parseTime(createdAt).getTime()
+  const diffSec = Math.floor((Date.now() - time) / 1000)
+  if (diffSec < 60) return '刚刚'
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`
+  const date = parseTime(createdAt)
+  const today = new Date()
+  const isToday =
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const timeStr = `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  if (isToday) return `今天 ${timeStr}`
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${timeStr}`
+}
+
+function highlightComment(targetId: number) {
+  const element = document.getElementById(`comment-${targetId}`)
+  if (element) {
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    element.classList.remove('comment-target-flash')
+    void element.offsetWidth
+    element.classList.add('comment-target-flash')
+    setTimeout(() => {
+      element.classList.remove('comment-target-flash')
+    }, 1500)
+  }
+}
 
 export function Comments({
   post,
@@ -39,9 +68,9 @@ export function Comments({
     closeEmojiPanel(true)
   }, [onClose])
   useEffect(() => {
-    const controller = new AbortController()
-    submission.current = controller
-    return () => controller.abort()
+    return () => {
+      submission.current?.abort()
+    }
   }, [post.id])
   const [revision, setRevision] = useState(0)
   const location = useLocation()
@@ -77,7 +106,11 @@ export function Comments({
     const onOutside = (event: MouseEvent) => {
       const target = event.target as Node | null
       if (form.current?.contains(target)) return
-      if (target instanceof Element && target.closest('.emoji-panel')) return
+      if (
+        target instanceof Element &&
+        (target.closest('.emoji-panel') || target.closest('.comment-action-btn'))
+      )
+        return
       if (!input.current?.value.trim()) {
         closeForm()
       }
@@ -110,59 +143,94 @@ export function Comments({
   return (
     <section className="comments" aria-label="评论">
       <div className="comment-list">
-        {comments.map((comment) => (
-          <div className="comment" key={comment.id} id={`comment-${comment.id}`} tabIndex={-1}>
-            <div className="comment-body">
-              <strong>{comment.author}</strong>
-              {comment.reply_author && <span> 回复 {comment.reply_author}</span>}
-              {comment.reply_content && (
-                <button
-                  className="comment-reply-quote"
-                  onClick={() =>
-                    document
-                      .getElementById(`comment-${comment.reply_to}`)
-                      ?.scrollIntoView({ block: 'center' })
-                  }
-                >
-                  {comment.reply_content}
-                </button>
+        {comments.map((comment) => {
+          const safeCommentDate = (() => {
+            try {
+              const d = parseTime(comment.created_at)
+              return isNaN(d.getTime()) ? null : d
+            } catch {
+              return null
+            }
+          })()
+          return (
+            <div className="comment" key={comment.id} id={`comment-${comment.id}`} tabIndex={-1}>
+              {comment.avatarUrl ? (
+                <img className="comment-avatar" src={comment.avatarUrl} alt={comment.author} />
+              ) : (
+                <span className="comment-avatar comment-avatar-fallback">
+                  {Array.from(comment.author || '?')[0].toUpperCase()}
+                </span>
               )}
-              <p>{comment.content}</p>
-              <time>{parseTime(comment.created_at).toLocaleString('zh-CN')}</time>
-              {site.user && (
-                <button
-                  className="btn-ghost"
-                  onClick={() => {
-                    ++edits.current
-                    setReplyOpen(true)
-                    setReply(comment)
-                    setFocusVersion((value) => value + 1)
-                  }}
-                >
-                  回复
-                </button>
-              )}
-              {site.user &&
-                (comment.user_id === site.user.id || post.user_id === site.user.id) &&
-                Date.now() - parseTime(comment.created_at).getTime() <= 86400000 && (
-                  <button
-                    className="btn-ghost"
-                    onClick={async () => {
-                      if (!confirm('确定删除这条评论吗？')) return
-                      try {
-                        await api(`/api/posts/${post.id}/comments/${comment.id}`, { method: 'DELETE' })
-                        setRevision((n) => n + 1)
-                      } catch (error) {
-                        setError(errorMessage(error))
-                      }
-                    }}
+              <div className="comment-body">
+                <div className="comment-header">
+                  <div className="comment-meta">
+                    <strong className="comment-author-name">{comment.author}</strong>
+                    {comment.reply_author && (
+                      <span className="comment-reply-meta">
+                        回复 <b>@{comment.reply_author}</b>
+                      </span>
+                    )}
+                  </div>
+                  <time
+                    className="comment-time"
+                    dateTime={safeCommentDate ? safeCommentDate.toISOString() : undefined}
+                    title={safeCommentDate ? safeCommentDate.toLocaleString('zh-CN') : comment.created_at}
                   >
-                    删除
+                    {formatCommentTime(comment.created_at)}
+                  </time>
+                </div>
+                {comment.reply_content && (
+                  <button
+                    type="button"
+                    className="comment-reply-quote"
+                    onClick={() => comment.reply_to && highlightComment(comment.reply_to)}
+                    title="点击跳转到原评论"
+                  >
+                    {comment.reply_content}
                   </button>
                 )}
+                <p className="comment-text">{comment.content}</p>
+                <div className="comment-actions">
+                  {site.user && (
+                    <button
+                      type="button"
+                      className="comment-action-btn"
+                      onClick={() => {
+                        ++edits.current
+                        setReplyOpen(true)
+                        setReply(comment)
+                        setFocusVersion((value) => value + 1)
+                      }}
+                    >
+                      <Reply className="icon" size={12} />
+                      <span>回复</span>
+                    </button>
+                  )}
+                  {site.user &&
+                    (comment.user_id === site.user.id || post.user_id === site.user.id) &&
+                    Date.now() - parseTime(comment.created_at).getTime() <= 86400000 && (
+                      <button
+                        type="button"
+                        className="comment-action-btn delete"
+                        onClick={async () => {
+                          if (!confirm('确定删除这条评论吗？')) return
+                          try {
+                            await api(`/api/posts/${post.id}/comments/${comment.id}`, { method: 'DELETE' })
+                            setRevision((n) => n + 1)
+                          } catch (error) {
+                            setError(errorMessage(error))
+                          }
+                        }}
+                      >
+                        <Trash2 className="icon" size={12} />
+                        <span>删除</span>
+                      </button>
+                    )}
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
       {site.user && showForm && (
         <form
@@ -171,8 +239,10 @@ export function Comments({
           onSubmit={async (event) => {
             event.preventDefault()
             const node = input.current
-            const controller = submission.current
-            if (busy || !node?.value.trim() || !controller || controller.signal.aborted) return
+            if (busy || !node?.value.trim()) return
+            submission.current?.abort()
+            const controller = new AbortController()
+            submission.current = controller
             const content = node.value
             const version = edits.current
             const replyToId = reply?.id

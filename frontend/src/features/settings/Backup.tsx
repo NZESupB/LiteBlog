@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { api, json } from '../../lib/api'
 import { errorMessage } from '../../lib/types'
 import { createDraftStorage } from '../../native/features/composer/draft-storage.js'
+import { TimePicker } from '../../components/ui/TimePicker'
 
 interface BackupStatus {
   enabled: boolean
@@ -168,7 +169,7 @@ export function Backup() {
               </label>
               <label>
                 北京时间
-                <input type="time" name="time" defaultValue={status.time} required />
+                <TimePicker name="time" defaultValue={status.time} required ariaLabel="北京时间" />
               </label>
               <p className="storage-hint">
                 服务运行时自动执行；重新启动后会补执行当天错过的备份。当天手动备份成功后，不再重复自动备份。
