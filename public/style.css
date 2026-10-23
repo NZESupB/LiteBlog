@@ -28,6 +28,7 @@
   --success: #217a42;
   --warning: #8b571a;
   --on-accent: #ffffff;
+  --on-danger: #ffffff;
   /* ---- 浮动层材质 ---- */
   --glass-blur: saturate(180%) blur(20px);
   --glass-surface: rgba(255, 250, 251, .72);
@@ -83,6 +84,7 @@
   --success: #63d17d;
   --warning: #e7b978;
   --on-accent: #2a0d18;
+  --on-danger: #2a0d18;
   --glass-surface: rgba(28, 26, 30, .74);
   --glass-rim: inset 0 1px 0 rgba(255, 255, 255, .12), inset 0 0 0 1px rgba(255, 255, 255, .06);
   --glass-shadow: 0 20px 50px -22px rgba(0, 0, 0, .9);
@@ -335,7 +337,7 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible), input:focus:not(:
 
 /* ---------- 表单控件 ---------- */
 /* 不带 type 的 <input> 就是 text,所以选择器不能只写 input[type=text],否则登录页这类输入框会掉样式 */
-input:not([type]), input[type="text"], input[type="password"], input[type="url"], input[type="date"], input[type="email"], input[type="number"], textarea, select {
+input:not([type]), input[type="text"], input[type="password"], input[type="url"], input[type="date"], input[type="time"], input[type="datetime-local"], input[type="email"], input[type="number"], textarea, select {
   width: 100%; padding: 11px 14px;
   border: var(--hairline) solid var(--separator); border-radius: var(--radius-sm);
   background: var(--surface); color: var(--ink);
@@ -344,7 +346,22 @@ input:not([type]), input[type="text"], input[type="password"], input[type="url"]
 input::placeholder, textarea::placeholder { color: var(--faint); }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); outline: none; }
 input[readonly] { background: var(--fill); color: var(--muted); }
-input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width: 16px; height: 16px; }
+input[type="checkbox"], input[type="radio"], input[type="time"], input[type="date"], input[type="datetime-local"], input[type="range"] {
+  accent-color: var(--accent);
+}
+input[type="checkbox"], input[type="radio"] { width: 16px; height: 16px; cursor: pointer; }
+input[type="time"]::-webkit-calendar-picker-indicator,
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  opacity: .75;
+  transition: opacity .15s ease;
+}
+input[type="time"]::-webkit-calendar-picker-indicator:hover,
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
 .form-message, .form-error { min-height: 18px; margin-top: 8px; font-size: var(--fs-footnote); color: var(--danger); }
 .form-message[data-state="ok"] { color: var(--success); }
 .form-message:empty, .form-error:empty { min-height: 0; }
@@ -1146,7 +1163,8 @@ body.lightbox-open { overflow: hidden; }
 
 /* 备份与恢复沿用设置页的实心表面与语义色。 */
 .backup-settings fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
-.backup-settings input[type="time"] { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--separator-strong); border-radius: var(--radius); background: var(--surface); color: var(--ink); font: inherit; }
+.backup-settings input[type="time"] { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--separator-strong); border-radius: var(--radius); background: var(--surface); color: var(--ink); font: inherit; accent-color: var(--accent); color-scheme: inherit; }
+.backup-settings input[type="time"]:focus { border-color: var(--accent); outline: none; }
 .backup-settings input[type="file"] { width: 100%; min-height: 44px; margin-top: 8px; color: var(--muted); font: inherit; }
 .backup-settings input[type="file"]::file-selector-button { min-height: 44px; margin-right: 12px; padding: 8px 14px; border: 0; border-radius: 10px; background: var(--fill); color: var(--ink); font: inherit; cursor: pointer; }
 .backup-status { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 18px; margin: 22px 0 0; font-size: var(--fs-footnote); }
@@ -1154,6 +1172,22 @@ body.lightbox-open { overflow: hidden; }
 .backup-status dd { margin: 0; overflow-wrap: anywhere; color: var(--ink); }
 .backup-warning { color: var(--ink); line-height: 1.65; }
 .backup-restore-button { color: var(--danger); }
+.btn.backup-restore-button {
+  background: var(--danger) !important;
+  color: var(--on-danger, #ffffff) !important;
+}
+.btn.backup-restore-button:hover {
+  opacity: .92;
+  color: var(--on-danger, #ffffff) !important;
+}
+.btn-ghost.backup-restore-button {
+  color: var(--danger);
+  background: var(--fill);
+}
+.btn-ghost.backup-restore-button:hover {
+  background: var(--fill-strong);
+  color: var(--danger);
+}
 .backup-settings .form-message { overflow-wrap: anywhere; }
 @media (max-width: 559px) {
   .backup-status { grid-template-columns: 1fr; gap: 4px; }

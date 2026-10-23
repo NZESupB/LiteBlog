@@ -15,6 +15,7 @@ export function Presence({
   children: ReactNode
   onClick?: React.MouseEventHandler<HTMLDivElement>
   role?: string
+  id?: string
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const [mounted, setMounted] = useState(open)

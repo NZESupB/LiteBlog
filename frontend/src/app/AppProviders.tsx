@@ -1,4 +1,13 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type Dispatch,
+  type SetStateAction,
+} from 'react'
 import { api } from '../lib/api'
 import type { Post, Site } from '../lib/types'
 import { errorMessage } from '../lib/types'
@@ -10,6 +19,8 @@ interface AppState {
   refresh: () => Promise<void>
   revision: number
   changed: () => void
+  postMenuId: number | null
+  setPostMenuId: Dispatch<SetStateAction<number | null>>
   compose: (post?: Post | null, origin?: HTMLElement | null) => void
   composer: ComposerRequest | null
   closeComposer: () => void
@@ -29,6 +40,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   const [error, setError] = useState('')
   const [revision, setRevision] = useState(0)
   const [composer, setComposer] = useState<ComposerRequest | null>(null)
+  const [postMenuId, setPostMenuId] = useState<number | null>(null)
   const [message, setMessage] = useState('')
   const [notifications] = useState(() =>
     createBrowserNotifications({
@@ -63,6 +75,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   }, [site])
   useEffect(() => notifications.start(), [notifications])
   const userId = site?.user?.id
+  useEffect(() => setPostMenuId(null), [userId])
   useEffect(() => {
     if (userId) void notifications.autoEnable().catch(() => {})
   }, [notifications, userId])
@@ -87,12 +100,16 @@ export function AppProviders({ children }: { children: ReactNode }) {
         refresh,
         revision,
         changed: () => setRevision((n) => n + 1),
+        postMenuId,
+        setPostMenuId,
         compose: (post = null, origin = null) => {
           if (!site.user) {
             location.hash = '#/login'
             return
           }
-          setComposer({ post, origin })
+          const source =
+            origin || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+          setComposer((current) => current || { post, origin: source })
         },
         composer,
         closeComposer: () => setComposer(null),

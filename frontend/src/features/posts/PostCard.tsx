@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { MessageCircle, Smile } from 'lucide-react'
+import { MessageCircle, Pencil, Trash2 } from 'lucide-react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { useApp } from '../../app/AppProviders'
@@ -10,15 +10,32 @@ import { MediaGrid } from '../../components/media/MediaGrid'
 import { Comments } from '../comments/Comments'
 import { revealElement, disposeAnimations } from '../../native/ui/motion.js'
 import { Presence } from '../../components/layout/Presence'
+const FALLBACK_REACTIONS = [
+  '👍',
+  '❤️',
+  '😂',
+  '😍',
+  '🎉',
+  '😢',
+  '😡',
+  '👏',
+  '🔥',
+  '💯',
+  '🙌',
+  '🥰',
+  '😮',
+  '🤔',
+]
 
 export function PostCard({ post }: { post: Post }) {
-  const { site, compose, changed, toast } = useApp()
+  const { site, compose, changed, toast, postMenuId, setPostMenuId } = useApp()
   const location = useLocation()
-  const [menu, setMenu] = useState(false),
-    [comments, setComments] = useState(false)
-  const [picker, setPicker] = useState(false),
-    [reactions, setReactions] = useState(post.reactions)
+  const menu = postMenuId === post.id
+  const [comments, setComments] = useState(0)
+  const [reactions, setReactions] = useState(post.reactions)
   const ref = useRef<HTMLElement>(null)
+  const more = useRef<HTMLButtonElement>(null)
+  const choices = useRef<HTMLDivElement>(null)
   const textVisible = !site.privateMode || Boolean(site.user) || Boolean(post.public_text)
   const imagesVisible = !site.privateMode || Boolean(site.user) || Boolean(post.public_images)
   const html = DOMPurify.sanitize(
@@ -26,7 +43,7 @@ export function PostCard({ post }: { post: Post }) {
     imagesVisible ? {} : { FORBID_TAGS: ['img', 'picture', 'video', 'source'] },
   )
   useEffect(() => {
-    if (location.search.includes('comment=')) setComments(true)
+    if (location.search.includes('comment=')) setComments((value) => value + 1)
   }, [location.search])
   useEffect(() => {
     const node = ref.current
@@ -37,17 +54,29 @@ export function PostCard({ post }: { post: Post }) {
   }, [])
   useEffect(() => {
     if (!menu) return
-    const close = () => setMenu(false)
+    const close = () => {
+      setPostMenuId((current) => (current === post.id ? null : current))
+    }
     document.addEventListener('click', close)
     const key = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        close()
+        more.current?.focus({ preventScroll: true })
+      }
     }
     document.addEventListener('keydown', key)
     return () => {
       document.removeEventListener('click', close)
       document.removeEventListener('keydown', key)
     }
-  }, [menu])
+  }, [menu, post.id, setPostMenuId])
+  useEffect(
+    () => () => {
+      setPostMenuId((current) => (current === post.id ? null : current))
+    },
+    [post.id, setPostMenuId],
+  )
   return (
     <article className="card post" ref={ref}>
       <div className="post-head">
@@ -63,13 +92,15 @@ export function PostCard({ post }: { post: Post }) {
         </div>
         <div className="post-actions">
           <button
+            ref={more}
+            type="button"
             className="more-btn"
             aria-label="更多操作"
-            aria-haspopup="menu"
+            aria-controls={`post-actions-${post.id}`}
             aria-expanded={menu}
             onClick={(event) => {
               event.stopPropagation()
-              setMenu(!menu)
+              setPostMenuId(menu ? null : post.id)
             }}
           >
             更多
@@ -77,48 +108,42 @@ export function PostCard({ post }: { post: Post }) {
           <Presence
             open={menu}
             className="post-menu"
-            role="menu"
+            id={`post-actions-${post.id}`}
             onClick={(event) => event.stopPropagation()}
           >
             {textVisible && (
               <button
-                role="menuitem"
+                type="button"
+                className="post-menu-comment"
                 onClick={() => {
-                  setComments(true)
-                  setMenu(false)
+                  setComments((value) => value + 1)
+                  setPostMenuId(null)
                 }}
               >
                 <MessageCircle className="icon" />
-                评论
-              </button>
-            )}
-            {site.user && (
-              <button
-                role="menuitem"
-                onClick={() => {
-                  setPicker(!picker)
-                  setMenu(false)
-                }}
-              >
-                <Smile className="icon" />
-                表情点评
+                <span>评论</span>
               </button>
             )}
             {post.canEdit && (
               <>
                 <button
-                  role="menuitem"
-                  onClick={(event) => {
-                    compose(post, event.currentTarget)
-                    setMenu(false)
+                  type="button"
+                  className="post-menu-comment"
+                  onClick={() => {
+                    compose(post, more.current)
+                    setPostMenuId(null)
                   }}
                 >
-                  编辑
+                  <Pencil className="icon" />
+                  <span>编辑</span>
                 </button>
                 <button
-                  role="menuitem"
+                  type="button"
+                  className="post-menu-comment"
                   onClick={async () => {
                     if (!confirm('确定删除这段日常吗？')) return
+                    setPostMenuId(null)
+                    more.current?.focus({ preventScroll: true })
                     try {
                       await api(`/api/posts/${post.id}`, { method: 'DELETE' })
                       changed()
@@ -127,9 +152,29 @@ export function PostCard({ post }: { post: Post }) {
                     }
                   }}
                 >
-                  删除
+                  <Trash2 className="icon" />
+                  <span>删除</span>
                 </button>
               </>
+            )}
+            {site.user && (
+              <div className="reaction-picker" ref={choices}>
+                {(site.reactionEmojis?.length ? site.reactionEmojis : FALLBACK_REACTIONS).map((emoji) => (
+                  <button
+                    type="button"
+                    key={emoji}
+                    className="reaction-option"
+                    aria-label={`点评 ${emoji}`}
+                    onClick={() => {
+                      void react(emoji)
+                      setPostMenuId(null)
+                      more.current?.focus({ preventScroll: true })
+                    }}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
             )}
           </Presence>
         </div>
@@ -159,23 +204,14 @@ export function PostCard({ post }: { post: Post }) {
           ))}
         </div>
       )}
-      {picker && (
-        <div className="reaction-picker">
-          {site.reactionEmojis.map((emoji) => (
-            <button
-              key={emoji}
-              aria-label={`点评 ${emoji}`}
-              onClick={() => {
-                void react(emoji)
-                setPicker(false)
-              }}
-            >
-              {emoji}
-            </button>
-          ))}
-        </div>
+      {textVisible && (
+        <Comments
+          post={post}
+          composing={comments > 0}
+          focusRequest={comments}
+          onClose={() => setComments(0)}
+        />
       )}
-      {textVisible && <Comments post={post} composing={comments} />}
     </article>
   )
   async function react(emoji: string) {

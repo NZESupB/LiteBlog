@@ -60,6 +60,8 @@ export function Account() {
   const [message, setMessage] = useState(''),
     [busy, setBusy] = useState(false)
   const scope = useRef<ReturnType<typeof createViewScope> | null>(null)
+  const avatarInput = useRef<HTMLInputElement>(null)
+  const avatarButton = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     scope.current = createViewScope()
     return () => scope.current?.dispose()
@@ -100,35 +102,40 @@ export function Account() {
           <span className="avatar">
             {user.avatarUrl ? <img src={user.avatarUrl} alt={user.name} /> : user.name.slice(0, 1)}
           </span>
-          <label className="btn-ghost">
+          <button
+            ref={avatarButton}
+            className="btn-ghost"
+            type="button"
+            onClick={() => avatarInput.current?.click()}
+          >
             更换头像
-            <input
-              type="file"
-              accept="image/*"
-              hidden
-              onChange={(event) => {
-                const file = event.currentTarget.files?.[0]
-                event.currentTarget.value = ''
-                if (!file) return
-                openAvatarCropper(
-                  file,
-                  async (blob: Blob) => {
-                    const form = new FormData()
-                    form.append('avatar', blob, 'avatar.jpg')
-                    try {
-                      await api('/api/profile/avatar', { method: 'POST', body: form })
-                      await refresh()
-                      toast('头像已更新')
-                    } catch (error) {
-                      toast(errorMessage(error))
-                    }
-                  },
-                  () => {},
-                  scope.current,
-                )
-              }}
-            />
-          </label>
+          </button>
+          <input
+            ref={avatarInput}
+            aria-label="头像文件"
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0]
+              event.currentTarget.value = ''
+              if (!file) return
+              avatarButton.current?.focus({ preventScroll: true })
+              openAvatarCropper(
+                file,
+                async (blob: Blob) => {
+                  const form = new FormData()
+                  form.append('avatar', blob, 'avatar.jpg')
+                  await api('/api/profile/avatar', { method: 'POST', body: form })
+                  await refresh()
+                  toast('头像已更新')
+                  return true
+                },
+                () => {},
+                scope.current,
+              )
+            }}
+          />
           {user.avatarUrl && (
             <button
               className="btn-ghost"

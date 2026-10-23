@@ -138,6 +138,13 @@ function ComposerForm({
   const resizeDrag = useRef<{ y: number; height: number } | null>(null)
   useEffect(() => attachMdToolbar(toolbar.current!, textarea.current!), [])
   useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const node = textarea.current
+      if (node?.isConnected && !node.closest('[inert]')) node.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [])
+  useEffect(() => {
     if (result.current) result.current.scrollTop = result.current.scrollHeight
   }, [state.polish.result])
   const guard = service.publishGuard(),
@@ -198,7 +205,7 @@ function ComposerForm({
           aria-label="动态正文"
           placeholder="一顿晚餐、一场散步，或是突然想说的话…"
           value={state.content}
-          disabled={state.busy || state.restoring}
+          disabled={state.busy}
           onInput={(event) => service.set('content', event.currentTarget.value)}
         />
         <div

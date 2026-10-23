@@ -4,6 +4,7 @@ import { api } from '../../lib/api'
 import { dateLabel, monthKey, errorMessage, type Post } from '../../lib/types'
 import { PostCard } from '../posts/PostCard'
 import { Archive } from './Archive'
+import { WriteIcon } from '../../components/WriteIcon'
 
 interface Page {
   posts: Post[]
@@ -12,7 +13,7 @@ interface Page {
   total: number
 }
 export function Timeline() {
-  const { compose, revision } = useApp()
+  const { site, compose, revision } = useApp()
   const [month, setMonth] = useState('')
   const [page, setPage] = useState<Page>({ posts: [], hasMore: false, nextCursor: null, total: 0 })
   const [error, setError] = useState(''),
@@ -26,6 +27,7 @@ export function Timeline() {
   })
   const sentinel = useRef<HTMLDivElement>(null)
   const [months, setMonths] = useState<{ month: string; count: number }[]>([])
+  const [total, setTotal] = useState<number | null>(null)
   const [activeMonth, setActiveMonth] = useState('')
   const load = useCallback(
     async (reset = false) => {
@@ -65,12 +67,15 @@ export function Timeline() {
     }
     setPage({ posts: [], hasMore: false, nextCursor: null, total: 0 })
     void load(true)
-    api<{ months: { month: string; count: number }[] }>(
+    api<{ months: { month: string; count: number }[]; total: number }>(
       `/api/posts/archive?tz=${-new Date().getTimezoneOffset()}`,
       { signal: controller.signal },
     )
       .then((data) => {
-        if (!controller.signal.aborted) setMonths(data.months)
+        if (!controller.signal.aborted) {
+          setMonths(data.months)
+          setTotal(data.total)
+        }
       })
       .catch(() => {})
     return () => controller.abort()
@@ -104,16 +109,26 @@ export function Timeline() {
   }
   return (
     <>
-      <div className="journal-heading" id="journalWriteAnchor">
+      <div className="journal-heading">
         <div>
-          <p className="eyebrow">OUR JOURNAL</p>
-          <h1>一起，把日子记下来。</h1>
-          <p>那些值得被记住的细小瞬间。</p>
+          <h1>日常手记</h1>
+          <p className="journal-subtitle">
+            把普通的一天，留给以后再看。
+            <span className="journal-count">{total !== null ? `${total} 篇日常` : ''}</span>
+          </p>
         </div>
         <div className="journal-heading-actions">
-          <button className="btn write-trigger" onClick={(event) => compose(null, event.currentTarget)}>
-            写日常
-          </button>
+          {site.user && (
+            <button
+              className="write-trigger"
+              id="journalWriteAnchor"
+              type="button"
+              onClick={(event) => compose(null, event.currentTarget)}
+            >
+              <WriteIcon />
+              <span>写日常</span>
+            </button>
+          )}
         </div>
       </div>
       <Archive

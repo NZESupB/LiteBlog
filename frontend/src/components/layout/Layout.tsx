@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { Bell, Heart, Image, List, PenLine, Settings, UserRound } from 'lucide-react'
+import { Bell, Heart, Image, List, LogOut, Settings, User } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
 import { api } from '../../lib/api'
 import { errorMessage, type Notice } from '../../lib/types'
 import { NotificationToggle } from '../../features/settings/Settings'
 import { Presence } from './Presence'
+import { WriteIcon } from '../WriteIcon'
+import { animatePresence, disposeAnimations } from '../../native/ui/motion.js'
+import { avatarColor } from '../../native/utils.js'
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { site, compose, notifications, refresh, changed, toast } = useApp()
@@ -16,18 +19,31 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const [menu, setMenu] = useState<'user' | 'bell' | null>(null),
     [items, setItems] = useState<Notice[]>([])
   const [clock, setClock] = useState(Date.now())
-  const [writeVisible, setWriteVisible] = useState(false)
+  const writeSlot = useRef<HTMLSpanElement>(null)
   const [unread, setUnread] = useState(0)
-  useEffect(() => {
-    const heading = document.getElementById('journalWriteAnchor')
-    setWriteVisible(false)
-    if (location.pathname !== '/' || !heading) return
-    const observer = new IntersectionObserver(([entry]) => setWriteVisible(!entry.isIntersecting), {
-      rootMargin: `-${header.current?.getBoundingClientRect().height || 58}px 0px 0px`,
-    })
-    observer.observe(heading)
-    return () => observer.disconnect()
-  }, [location.pathname])
+  const userId = site.user?.id
+  useLayoutEffect(() => {
+    const slot = writeSlot.current!
+    void animatePresence(slot, false, { className: 'header-write-presence', immediate: true })
+    const source = document.getElementById('journalWriteAnchor')
+    if (location.pathname !== '/' || !userId || !source) return
+    const headerHeight = Math.round(header.current!.getBoundingClientRect().height)
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        void animatePresence(slot, !entry.isIntersecting, {
+          className: 'header-write-presence',
+          duration: 240,
+        })
+      },
+      { rootMargin: `-${headerHeight + 8}px 0px 0px 0px` },
+    )
+    observer.observe(source)
+    return () => {
+      observer.disconnect()
+      void animatePresence(slot, false, { className: 'header-write-presence', immediate: true })
+      disposeAnimations(slot)
+    }
+  }, [location.pathname, userId])
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 1000)
     const close = () => setMenu(null),
@@ -132,10 +148,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
               </NavLink>
               <NavLink to="/gallery">相册</NavLink>
             </div>
-            <span className="header-write-slot" id="headerWriteSlot" hidden={!writeVisible}>
+            <span ref={writeSlot} className="header-write-slot" id="headerWriteSlot" hidden>
               <button
                 className="write-trigger header-write"
                 id="headerWrite"
+                type="button"
                 onClick={(event) => compose(null, event.currentTarget)}
               >
                 写日常
@@ -170,45 +187,61 @@ export function Layout({ children }: { children: React.ReactNode }) {
                       setMenu(menu === 'user' ? null : 'user')
                     }}
                   >
-                    {site.user.avatarUrl ? (
-                      <img src={site.user.avatarUrl} alt="" />
-                    ) : (
-                      <UserRound className="icon" />
-                    )}
+                    <span
+                      className={`avatar small${site.user.avatarUrl ? ' avatar-image' : ''}`}
+                      style={{ background: avatarColor(site.user.name) }}
+                    >
+                      {site.user.avatarUrl ? (
+                        <img src={site.user.avatarUrl} alt="" />
+                      ) : (
+                        site.user.name.slice(0, 1)
+                      )}
+                    </span>
                   </button>
                   <Presence
                     open={menu === 'bell'}
                     className="dropdown bell-dropdown"
                     onClick={(event) => event.stopPropagation()}
                   >
-                    <h3>新评论</h3>
+                    <div className="dropdown-name">新评论</div>
                     {items.length ? (
                       items.map((item) => (
                         <Link
                           key={item.id}
+                          className="bell-item"
                           to={`/post/${item.post_id}?comment=${item.id}`}
                           onClick={() => setMenu(null)}
                         >
-                          <strong>{item.author}</strong>
-                          <span>{item.content}</span>
+                          <span className="bell-item-line">
+                            <strong>{item.author}</strong>: {item.content}
+                          </span>
                         </Link>
                       ))
                     ) : (
-                      <p>暂时没有新评论</p>
+                      <div className="bell-empty">暂无新评论</div>
                     )}
-                    <NotificationToggle />
+                    <NotificationToggle inMenu />
                   </Presence>
                   <Presence
                     open={menu === 'user'}
                     className="dropdown"
                     onClick={(event) => event.stopPropagation()}
                   >
-                    <strong>{site.user.name}</strong>
-                    <Link to="/account">账号设置</Link>
-                    <Link to="/settings">设置</Link>
-                    <NotificationToggle />
+                    <div className="dropdown-name">{site.user.name}</div>
+                    <Link to="/account" className="dropdown-item" onClick={() => setMenu(null)}>
+                      <User className="icon" />
+                      <span>账号设置</span>
+                    </Link>
+                    <Link to="/settings" className="dropdown-item" onClick={() => setMenu(null)}>
+                      <Settings className="icon" />
+                      <span>设置</span>
+                    </Link>
+                    <NotificationToggle inMenu />
                     <button
+                      type="button"
+                      className="dropdown-item logout"
                       onClick={async () => {
+                        setMenu(null)
                         try {
                           await notifications.disable()
                           await api('/api/logout', { method: 'POST' })
@@ -220,7 +253,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
                         }
                       }}
                     >
-                      退出登录
+                      <LogOut className="icon" />
+                      <span>退出登录</span>
                     </button>
                   </Presence>
                 </>
@@ -249,14 +283,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </span>
           <span>相册</span>
         </NavLink>
-        <button
+        <a
           className="mobile-compose"
+          href="#/"
           aria-label="写日常"
-          onClick={(event) => compose(null, event.currentTarget)}
+          onClick={(event) => {
+            event.preventDefault()
+            compose(null, event.currentTarget)
+          }}
         >
-          <PenLine className="icon" />
+          <span>
+            <WriteIcon />
+          </span>
           <span>写日常</span>
-        </button>
+        </a>
         <NavLink to="/settings">
           <span className="mobile-nav-icon">
             <Settings className="icon" />

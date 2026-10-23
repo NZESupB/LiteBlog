@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Link, Navigate, useLocation, useParams } from 'react-router-dom'
+import { Bell } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
 import { json } from '../../lib/api'
 import { errorMessage } from '../../lib/types'
@@ -13,11 +14,31 @@ declare global {
     JournalTheme: { preference: string; current: string; set: (value: string) => boolean }
   }
 }
-export function NotificationToggle() {
+export function NotificationToggle({ inMenu = false }: { inMenu?: boolean } = {}) {
   const { notifications } = useApp()
   const state = useSyncExternalStore(notifications.subscribe, notifications.getState)
   const [error, setError] = useState('')
-  return (
+  return inMenu ? (
+    <div className="browser-notify-slot">
+      <button
+        type="button"
+        className="dropdown-item notification-toggle"
+        disabled={state.busy}
+        onClick={() => {
+          setError('')
+          void notifications.toggle().catch((error: Error) => setError(error.message))
+        }}
+      >
+        <Bell className="icon" />
+        <span>{state.label}</span>
+      </button>
+      {(error || state.error || state.help) && (
+        <p className="notification-help browser-notify-help" role="status">
+          {error || state.error || state.help}
+        </p>
+      )}
+    </div>
+  ) : (
     <>
       <button
         type="button"
