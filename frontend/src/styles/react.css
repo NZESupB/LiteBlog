@@ -27,7 +27,7 @@ form.settings-card,
   align-items: center;
 }
 .settings-card {
-  margin-bottom: 24px;
+  margin-bottom: 0;
 }
 .settings-card [hidden] {
   display: none !important;
@@ -195,7 +195,9 @@ form.settings-card,
   font-size: 12px;
   line-height: 1.5;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
 }
 .comment-reply-quote:hover {
   background: var(--fill-strong);
@@ -227,7 +229,9 @@ form.settings-card,
   color: var(--muted);
   font-size: 12px;
   cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
 }
 .comment-action-btn:hover {
   color: var(--accent-deep);
@@ -324,7 +328,10 @@ form.settings-card,
   border: var(--hairline) solid var(--separator);
   border-radius: var(--radius-md);
   padding: 4px 10px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    background 0.2s ease;
 }
 .time-picker-control:focus-within,
 .time-picker-control.is-open {
@@ -403,7 +410,10 @@ form.settings-card,
   padding: 3px 8px;
   font-size: 12px;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
 }
 .preset-chip:hover {
   background: var(--fill-strong);
@@ -451,7 +461,9 @@ form.settings-card,
   font-weight: 500;
   color: var(--ink);
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
   text-align: center;
 }
 .time-cell:hover {
@@ -463,34 +475,153 @@ form.settings-card,
   color: var(--on-accent);
   font-weight: 600;
 }
-/* 设置页紧凑布局与分组卡片 */
+/* 设置与账号共用连续分组表单，保持阅读列宽与明暗语义色。 */
+.settings-page,
+.account-page {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding-top: 18px;
+}
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 8px 12px;
+  margin-left: -12px;
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: var(--fs-footnote);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.back-link svg {
+  flex-shrink: 0;
+}
+.back-link:active {
+  background: var(--fill-strong);
+  color: var(--ink);
+}
+.back-link:focus-visible,
+.settings-entry-compact:focus-visible,
+.account-settings-link:focus-visible {
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 3px;
+}
+.settings-page-heading {
+  padding: 14px 0 26px;
+}
+.settings-page-heading h1 {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: var(--fs-display);
+  line-height: 1.12;
+  letter-spacing: -0.022em;
+}
+.settings-page-heading p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-footnote);
+  line-height: 1.6;
+}
+.settings-page .settings-card,
+.account-page .settings-card,
+.settings-group-card {
+  padding: 24px 0;
+  border: 0;
+  border-top: var(--hairline) solid var(--separator);
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.settings-card-heading {
+  margin-bottom: 0;
+}
+.settings-card > h2,
+.settings-card-heading h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-title);
+  font-weight: 700;
+  color: var(--ink);
+}
+.settings-card-heading p {
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+}
+.settings-card > h2 + label,
+.settings-card > .settings-card-heading + .account-avatar-row {
+  margin-top: 16px;
+}
+.settings-card > label {
+  margin: 0;
+}
+.settings-card > .row {
+  min-height: 44px;
+  gap: 10px;
+}
+.settings-card .settings-actions {
+  justify-content: flex-end;
+  margin-top: 0;
+}
+.settings-card .settings-actions > .btn,
+.settings-card .settings-actions > .btn-ghost {
+  flex: 0 0 auto;
+}
+.settings-card .form-message {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.settings-card .form-message:empty {
+  display: none;
+}
+.settings-card :is(input, select):focus-visible {
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 3px;
+}
+.account-avatar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.account-avatar-row > .avatar {
+  width: 56px;
+  height: 56px;
+  margin-right: 6px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+.account-settings-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--accent-deep);
+}
 .settings-groups {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  max-width: 640px;
-  margin: 0 auto;
-}
-.settings-group-card {
-  background: var(--surface);
-  border: var(--hairline) solid var(--separator);
-  border-radius: var(--radius-lg);
-  padding: 16px 18px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 .settings-group-title {
-  font-size: 12px;
-  font-weight: 600;
+  margin-bottom: 12px;
   color: var(--muted);
-  margin-bottom: 8px;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  font-size: var(--fs-caption);
+  font-weight: 600;
 }
 .settings-profile-compact {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+}
+.settings-profile-compact > .btn-ghost {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .profile-info-left {
   display: flex;
@@ -499,8 +630,8 @@ form.settings-card,
   min-width: 0;
 }
 .compact-avatar {
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
@@ -512,7 +643,6 @@ form.settings-card,
   background: var(--accent-soft);
   color: var(--accent-deep);
   font-weight: 700;
-  font-size: 16px;
 }
 .profile-text {
   display: flex;
@@ -520,53 +650,49 @@ form.settings-card,
   min-width: 0;
 }
 .profile-name {
-  font-size: 16px;
-  font-weight: 600;
   color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 .profile-username {
-  font-size: 12px;
   color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: var(--fs-caption);
+  overflow-wrap: anywhere;
 }
 .btn-sm {
-  padding: 4px 12px !important;
-  font-size: 12px !important;
-  min-height: 28px !important;
-  line-height: 1.4 !important;
+  padding: 7px 14px;
+  min-height: 36px;
+  font-size: var(--fs-footnote);
+  line-height: 1.4;
 }
 .settings-divider {
   height: var(--hairline);
   background: var(--separator);
-  margin: 14px 0;
+  margin: 18px 0;
 }
 .settings-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  min-height: 40px;
+  gap: 12px;
+  min-height: 44px;
 }
 .settings-row-label-group {
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  max-width: 60%;
+  min-width: 0;
 }
 .settings-row-label {
-  font-size: 14px;
-  font-weight: 500;
   color: var(--ink);
+  font-size: var(--fs-footnote);
+  font-weight: 500;
 }
 .settings-row-desc {
-  font-size: 12px;
+  margin-top: 3px;
   color: var(--muted);
-  margin-top: 1px;
+  font-size: var(--fs-caption);
 }
 .compact-notify-action {
   display: flex;
@@ -574,68 +700,86 @@ form.settings-card,
   align-items: flex-end;
   gap: 4px;
   min-width: 0;
-  max-width: 50%;
+  max-width: 65%;
 }
 .compact-notify-hint {
-  font-size: 11px;
   color: var(--muted);
+  font-size: var(--fs-caption);
   text-align: right;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .settings-links-compact {
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 .settings-entry-compact {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 8px;
-  border-radius: var(--radius-md);
+  min-height: 68px;
+  padding: 12px 8px;
+  margin: 0 -8px;
+  border-radius: var(--radius-sm);
   text-decoration: none;
-  transition: background-color 0.15s ease;
-}
-.settings-entry-compact:hover {
-  background: var(--fill);
 }
 .entry-icon-box {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
   flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
   background: var(--accent-soft);
   color: var(--accent-deep);
 }
-.entry-icon-box.icon-site { background: rgba(0, 122, 255, 0.12); color: #007aff; }
-.entry-icon-box.icon-ai { background: rgba(175, 82, 222, 0.12); color: #af52de; }
-.entry-icon-box.icon-storage { background: rgba(52, 199, 89, 0.12); color: #34c759; }
-.entry-icon-box.icon-backup { background: rgba(255, 149, 0, 0.12); color: #ff9500; }
 .entry-copy {
-  flex: 1;
-  min-width: 0;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  min-width: 0;
 }
 .entry-copy strong {
-  font-size: 14px;
-  font-weight: 500;
   color: var(--ink);
+  font-size: var(--fs-footnote);
+  font-weight: 500;
 }
 .entry-copy small {
-  font-size: 12px;
   color: var(--muted);
-  margin-top: 2px;
+  font-size: var(--fs-caption);
+  margin-top: 3px;
 }
 .entry-arrow {
-  color: var(--muted);
-  opacity: 0.5;
   flex-shrink: 0;
-  transition: transform 0.15s ease, opacity 0.15s ease;
+  color: var(--muted);
 }
-.settings-entry-compact:hover .entry-arrow {
-  opacity: 0.9;
-  transform: translateX(2px);
+@media (hover: hover) and (pointer: fine) {
+  .back-link:hover,
+  .settings-entry-compact:hover {
+    background: var(--fill);
+    color: var(--ink);
+  }
+}
+@media (max-width: 559px), (pointer: coarse) {
+  .settings-page .btn,
+  .settings-page .btn-ghost,
+  .account-page .btn,
+  .account-page .btn-ghost {
+    min-height: 44px;
+  }
+  .settings-page-heading {
+    padding-top: 10px;
+  }
+  .settings-row .theme-option {
+    padding-inline: 12px;
+  }
+}
+@media (max-width: 359px) {
+  .settings-row .theme-options {
+    width: 100%;
+  }
+  .compact-notify-action {
+    max-width: 100%;
+  }
 }

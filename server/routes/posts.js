@@ -3,6 +3,7 @@ import { requireAuth } from '../auth.js'
 import { draftOwnedBy, cleanupDraftUploads } from '../image-jobs.js'
 import { assertVideoUploadSelected, cleanupPublishedVideoVersions } from '../video-jobs.js'
 import { deleteImage } from '../storage.js'
+import { enterOperation } from '../maintenance.js'
 import {
   siteConfig,
   attachAvatars,
@@ -162,6 +163,7 @@ export function registerPosts(app) {
 
   function lookupUploadable(name, userId, draftId = null) {
     if (!UPLOAD_NAME_RE.test(name)) throw new Error('媒体参数不合法')
+    name = assertVideoUploadSelected(userId, name)
     const row =
       (draftId
         ? db
@@ -182,7 +184,6 @@ export function registerPosts(app) {
         )
         .get(name, userId)
     if (!row) throw new Error('媒体不存在或已过期,请重新上传')
-    assertVideoUploadSelected(userId, name)
     return row
   }
 
@@ -247,6 +248,15 @@ export function registerPosts(app) {
       )
     }
   }
+  function schedulePostCleanup(userId, claimed, draftId, removed = []) {
+    const release = enterOperation('media')
+    // 请求只等待发布事务；网络存储清理在受维护生命周期保护的后台执行。
+    void Promise.resolve().then(async () => {
+      for (const image of removed) await removeMediaFiles(image)
+      await cleanupPublishedVideoVersions(userId, claimed.flatMap((media) => [media.filename, media.motion?.filename].filter(Boolean)))
+      if (draftId) await cleanupDraftUploads(userId, draftId)
+    }).catch((error) => console.warn(`发布后媒体清理失败：${error.message}`)).finally(release)
+  }
 
   app.post('/api/posts', requireAuth, async (c) => {
     const body = await c.req.json().catch(() => ({}))
@@ -290,14 +300,7 @@ export function registerPosts(app) {
       db.exec('ROLLBACK')
       throw e
     }
-    await cleanupPublishedVideoVersions(
-      c.get('user').id,
-      claimed.flatMap((media) => [media.filename, media.motion?.filename].filter(Boolean)),
-    ).catch((e) => console.warn(`清理未采用视频版本失败: ${e.message}`))
-    if (draftId)
-      await cleanupDraftUploads(c.get('user').id, draftId).catch((e) =>
-        console.warn(`清理未采用草稿媒体失败: ${e.message}`),
-      )
+    schedulePostCleanup(c.get('user').id, claimed, draftId)
     return c.json({ id: Number(postId) })
   })
 
@@ -356,15 +359,7 @@ export function registerPosts(app) {
       db.exec('ROLLBACK')
       throw e
     }
-    for (const img of removed) await removeMediaFiles(img)
-    await cleanupPublishedVideoVersions(
-      c.get('user').id,
-      claimed.flatMap((media) => [media.filename, media.motion?.filename].filter(Boolean)),
-    ).catch((e) => console.warn(`清理未采用视频版本失败: ${e.message}`))
-    if (draftId)
-      await cleanupDraftUploads(c.get('user').id, draftId).catch((e) =>
-        console.warn(`清理未采用草稿媒体失败: ${e.message}`),
-      )
+    schedulePostCleanup(c.get('user').id, claimed, draftId, removed)
     return c.json({ ok: true })
   })
 

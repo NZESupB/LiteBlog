@@ -597,7 +597,23 @@ function VideoDetails({
     <div>
       {item._status === 'uploading' && (
         <p>
-          {item.name || '视频'}：{uploadProgressText(item)}。原件上传后会先保存，后台继续处理。
+          {item.name || '视频'}：{uploadProgressText(item)}。原件就绪后即可发布。
+        </p>
+      )}
+      {result?.compressionPending && (
+        <p className="storage-hint" role="status">
+          原件已保存，可立即发布；{needsPoster ? '压缩在后台继续' : 'Live 实况视频默认在后台压缩'}。
+          {uploadProgressText(item)}
+        </p>
+      )}
+      {result?.error && (
+        <p
+          className="form-message"
+          data-state={item._originalReady ? 'warning' : 'error'}
+          role={item._originalReady ? 'status' : 'alert'}
+        >
+          {item._originalReady ? '压缩未完成，仍可发布原件：' : '视频处理失败：'}
+          {result.error}
         </p>
       )}
       {item._needsFile ? (
@@ -645,22 +661,29 @@ function VideoDetails({
                   {version.width || '?'}×{version.height || '?'} · {Number(version.rate || 0).toFixed(2)}fps ·{' '}
                   {version.bitDepth || '?'}bit · {version.hdr ? 'HDR' : 'SDR'}
                   {result.recommendedVariant === variant ? ' · 推荐' : ''}
-                  {result.canSelect && version.available !== false && version.codec && (
-                    <button
-                      className="btn-ghost"
-                      type="button"
-                      disabled={
-                        busy ||
-                        item._status === 'selecting' ||
-                        (result.selectedVariant === variant && item._status === 'done')
-                      }
-                      onClick={() => service.selectVariant(item, variant, needsPoster)}
-                    >
-                      {result.selectedVariant === variant && item._status === 'done'
-                        ? '已采用'
-                        : `采用${label}`}
-                    </button>
-                  )}
+                  {result.canSelect &&
+                    version.available !== false &&
+                    version.codec &&
+                    (variant === 'original' || !result.compressionPending) && (
+                      <button
+                        className="btn-ghost"
+                        type="button"
+                        disabled={
+                          busy ||
+                          item._status === 'selecting' ||
+                          (result.selectedVariant === variant &&
+                            item._status === 'done' &&
+                            (result.selectionSource === 'user' || !result.compressionPending))
+                        }
+                        onClick={() => service.selectVariant(item, variant, needsPoster)}
+                      >
+                        {result.selectedVariant === variant &&
+                        item._status === 'done' &&
+                        (result.selectionSource === 'user' || !result.compressionPending)
+                          ? '已采用'
+                          : `采用${label}`}
+                      </button>
+                    )}
                 </p>
               )
             )

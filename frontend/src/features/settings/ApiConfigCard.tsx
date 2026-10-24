@@ -40,6 +40,7 @@ function ConfigForm({
   const [mode, setMode] = useState<ConfigMode>(initial.mode === 'custom' ? 'custom' : 'shared')
   const [models, setModels] = useState<Record<ConfigMode, string[]>>({ shared: [], custom: [] })
   const [messages, setMessages] = useState<Record<ConfigMode, string>>({ shared: '', custom: '' })
+  const [messageOk, setMessageOk] = useState<Record<ConfigMode, boolean>>({ shared: false, custom: false })
   const [busy, setBusy] = useState(false)
   const sourceVersions = useRef({ shared: 0, custom: 0 })
   const changeSource = (kind: ConfigMode) => {
@@ -79,7 +80,10 @@ function ConfigForm({
     const submitted = payload()
     const keyName = requestedMode === 'shared' ? 'sharedApiKey' : 'apiKey'
     const submittedKey = String(submitted[keyName] || '').trim()
-    const setMessage = (text: string) => setMessages((previous) => ({ ...previous, [requestedMode]: text }))
+    const setMessage = (text: string, ok = true) => {
+      setMessages((previous) => ({ ...previous, [requestedMode]: text }))
+      setMessageOk((previous) => ({ ...previous, [requestedMode]: ok }))
+    }
     setBusy(true)
     setMessage('')
     try {
@@ -106,9 +110,10 @@ function ConfigForm({
           input.placeholder = '已保存，留空表示不修改'
         }
         setMessage('已保存')
-      } else setMessage(result.message || (result.ok === false ? '接口连接失败' : '连接成功'))
+      } else
+        setMessage(result.message || (result.ok === false ? '接口连接失败' : '连接成功'), result.ok !== false)
     } catch (error) {
-      if (!current.signal.aborted) setMessage(errorMessage(error))
+      if (!current.signal.aborted) setMessage(errorMessage(error), false)
     } finally {
       if (!current.signal.aborted) setBusy(false)
     }
@@ -122,8 +127,12 @@ function ConfigForm({
         void action('save')
       }}
     >
-      <h2>{title}</h2>
-      <p className="storage-status">凭据只存服务器，留空表示沿用已保存密钥。</p>
+      <div className="settings-card-heading">
+        <div>
+          <h2>{title}</h2>
+          <p>凭据只存服务器，留空表示沿用已保存密钥。</p>
+        </div>
+      </div>
       <div role="radiogroup" aria-label={`${title}配置来源`}>
         {(['shared', 'custom'] as const).map((value) => (
           <label className="row" key={value}>
@@ -206,7 +215,11 @@ function ConfigForm({
           保存
         </button>
       </div>
-      <p className="form-error" role="status">
+      <p
+        className="form-message"
+        data-state={messageOk[mode] ? 'success' : 'error'}
+        role={messageOk[mode] ? 'status' : 'alert'}
+      >
         {messages[mode]}
       </p>
     </form>

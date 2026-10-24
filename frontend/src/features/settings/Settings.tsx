@@ -8,6 +8,7 @@ import { useResource } from '../../lib/use-resource'
 import { ApiConfigCard } from './ApiConfigCard'
 import { Backup } from './Backup'
 import { animateElement, disposeAnimations, motionTiming } from '../../native/ui/motion.js'
+import { SettingsPage } from '../../components/layout/SettingsPage'
 
 declare global {
   interface Window {
@@ -90,19 +91,22 @@ export function Settings() {
     { section } = useParams(),
     location = useLocation()
   if (!site.user) return <Navigate to="/login" replace />
+  const sections: Record<string, { title: string; description: string }> = {
+    site: { title: '站点设置', description: '设置站点信息、访问权限与视频处理偏好。' },
+    ai: { title: 'AI 设置', description: '为文字优化和配图配置接口与模型。' },
+    storage: { title: '媒体存储', description: '管理图片、视频与实况图的存储位置。' },
+    backup: { title: '备份与恢复', description: '设置数据库备份计划，或从备份恢复数据。' },
+  }
+  if (section && !sections[section]) return <Navigate to="/settings" replace />
+  const current = sections[section || ''] || { title: '设置', description: '个人偏好与站点管理，都在这里。' }
   return (
-    <div className="settings-page" key={location.pathname} data-motion-owned="true">
-      <Link to={section ? '/settings' : '/'} className="back-link">
-        ← {section ? '返回设置' : '返回时间轴'}
-      </Link>
-      <h1>
-        {(
-          { site: '站点设置', ai: 'AI 设置', storage: '媒体存储', backup: '备份与恢复' } as Record<
-            string,
-            string
-          >
-        )[section || ''] || '设置'}
-      </h1>
+    <SettingsPage
+      key={location.pathname}
+      title={current.title}
+      description={current.description}
+      backTo={section ? '/settings' : '/'}
+      backLabel={section ? '设置' : '时间轴'}
+    >
       {!section && (
         <div className="settings-groups">
           {/* 分组一：个人中心与首选项 */}
@@ -121,7 +125,7 @@ export function Settings() {
                   <span className="profile-username">@{site.user.username}</span>
                 </div>
               </div>
-              <Link className="btn-ghost btn-sm" to="/settings/profile" state={{ profileReturn: true }}>
+              <Link className="btn-ghost btn-sm" to="/settings/profile" state={{ returnTo: '/settings' }}>
                 编辑资料
               </Link>
             </div>
@@ -147,7 +151,7 @@ export function Settings() {
           {/* 分组二：系统管理功能导航 */}
           <section className="settings-group-card">
             <div className="settings-group-title">系统管理</div>
-            <nav className="settings-links-compact">
+            <nav className="settings-links-compact" aria-label="系统管理">
               {[
                 { path: 'site', label: '站点设置', desc: '站名、起始日与私密模式', icon: Globe },
                 { path: 'ai', label: 'AI 设置', desc: '语言模型与图像生成配置', icon: Sparkles },
@@ -183,7 +187,7 @@ export function Settings() {
       )}
       {section === 'storage' && <Storage />}
       {section === 'backup' && <Backup />}
-    </div>
+    </SettingsPage>
   )
 }
 function Theme({ compact = false }: { compact?: boolean } = {}) {
@@ -250,12 +254,15 @@ function Theme({ compact = false }: { compact?: boolean } = {}) {
 function SiteForm() {
   const { site, refresh } = useApp(),
     [message, setMessage] = useState(''),
-    [busy, setBusy] = useState(false)
+    [busy, setBusy] = useState(false),
+    [messageOk, setMessageOk] = useState(false)
   return (
     <form
       className="card settings-card"
       onSubmit={async (event) => {
         event.preventDefault()
+        if (busy) return
+        setMessage('')
         const values = new FormData(event.currentTarget)
         setBusy(true)
         try {
@@ -266,14 +273,21 @@ function SiteForm() {
           })
           await refresh()
           setMessage('已保存')
+          setMessageOk(true)
         } catch (error) {
           setMessage(errorMessage(error))
+          setMessageOk(false)
         } finally {
           setBusy(false)
         }
       }}
     >
-      <h2>站点信息</h2>
+      <div className="settings-card-heading">
+        <div>
+          <h2>站点信息</h2>
+          <p>为你们的日常起个名字，选择纪念日与访问权限。</p>
+        </div>
+      </div>
       <label>
         站点名称
         <input name="title" defaultValue={site.title} required />
@@ -287,10 +301,18 @@ function SiteForm() {
         私密模式
       </label>
       <p className="storage-hint">每篇动态可以独立选择公开正文或图片。</p>
-      <button className="btn" disabled={busy}>
-        保存
-      </button>
-      <p role="status">{message}</p>
+      <div className="settings-actions">
+        <button className="btn" disabled={busy}>
+          {busy ? '保存中…' : '保存'}
+        </button>
+      </div>
+      <p
+        className="form-message"
+        data-state={messageOk ? 'success' : 'error'}
+        role={messageOk ? 'status' : 'alert'}
+      >
+        {message}
+      </p>
     </form>
   )
 }
@@ -298,10 +320,16 @@ function VideoSettings() {
   const { data, error } = useResource<{ enabled: boolean; available: boolean; error?: string }>(
     '/api/uploads/video/config',
   )
-  const [message, setMessage] = useState('')
+  const [message, setMessage] = useState(''),
+    [messageOk, setMessageOk] = useState(false)
   return (
     <section className="card settings-card">
-      <h2>视频处理</h2>
+      <div className="settings-card-heading">
+        <div>
+          <h2>视频处理</h2>
+          <p>原件先就绪，压缩随后在后台进行。</p>
+        </div>
+      </div>
       {data && (
         <label className="row">
           <input
@@ -314,9 +342,11 @@ function VideoSettings() {
               try {
                 await json('/api/uploads/video/config', 'PUT', { enabled: value })
                 setMessage('设置仅影响后续上传')
+                setMessageOk(true)
               } catch (error) {
                 input.checked = !value
                 setMessage(errorMessage(error))
+                setMessageOk(false)
               } finally {
                 input.disabled = false
               }
@@ -325,8 +355,16 @@ function VideoSettings() {
           后台自动压缩
         </label>
       )}
-      <p className="storage-hint">原件先保存，再生成 HEVC 候选；发布前可以切换版本。</p>
-      <p role="status">{error || data?.error || message}</p>
+      <p className="storage-hint">
+        原件就绪后即可发布，压缩在后台继续；Live 实况视频默认压缩。此开关仅影响后续普通视频上传。
+      </p>
+      <p
+        className="form-message"
+        data-state={error || data?.error || !messageOk ? 'error' : 'success'}
+        role={error || data?.error || !messageOk ? 'alert' : 'status'}
+      >
+        {error || data?.error || message}
+      </p>
     </section>
   )
 }
@@ -337,9 +375,10 @@ interface StorageData {
 function Storage() {
   const { data, error, loading } = useResource<StorageData>('/api/storage')
   const [message, setMessage] = useState(''),
-    [busy, setBusy] = useState(false)
+    [busy, setBusy] = useState(false),
+    [messageOk, setMessageOk] = useState(false)
   return loading ? (
-    <p>正在读取…</p>
+    <p role="status">正在读取…</p>
   ) : error ? (
     <p role="alert">{error}</p>
   ) : (
@@ -348,19 +387,28 @@ function Storage() {
         className="card settings-card"
         onSubmit={async (event) => {
           event.preventDefault()
+          if (busy) return
+          setMessage('')
           setBusy(true)
           const values = Object.fromEntries(new FormData(event.currentTarget))
           try {
             await json('/api/storage', 'PUT', values)
             setMessage('已保存')
+            setMessageOk(true)
           } catch (error) {
             setMessage(errorMessage(error))
+            setMessageOk(false)
           } finally {
             setBusy(false)
           }
         }}
       >
-        <h2>图片与视频存储</h2>
+        <div className="settings-card-heading">
+          <div>
+            <h2>图片与视频存储</h2>
+            <p>新媒体使用所选位置，已有文件按原记录读取。</p>
+          </div>
+        </div>
         <label>
           存储后端
           <select name="backend" defaultValue={data.backend}>
@@ -397,6 +445,8 @@ function Storage() {
             disabled={busy}
             onClick={async (event) => {
               const form = event.currentTarget.form!
+              if (busy) return
+              setMessage('')
               setBusy(true)
               try {
                 const result = await json<{ message?: string }>(
@@ -405,8 +455,10 @@ function Storage() {
                   Object.fromEntries(new FormData(form)),
                 )
                 setMessage(result.message || '连接成功')
+                setMessageOk(true)
               } catch (error) {
                 setMessage(errorMessage(error))
+                setMessageOk(false)
               } finally {
                 setBusy(false)
               }
@@ -418,7 +470,13 @@ function Storage() {
             保存
           </button>
         </div>
-        <p role="status">{message}</p>
+        <p
+          className="form-message"
+          data-state={messageOk ? 'success' : 'error'}
+          role={messageOk ? 'status' : 'alert'}
+        >
+          {message}
+        </p>
       </form>
     )
   )

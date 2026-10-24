@@ -52,15 +52,33 @@ test('设置子路由、资料返回、明暗主题与窄屏布局', async ({ pa
     await expect(page.locator('main h1')).toBeVisible()
     await expect(page.locator('main')).not.toContainText('页面暂时无法打开')
     await expect(page.locator('main input').first()).toBeVisible()
+    await page.getByRole('link', { name: '返回设置', exact: true }).click()
+    await expect(page).toHaveURL(/#\/settings$/)
   }
   await page.goto('/#/settings')
   await page.locator('label.theme-option').filter({ hasText: '深色' }).click()
   await expect(page.getByRole('radio', { name: '深色', exact: true })).toBeChecked()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   await page.getByRole('link', { name: '编辑资料' }).click()
-  await page.getByRole('button', { name: '返回设置' }).click()
+  await page.getByRole('link', { name: '返回设置' }).click()
   await expect(page).toHaveURL(/#\/settings$/)
   await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/#/settings/profile')
+  await page.getByRole('link', { name: '返回设置', exact: true }).click()
+  await expect(page).toHaveURL(/#\/settings$/)
+  await page.goto('/#/account')
+  await page.getByRole('link', { name: '返回时间轴', exact: true }).click()
+  await expect(page).toHaveURL(/#\/$/)
+  await page.goto('/#/settings')
+  await page.getByRole('link', { name: '返回时间轴', exact: true }).focus()
+  await expect(page.getByRole('link', { name: '返回时间轴', exact: true })).toBeFocused()
+  expect(
+    await page
+      .getByRole('link', { name: '返回时间轴', exact: true })
+      .evaluate((node) => node.getBoundingClientRect().height),
+  ).toBeGreaterThanOrEqual(44)
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/#\/$/)
   await page.goto('/#/')
   await page.locator('.mobile-compose').click()
   await expect(page.locator('.composer-overlay')).toBeVisible()
@@ -337,4 +355,68 @@ test('归档拖动松手仅请求一次，桌面写入口跟随滚动', async ({
   expect(jumps).toEqual([])
   await page.mouse.up()
   await expect.poll(() => jumps).toEqual(['2026-09'])
+})
+
+test('Live 点击后持续循环，停止、切图和关闭释放视频', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  await login(page)
+  await page.route('**/api/gallery', (route) =>
+    route.fulfill({
+      json: {
+        images: [
+          {
+            id: 9201,
+            type: 'image',
+            url: '/images/journal-cover.jpg',
+            live: true,
+            motion: '/__test/playable.webm',
+            created_at: '2026-10-23 00:00:00',
+          },
+          {
+            id: 9202,
+            type: 'image',
+            url: '/images/journal-cover.jpg?plain',
+            created_at: '2026-10-23 00:00:00',
+          },
+        ],
+      },
+    }),
+  )
+  await page.goto('/#/gallery')
+  await page
+    .locator('.media-tile')
+    .filter({ has: page.locator('.media-live') })
+    .getByRole('button', { name: '查看照片' })
+    .click()
+  await expect(page.locator('#lightboxLive')).toBeVisible()
+  expect(await page.locator('#lightboxVideo').getAttribute('src')).toBeNull()
+  await page.locator('#lightboxLive').click()
+  const video = page.locator('#lightboxVideo')
+  await expect(video).toBeVisible()
+  expect(await video.evaluate((node: HTMLVideoElement) => node.loop)).toBe(true)
+  await video.evaluate((node: HTMLVideoElement) => {
+    let loops = 0,
+      previous = node.currentTime
+    node.dataset.loops = '0'
+    node.addEventListener('timeupdate', () => {
+      if (node.currentTime < previous) node.dataset.loops = String(++loops)
+      previous = node.currentTime
+    })
+    node.playbackRate = 4
+  })
+  await expect.poll(async () => Number(await video.getAttribute('data-loops'))).toBeGreaterThanOrEqual(2)
+  await expect(page.locator('#lightboxLive')).toHaveAttribute('aria-pressed', 'true')
+  await page.locator('#lightboxLive').click()
+  await expect(page.locator('#lightboxImg')).toBeVisible()
+  expect(await video.getAttribute('src')).toBeNull()
+  expect(await video.evaluate((node: HTMLVideoElement) => node.loop)).toBe(false)
+  await page.locator('#lightboxLive').click()
+  await expect(video).toBeVisible()
+  await page.locator('#lightbox .lb-next').click()
+  await expect(page.locator('#lightboxLive')).not.toBeVisible()
+  expect(await video.getAttribute('src')).toBeNull()
+  await page.locator('#lightbox .lb-close').click()
+  await expect(page.locator('#lightbox')).not.toBeVisible()
+  expect(errors).toEqual([])
 })

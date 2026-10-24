@@ -36,7 +36,10 @@ export function Backup() {
         const result = await api<BackupStatus>('/api/backups', { signal: controller.signal })
         if (!controller.signal.aborted) setStatus(result)
       } catch (error) {
-        if (!controller.signal.aborted) setConfigMessage(errorMessage(error))
+        if (!controller.signal.aborted) {
+          setConfigOk(false)
+          setConfigMessage(errorMessage(error))
+        }
       }
       if (!controller.signal.aborted) {
         timer = setTimeout(poll, 5000)
@@ -223,9 +226,9 @@ export function Backup() {
         )}
         {configMessage && (
           <p
-            className={`form-message backup-message${configOk ? ' form-message-ok' : ''}`}
-            data-state={configOk ? 'ok' : 'error'}
-            role="status"
+            className="form-message backup-message"
+            data-state={configOk ? 'success' : 'error'}
+            role={configOk ? 'status' : 'alert'}
           >
             {configMessage}
           </p>
@@ -275,7 +278,7 @@ export function Backup() {
           </fieldset>
         </form>
         {restoreMessage && (
-          <p className="form-message restore-message" data-state="error" role="status">
+          <p className="form-message restore-message" data-state="error" role="alert">
             {restoreMessage}
           </p>
         )}

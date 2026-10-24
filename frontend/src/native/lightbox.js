@@ -118,6 +118,7 @@ async function prepareImage(image, url, signal) {
 
 function releaseVideo(node) {
   node.pause()
+  node.loop = false
   node.removeAttribute('src')
   node.removeAttribute('poster')
   node.load()
@@ -383,12 +384,15 @@ async function playLive() {
   resetVideo()
   const node = result.node
   node.id = 'lightboxVideo'
+  node.loop = true
+  node.preload = 'auto'
   node.style.transform = restTransform
   videoEl.replaceWith(node)
   videoEl = node
   imageEl.hidden = true
   livePlaying = true
-  liveBtn.hidden = true
+  liveBtn.hidden = false
+  liveBtn.textContent = 'LIVE · 循环中'
   liveBtn.setAttribute('aria-pressed', 'true')
   setStatus()
   try { await node.play() }
@@ -407,6 +411,7 @@ function stopLive() {
     imageEl.style.transform = restTransform
     liveBtn.hidden = !currentItem().live
     liveBtn.setAttribute('aria-pressed', 'false')
+    liveBtn.textContent = 'LIVE'
     layoutImage()
   }
 }
@@ -422,9 +427,9 @@ function togglePlayback() {
 closeBtn.onclick = () => { void closeLightbox() }
 prevBtn.onclick = () => move(-1)
 nextBtn.onclick = () => move(1)
-liveBtn.onclick = (event) => { event.stopPropagation(); void playLive() }
+liveBtn.onclick = (event) => { event.stopPropagation(); if (livePlaying) stopLive(); else void playLive() }
 retryBtn.onclick = () => retryAction?.()
-stage.addEventListener('ended', (event) => { if (event.target === videoEl) stopLive() }, true)
+stage.addEventListener('ended', (event) => { if (event.target === videoEl && !videoEl.loop) stopLive() }, true)
 viewport.addEventListener('click', (event) => { if (event.target === videoEl && livePlaying) togglePlayback() })
 viewport.addEventListener('dblclick', (event) => {
   if (event.target !== imageEl) return

@@ -10,10 +10,15 @@ export interface VideoVersion {
 }
 export interface VideoResult {
   message?: string
+  phase?: string
+  originalReady?: boolean
+  compressionPending?: boolean
+  error?: string
   totalElapsedMs?: number
   variants?: Partial<Record<'original' | 'compressed', VideoVersion>>
   recommendedVariant?: string
   selectedVariant?: string
+  selectionSource?: 'user' | 'auto'
   canSelect?: boolean
   comparison?: { compressed: boolean; savingPercent: number; compressionRatio: number; changes: string[] }
 }
@@ -29,6 +34,7 @@ export interface DraftMedia {
   _kind?: string
   _url?: string
   _status?: string
+  _originalReady?: boolean
   _errMsg?: string
   _motion?: DraftMedia | null
   _duration?: number

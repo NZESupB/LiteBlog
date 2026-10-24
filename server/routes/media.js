@@ -54,9 +54,19 @@ export function registerMedia(app) {
       .prepare(
         `SELECT i.*, p.public_images FROM images i JOIN posts p ON p.id = i.post_id WHERE i.filename = ? OR i.motion_filename = ? OR i.poster_filename = ? LIMIT 1`,
       )
-      .get(name, name, name)
+      .get(name, name, name) || db.prepare(`SELECT i.*, p.public_images,
+        json_extract(j.snapshot, '$.filename') AS replacement_filename
+        FROM video_jobs j JOIN images i ON
+          i.filename = json_extract(j.snapshot, '$.filename') OR i.motion_filename = json_extract(j.snapshot, '$.filename')
+        JOIN posts p ON p.id = i.post_id AND p.user_id = j.user_id
+        WHERE j.status = 'done' AND json_extract(j.snapshot, '$.variants.original.filename') = ?
+          AND json_extract(j.snapshot, '$.filename') <> ? LIMIT 1`).get(name, name)
     if (siteConfig().privateMode && !c.get('user') && !row?.public_images)
       return c.json({ error: '请先登录' }, 401)
+    if (row?.replacement_filename) {
+      c.header('Cache-Control', 'private, no-store')
+      return c.redirect(`/uploads/${row.replacement_filename}`, 307)
+    }
     const pending = row
       ? null
       : db.prepare('SELECT storage, storage_path FROM pending_uploads WHERE filename = ? LIMIT 1').get(name)

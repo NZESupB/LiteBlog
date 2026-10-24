@@ -55,13 +55,14 @@ export const retryVideoUpload = (id, signal) => api(`/api/uploads/video/${encode
 export const selectVideoVariant = (id, variant, signal) => api(`/api/uploads/video/${encodeURIComponent(id)}/select`, {
   method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ variant }),
 })
-export async function waitForVideoUpload(id, { signal, onState } = {}) {
+export async function waitForVideoUpload(id, { signal, onState, waitForCompression = false } = {}) {
   const url = `/api/uploads/video/${encodeURIComponent(id)}`
   let state = { uploadId: id }
   for (;;) {
     state = await connected(() => api(url, { signal }), { signal, onState, state })
     onState?.(state)
     if (state.status === 'done' && state.filename) return state
+    if (!waitForCompression && state.originalReady && state.filename && state.status !== 'cancelled') return state
     if (state.status === 'failed') throw new Error(state.error || '视频处理失败')
     if (state.status === 'cancelled') throw new Error('视频任务已取消')
     if (state.retryable) throw Object.assign(new Error(state.error || '处理暂停，可从检查点重试'), { canRetry: true })
@@ -72,7 +73,7 @@ export async function waitForVideoUpload(id, { signal, onState } = {}) {
     await wait(1000, signal)
   }
 }
-export async function uploadVideo(file, { draftId, needsPoster = true, signal, onState, uploadId = '', clientUploadId = '', fingerprint = '' } = {}) {
+export async function uploadVideo(file, { draftId, needsPoster = true, livePhoto = false, signal, onState, uploadId = '', clientUploadId = '', fingerprint = '' } = {}) {
   const config = await connected(() => getVideoUploadConfig(signal), { signal, onState })
   if (!config.available) throw new Error(config.error || '视频处理工具不可用')
   if (file.size > config.maxBytes) throw new Error(`原视频不能超过 ${formatVideoBytes(config.maxBytes)}`)
@@ -81,7 +82,7 @@ export async function uploadVideo(file, { draftId, needsPoster = true, signal, o
   onState?.(metadata)
   const identity = await identify(file, config.chunkBytes, signal, (loaded) => onState?.({ ...metadata, loaded }))
   if (fingerprint && fingerprint !== identity.fingerprint) throw Object.assign(new Error('文件内容不同，请选择原始视频继续上传'), { needsFile: true })
-  const body = { ...identity, draftId, needsPoster, clientUploadId, contentType: videoContentType(file), name: file.name }
+  const body = { ...identity, draftId, needsPoster, livePhoto, clientUploadId, contentType: videoContentType(file), name: file.name }
   let state = uploadId
     ? await connected(() => api(`/api/uploads/video/${encodeURIComponent(uploadId)}/resume`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), { signal, onState, state: metadata })
     : await connected(() => api('/api/uploads/video/init', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), { signal, onState, state: metadata })

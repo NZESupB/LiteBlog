@@ -1,18 +1,17 @@
-import { Link, Navigate, useParams } from 'react-router-dom'
+import { Navigate, useParams } from 'react-router-dom'
 import { useApp } from '../../app/AppProviders'
 import { useResource } from '../../lib/use-resource'
 import { monthKey, type Media, type Post } from '../../lib/types'
 import { PostCard } from './PostCard'
 import { MediaGrid } from '../../components/media/MediaGrid'
+import { BackLink } from '../../components/layout/BackLink'
 export function SinglePost() {
   const { id } = useParams(),
     { revision } = useApp()
   const { data, error, loading } = useResource<{ post: Post }>(`/api/posts/${id}`, revision)
   return (
     <>
-      <Link className="back-link" to="/">
-        ← 返回时间轴
-      </Link>
+      <BackLink to="/" label="时间轴" />
       {loading ? (
         <p role="status">正在读取…</p>
       ) : error ? (

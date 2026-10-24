@@ -5,6 +5,7 @@ import { api, json } from '../../lib/api'
 import { errorMessage } from '../../lib/types'
 import { openAvatarCropper } from '../../native/ui/avatar-cropper.js'
 import { createViewScope } from '../../native/views/scope.js'
+import { SettingsPage } from '../../components/layout/SettingsPage'
 
 export function Login() {
   const { site, refresh, changed } = useApp(),
@@ -55,10 +56,10 @@ export function Login() {
 }
 export function Account() {
   const { site, refresh, toast } = useApp(),
-    navigate = useNavigate(),
     location = useLocation()
-  const [message, setMessage] = useState(''),
-    [busy, setBusy] = useState(false)
+  const [messages, setMessages] = useState<Record<string, { text: string; ok: boolean }>>({}),
+    [busy, setBusy] = useState(''),
+    [avatarBusy, setAvatarBusy] = useState(false)
   const scope = useRef<ReturnType<typeof createViewScope> | null>(null)
   const avatarInput = useRef<HTMLInputElement>(null)
   const avatarButton = useRef<HTMLButtonElement>(null)
@@ -69,35 +70,47 @@ export function Account() {
   if (!site.user) return <Navigate to="/login" replace />
   const user = site.user
   const settings = location.pathname === '/settings/profile'
-  const back = () => {
-    if (settings && (location.state?.profileReturn || history.state?.profileReturn)) navigate(-1)
-    else navigate(settings ? '/settings' : '/', { replace: true })
-  }
+  const backTo =
+    location.state?.returnTo === '/settings' || location.state?.returnTo === '/'
+      ? location.state.returnTo
+      : settings
+        ? '/settings'
+        : '/'
   const submit = async (event: FormEvent<HTMLFormElement>, path: string) => {
     event.preventDefault()
     if (busy) return
     const form = event.currentTarget
-    setBusy(true)
-    setMessage('')
+    setBusy(path)
+    setMessages((previous) => ({ ...previous, [path]: { text: '', ok: false } }))
     try {
       await json(path, 'POST', Object.fromEntries(new FormData(form)))
       if (path === '/api/profile') await refresh()
       else form.reset()
-      setMessage('已保存')
+      setMessages((previous) => ({
+        ...previous,
+        [path]: { text: path === '/api/profile' ? '资料已保存' : '密码已修改', ok: true },
+      }))
     } catch (error) {
-      setMessage(errorMessage(error))
+      setMessages((previous) => ({ ...previous, [path]: { text: errorMessage(error), ok: false } }))
     } finally {
-      setBusy(false)
+      setBusy('')
     }
   }
   return (
-    <div className="account-page" data-motion-owned="true">
-      <button className="btn-ghost back-link" onClick={back}>
-        ← {settings ? '返回设置' : '返回时间轴'}
-      </button>
-      <h1>账号设置</h1>
+    <SettingsPage
+      account
+      title="账号设置"
+      description="管理头像、个人资料与登录密码。"
+      backTo={backTo}
+      backLabel={backTo === '/settings' ? '设置' : '时间轴'}
+    >
       <section className="card settings-card">
-        <h2>头像</h2>
+        <div className="settings-card-heading">
+          <div>
+            <h2>头像</h2>
+            <p>选择一张照片，裁剪后作为你的头像。</p>
+          </div>
+        </div>
         <div className="account-avatar-row">
           <span className="avatar">
             {user.avatarUrl ? <img src={user.avatarUrl} alt={user.name} /> : user.name.slice(0, 1)}
@@ -106,6 +119,7 @@ export function Account() {
             ref={avatarButton}
             className="btn-ghost"
             type="button"
+            disabled={avatarBusy}
             onClick={() => avatarInput.current?.click()}
           >
             更换头像
@@ -124,12 +138,17 @@ export function Account() {
               openAvatarCropper(
                 file,
                 async (blob: Blob) => {
-                  const form = new FormData()
-                  form.append('avatar', blob, 'avatar.jpg')
-                  await api('/api/profile/avatar', { method: 'POST', body: form })
-                  await refresh()
-                  toast('头像已更新')
-                  return true
+                  setAvatarBusy(true)
+                  try {
+                    const form = new FormData()
+                    form.append('avatar', blob, 'avatar.jpg')
+                    await api('/api/profile/avatar', { method: 'POST', body: form })
+                    await refresh()
+                    toast('头像已更新')
+                    return true
+                  } finally {
+                    setAvatarBusy(false)
+                  }
                 },
                 () => {},
                 scope.current,
@@ -138,13 +157,21 @@ export function Account() {
           />
           {user.avatarUrl && (
             <button
+              type="button"
+              disabled={avatarBusy}
               className="btn-ghost"
               onClick={async () => {
+                if (avatarBusy) return
+                setAvatarBusy(true)
                 try {
                   await api('/api/profile/avatar', { method: 'DELETE' })
                   await refresh()
+                  avatarButton.current?.focus({ preventScroll: true })
+                  toast('头像已移除')
                 } catch (error) {
                   toast(errorMessage(error))
+                } finally {
+                  setAvatarBusy(false)
                 }
               }}
             >
@@ -154,7 +181,12 @@ export function Account() {
         </div>
       </section>
       <form className="card settings-card" onSubmit={(event) => submit(event, '/api/profile')}>
-        <h2>个人资料</h2>
+        <div className="settings-card-heading">
+          <div>
+            <h2>个人资料</h2>
+            <p>登录账号用于登录，显示名称会出现在日常与评论中。</p>
+          </div>
+        </div>
         <label>
           登录账号
           <input name="username" defaultValue={user.username} maxLength={24} required />
@@ -163,12 +195,28 @@ export function Account() {
           显示名称
           <input name="displayName" defaultValue={user.displayName || user.name} maxLength={24} required />
         </label>
-        <button className="btn" disabled={busy}>
-          保存资料
-        </button>
+        <div className="settings-actions">
+          <button className="btn" disabled={Boolean(busy)}>
+            {busy === '/api/profile' ? '保存中…' : '保存资料'}
+          </button>
+        </div>
+        {messages['/api/profile']?.text && (
+          <p
+            className="form-message"
+            data-state={messages['/api/profile'].ok ? 'success' : 'error'}
+            role={messages['/api/profile'].ok ? 'status' : 'alert'}
+          >
+            {messages['/api/profile'].text}
+          </p>
+        )}
       </form>
       <form className="card settings-card" onSubmit={(event) => submit(event, '/api/password')}>
-        <h2>修改密码</h2>
+        <div className="settings-card-heading">
+          <div>
+            <h2>修改密码</h2>
+            <p>新密码至少 6 位，请使用与其他网站不同的密码。</p>
+          </div>
+        </div>
         <label>
           原密码
           <input name="oldPassword" type="password" autoComplete="current-password" required />
@@ -177,14 +225,26 @@ export function Account() {
           新密码
           <input name="newPassword" type="password" autoComplete="new-password" minLength={6} required />
         </label>
-        <button className="btn" disabled={busy}>
-          修改密码
-        </button>
+        <div className="settings-actions">
+          <button className="btn" disabled={Boolean(busy)}>
+            {busy === '/api/password' ? '修改中…' : '修改密码'}
+          </button>
+        </div>
+        {messages['/api/password']?.text && (
+          <p
+            className="form-message"
+            data-state={messages['/api/password'].ok ? 'success' : 'error'}
+            role={messages['/api/password'].ok ? 'status' : 'alert'}
+          >
+            {messages['/api/password'].text}
+          </p>
+        )}
       </form>
-      <p role="status" className="form-error">
-        {message}
-      </p>
-      <Link to="/settings">站点设置</Link>
-    </div>
+      {!settings && (
+        <Link className="account-settings-link" to="/settings">
+          管理站点设置
+        </Link>
+      )}
+    </SettingsPage>
   )
 }

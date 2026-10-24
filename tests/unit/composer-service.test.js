@@ -8,9 +8,12 @@ vi.mock('../../frontend/src/native/video-upload.js', () => ({
   selectVideoVariant: vi.fn(),
   formatVideoElapsed: () => '',
 }))
-import { cancelVideoUpload, waitForVideoUpload } from '../../frontend/src/native/video-upload.js'
+import { cancelVideoUpload, waitForVideoUpload, selectVideoVariant } from '../../frontend/src/native/video-upload.js'
 const services = []
-beforeEach(() => localStorage.clear())
+beforeEach(() => {
+  localStorage.clear()
+  vi.resetAllMocks()
+})
 afterEach(() => {
   for (const service of services.splice(0)) service.dispose()
 })
@@ -164,5 +167,71 @@ describe('发布器业务生命周期', () => {
     await service.publish()
     expect(request.mock.calls.some(([path]) => path === '/api/posts')).toBe(false)
     expect(service.getState().error).toContain('写点什么')
+  })
+})
+
+describe('原件就绪与后台压缩', () => {
+  const original = {
+    uploadId: 'job', status: 'compressing', originalReady: true, compressionPending: true,
+    filename: 'original.mp4', poster: 'poster.jpg', selectedVariant: 'original', selectionSource: 'auto',
+    variants: { original: { filename: 'original.mp4', codec: 'h264' } },
+  }
+  function restore(job = original, live = false) {
+    return setup({ content: '可发布', files: [live
+      ? { id: 'live', kind: 'image', filename: 'still.jpg', motionJobId: 'job' }
+      : { id: 'video', kind: 'video', videoJobId: 'job' }],
+    }, { videoJobs: [{ ...job, needsPoster: !live }] })
+  }
+  it('压缩尚未结束时原件可立即发布，卸载仅停止轮询', async () => {
+    waitForVideoUpload.mockImplementation((_id, options) => options.waitForCompression
+      ? new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+      : Promise.resolve(original))
+    const { service, request, storage } = restore()
+    await service.start()
+    expect(service.publishGuard()).toBe('')
+    expect(service.getState().files[0]).toMatchObject({ _status: 'done', _originalReady: true, _name: 'original.mp4' })
+    expect(storage.saveComposeState.mock.calls.at(-1)[1].files[0].originalReady).toBe(true)
+    await service.publish()
+    expect(JSON.parse(request.mock.calls.find(([url]) => url === '/api/posts')[1].body).images).toEqual([
+      { filename: 'original.mp4', poster: 'poster.jpg' },
+    ])
+    service.dispose()
+    expect(cancelVideoUpload).not.toHaveBeenCalled()
+  })
+  it('后台压缩失败不撤销原件的发布资格', async () => {
+    waitForVideoUpload.mockImplementation(async (_id, options) => {
+      if (options.waitForCompression) throw Object.assign(new Error('压缩暂停'), { canRetry: true })
+      return original
+    })
+    const { service } = restore()
+    await service.start()
+    await vi.waitFor(() => expect(service.getState().files[0]._canRetry).toBe(true))
+    expect(service.publishGuard()).toBe('')
+    expect(service.getState().files[0]._videoResult).toMatchObject({ compressionPending: false, error: '压缩暂停' })
+  })
+  it('用户选原文件后迟到的自动选版轮询不会覆盖选择', async () => {
+    let finish
+    waitForVideoUpload.mockImplementation((_id, options) => options.waitForCompression
+      ? new Promise((resolve) => { finish = resolve }) : Promise.resolve(original))
+    const { service } = restore()
+    await service.start()
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const item = service.getState().files[0]
+    selectVideoVariant.mockResolvedValue({ ...original, selectionSource: 'user', selectionUpdatedAt: 42 })
+    await service.selectVariant(item, 'original', true)
+    finish({ ...original, status: 'done', compressionPending: false, filename: 'compressed.mp4', selectedVariant: 'compressed', selectionUpdatedAt: 0 })
+    await vi.waitFor(() => expect(item._videoResult.selectionSource).toBe('user'))
+    await Promise.resolve()
+    expect(item._name).toBe('original.mp4')
+    expect(service.publishGuard()).toBe('')
+  })
+  it('Live 配对原件就绪后可发布，未就绪时继续阻止', async () => {
+    waitForVideoUpload.mockResolvedValue(original)
+    const { service } = restore({ ...original, status: 'failed', compressionPending: false, error: '编码不支持' }, true)
+    await service.start()
+    expect(service.publishGuard()).toBe('')
+    expect(service.getState().files[0]._motion._name).toBe('original.mp4')
+    service.getState().files[0]._motion._status = 'uploading'
+    expect(service.publishGuard()).toContain('处理中')
   })
 })

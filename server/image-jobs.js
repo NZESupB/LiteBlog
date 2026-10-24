@@ -110,8 +110,9 @@ export async function cleanupDraftUploads(userId, draftId) {
 
 async function performDraftCleanup(userId, draftId) {
   if (!draftId) return 0
-  await cancelDraftVideoJobs(userId, draftId)
+  const protectedNames = await cancelDraftVideoJobs(userId, draftId)
   const pending = db.prepare('SELECT filename, storage, storage_path FROM pending_uploads WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
+    .filter((row) => !protectedNames.has(row.filename))
   const jobs = db.prepare('SELECT id, status, filename, storage, storage_path FROM image_jobs WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
   const unusedJobs = jobs.filter((job) => !job.filename || !imageReferenced(job.filename))
   for (const job of unusedJobs) {
@@ -119,7 +120,8 @@ async function performDraftCleanup(userId, draftId) {
   }
   db.exec('BEGIN')
   try {
-    db.prepare('DELETE FROM pending_uploads WHERE user_id = ? AND draft_id = ?').run(userId, draftId)
+    const dropPending = db.prepare('DELETE FROM pending_uploads WHERE filename = ? AND user_id = ? AND draft_id = ?')
+    for (const row of pending) dropPending.run(row.filename, userId, draftId)
     const cancelJob = db.prepare("UPDATE image_jobs SET status = 'cancelled', error = '', updated_at = datetime('now') WHERE id = ? AND status <> 'cancelled'")
     for (const job of unusedJobs) cancelJob.run(job.id)
     db.exec('COMMIT')

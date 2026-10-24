@@ -105,6 +105,7 @@ export function createComposerService({
           kind: file._kind || 'image',
           poster: file._poster || '',
           duration: file._duration || null,
+          originalReady: Boolean(file._originalReady),
           motion: file._motion?._name || '',
           motionStatus: file._motion?._status || '',
           videoJobId: file._videoJobId || '',
@@ -112,6 +113,7 @@ export function createComposerService({
           clientUploadId: file._clientUploadId || '',
           fingerprint: file._fingerprint || '',
           motionJobId: file._motion?._videoJobId || '',
+          motionOriginalReady: Boolean(file._motion?._originalReady),
           motionResult: file._motion?._videoResult || null,
           motionClientUploadId: file._motion?._clientUploadId || '',
           motionFingerprint: file._motion?._fingerprint || '',
@@ -146,6 +148,8 @@ export function createComposerService({
     }
   }
   function applyVideo(item, result, needsPoster) {
+    if (!result.filename || (item._videoResult?.selectionUpdatedAt || 0) > (result.selectionUpdatedAt || 0)) return
+    item._originalReady = Boolean(result.originalReady || result.status === 'done')
     item._name = result.filename
     item._duration = result.duration
     item._videoResult = result
@@ -157,7 +161,7 @@ export function createComposerService({
     item._status = 'done'
     item._progress = null
     item._needsFile = false
-    item._canRetry = false
+    item._canRetry = Boolean(result.retryable)
     item._errMsg = ''
   }
   function revoke(item) {
@@ -168,7 +172,7 @@ export function createComposerService({
     if (disposed || item._removed || videos.has(item)) return
     const current = controller()
     videos.set(item, current)
-    item._status = 'uploading'
+    item._status = item._originalReady && item._name ? 'done' : 'uploading'
     item._needsFile = false
     item._canRetry = false
     item._errMsg = ''
@@ -180,6 +184,7 @@ export function createComposerService({
       const options = {
         draftId,
         needsPoster,
+        livePhoto: !needsPoster,
         signal: current.signal,
         uploadId: item._videoJobId || '',
         clientUploadId: item._clientUploadId || '',
@@ -193,7 +198,11 @@ export function createComposerService({
           if (next.uploadId) item._videoJobId = next.uploadId
           if (next.clientUploadId) item._clientUploadId = next.clientUploadId
           if (next.fingerprint) item._fingerprint = next.fingerprint
-          if (next.variants?.original) item._videoResult = next
+          const currentSelection = (item._videoResult?.selectionUpdatedAt || 0) <= (next.selectionUpdatedAt || 0)
+          if (currentSelection && !state.busy && item._status !== 'selecting' && !finished) {
+            if (next.originalReady && next.filename && next.status !== 'cancelled') applyVideo(item, next, needsPoster)
+            else if (next.variants?.original) item._videoResult = next
+          }
           item._progress = { ...next, loaded: next.loaded ?? next.received ?? 0 }
           if (next.duration) item._duration = next.duration
           if (identityChanged) persistDraft()
@@ -207,13 +216,29 @@ export function createComposerService({
         ? await uploadVideo(source, options)
         : await waitForVideoUpload(item._videoJobId, options)
       if (disposed || item._removed) return
-      applyVideo(item, result, needsPoster)
+      if (!state.busy && item._status !== 'selecting' && !finished) applyVideo(item, result, needsPoster)
+      emit()
       if (item._parent?._status === 'done' && !item._parent._needsReview) await removeCached(item._parent._id)
+      if (result.compressionPending) {
+        try {
+          const completed = await waitForVideoUpload(item._videoJobId, { ...options, waitForCompression: true })
+          if (!disposed && !item._removed && !state.busy && !finished && item._status !== 'selecting') applyVideo(item, completed, needsPoster)
+        } catch (error) {
+          if (!disposed && !item._removed && error.name !== 'AbortError') {
+            item._videoResult = { ...item._videoResult, compressionPending: false, error: error.message, retryable: Boolean(error.canRetry) }
+            item._canRetry = Boolean(error.canRetry)
+          }
+        }
+      }
     } catch (error) {
-      if (!disposed && !item._removed) {
-        item._status = 'error'
-        item._errMsg = error.message || '视频处理失败'
-        item._needsFile = Boolean(error.needsFile)
+      if (!disposed && !item._removed && error.name !== 'AbortError') {
+        if (item._originalReady && item._name) {
+          item._videoResult = { ...item._videoResult, compressionPending: false, error: error.message }
+        } else {
+          item._status = 'error'
+          item._errMsg = error.message || '视频处理失败'
+          item._needsFile = Boolean(error.needsFile)
+        }
         item._canRetry = Boolean(error.canRetry)
       }
     } finally {
@@ -333,6 +358,7 @@ export function createComposerService({
           _fingerprint: entry.fingerprint || '',
           _source: entry.source || null,
           _warnings: entry.warnings || [],
+          _originalReady: Boolean(entry.originalReady),
           _needsReview: Boolean(entry.needsReview),
           _errMsg: entry.error || (entry.filename ? '' : '请重新选择原件继续处理'),
         }
@@ -346,14 +372,15 @@ export function createComposerService({
             _status: entry.motion ? 'done' : 'error',
             _videoJobId: entry.motionJobId || '',
             _videoResult: entry.motionResult || null,
+            _originalReady: Boolean(entry.motionOriginalReady),
             _clientUploadId: entry.motionClientUploadId || '',
             _fingerprint: entry.motionFingerprint || '',
           }
         for (const video of [kind === 'video' ? item : null, item._motion].filter(Boolean)) {
           const job = jobs.get(video._videoJobId),
             poster = video === item
-          if (job?.status === 'done') applyVideo(video, job, poster)
-          else if (video._videoJobId && (!video._name || job)) void runVideo(video, null, poster)
+          if (job?.status === 'done' || (job?.originalReady && job?.filename)) applyVideo(video, job, poster)
+          if (video._videoJobId && job?.status !== 'done' && (!video._name || job?.compressionPending)) void runVideo(video, null, poster)
           else if (!video._name) {
             video._needsFile = true
             video._status = 'error'
@@ -378,8 +405,8 @@ export function createComposerService({
           _status: 'uploading',
         }
         state.files.push(item)
-        if (job.status === 'done') applyVideo(item, job, true)
-        else void runVideo(item, null, true)
+        if (job.status === 'done' || (job.originalReady && job.filename)) applyVideo(item, job, true)
+        if (job.status !== 'done' && (!job.originalReady || job.compressionPending)) void runVideo(item, null, true)
       }
       const blobs = await storage.loadDraftFiles(draftId)
       for (const blob of blobs) {
@@ -684,21 +711,10 @@ export function createComposerService({
     if (state.restoreError) return '恢复失败，请重新打开编辑器'
     if (state.busy) return '正在保存…'
     if (state.restoring) return '正在恢复草稿…'
-    if (
-      state.files.some(
-        (file) =>
-          file._status === 'error' ||
-          file._needsReview ||
-          file._discarding ||
-          file._motion?._status === 'error',
-      )
-    )
+    if (state.files.some((file) => file._status === 'error' || file._needsReview || file._discarding || file._motion?._status === 'error'))
       return '请处理失败或待确认的媒体'
-    if (
-      state.files.some(
-        (file) => pendingStates.includes(file._status) || pendingStates.includes(file._motion?._status),
-      )
-    )
+    // 视频在原件就绪时即进入 done；后台压缩不再占用发布前置状态。
+    if (state.files.some((file) => pendingStates.includes(file._status) || pendingStates.includes(file._motion?._status)))
       return '媒体处理中…'
     if (state.imageBusy || activeImage(state.imageTask)) return 'AI 配图处理中…'
     return ''
@@ -843,7 +859,7 @@ export function createComposerService({
 }
 
 export function uploadProgressText(item) {
-  const progress = item._progress
+  const progress = item._progress || item._videoResult
   const labels = {
     hashing: '校验原文件',
     connection: '等待网络恢复',
@@ -852,6 +868,7 @@ export function uploadProgressText(item) {
     verifying_source: '验证原文件',
     saving_original: '保存原文件',
     probing: '读取视频信息',
+    compression_queued: '后台压缩排队中',
     planning: '建立检查点',
     audio: '处理音轨',
     merging: '合并视频',
@@ -870,6 +887,7 @@ export function uploadProgressText(item) {
       return `${labels[progress.phase]} ${Math.floor(progress.progress || 0)}% · ${Number.isFinite(progress.estimatedRemainingMs) ? `预计剩余约 ${formatVideoElapsed(progress.estimatedRemainingMs)}` : '预计时间计算中…'}`
     return labels[progress.phase]
   }
-  if (progress?.total > 0) return `上传中 ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`
+  if (item._originalReady) return '后台处理中'
+  if (progress?.total > 0) return `上传中 ${formatBytes(progress.loaded ?? progress.received ?? 0)} / ${formatBytes(progress.total)}`
   return item._status === 'processing' ? '处理中' : '上传中'
 }
