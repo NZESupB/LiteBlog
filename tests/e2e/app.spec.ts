@@ -383,12 +383,13 @@ test('Live 点击后持续循环，停止、切图和关闭释放视频', async 
       },
     }),
   )
+  // 先注册 mock 再整页导航：只改 hash 不重载文档，慢机器上会与真实相册请求竞争，
+  // 页面可能用真实数据渲染而没有 LIVE 格子（CI 曾因此空等到超时）。
   await page.goto('/#/gallery')
-  await page
-    .locator('.media-tile')
-    .filter({ has: page.locator('.media-live') })
-    .getByRole('button', { name: '查看照片' })
-    .click()
+  await page.reload()
+  const liveTile = page.locator('.media-tile').filter({ has: page.locator('.media-live') })
+  await expect(liveTile).toHaveCount(1)
+  await liveTile.getByRole('button', { name: '查看照片' }).click()
   await expect(page.locator('#lightboxLive')).toBeVisible()
   expect(await page.locator('#lightboxVideo').getAttribute('src')).toBeNull()
   await page.locator('#lightboxLive').click()
