@@ -306,6 +306,7 @@ test('设置真实保存、API 配置隔离和数据库恢复', async ({ page })
     mimeType: 'application/octet-stream',
     buffer: await snapshot.body(),
   })
+  await page.getByLabel('确认操作').fill('恢复')
   await page.getByRole('button', { name: '确认并恢复数据库' }).click()
   await expect(page.getByLabel('登录账号', { exact: true })).toBeVisible()
   await login(page)

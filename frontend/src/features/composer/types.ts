@@ -22,6 +22,16 @@ export interface VideoResult {
   canSelect?: boolean
   comparison?: { compressed: boolean; savingPercent: number; compressionRatio: number; changes: string[] }
 }
+// 服务端/上传层推送的视频任务快照，字段随阶段变化，只声明消费端实际读取的部分。
+export interface VideoProgress {
+  phase?: string
+  progress?: number
+  loaded?: number
+  received?: number
+  total?: number
+  estimatedRemainingMs?: number
+  [key: string]: unknown
+}
 export interface DraftMedia {
   id?: number
   name?: string
@@ -47,6 +57,19 @@ export interface DraftMedia {
   _canRetry?: boolean
   _file?: File
   _videoResult?: VideoResult
+  _name?: string
+  _poster?: string
+  _posterUrl?: string
+  _progress?: VideoProgress
+  _removed?: boolean
+  _source?: { pairing?: string } & Record<string, unknown>
+  _clientUploadId?: string
+  _fingerprint?: string
+  _videoJobId?: string
+  _uploadStill?: Blob
+  _originalFile?: Blob
+  _parent?: DraftMedia
+  _parseController?: AbortController
 }
 export interface ComposerState {
   content: string

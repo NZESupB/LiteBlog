@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { MessageCircle, Pencil, Trash2 } from 'lucide-react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { useApp } from '../../app/AppProviders'
+import { useApp, usePostMenu } from '../../app/AppProviders'
 import { api, json } from '../../lib/api'
 import { parseTime, errorMessage, type Post, type Reaction } from '../../lib/types'
 import { MediaGrid } from '../../components/media/MediaGrid'
@@ -29,19 +29,34 @@ const FALLBACK_REACTIONS = [
 ]
 
 export function PostCard({ post }: { post: Post }) {
-  const { site, compose, changed, toast, postMenuId, setPostMenuId } = useApp()
+  const { site, compose, changed, toast } = useApp()
+  const { postMenuId, setPostMenuId } = usePostMenu()
   const location = useLocation()
   const menu = postMenuId === post.id
   const [comments, setComments] = useState(0)
   const [reactions, setReactions] = useState(post.reactions)
+  const [prevReactions, setPrevReactions] = useState(post.reactions)
+  if (post.reactions !== prevReactions) {
+    setPrevReactions(post.reactions)
+    setReactions(post.reactions)
+  }
   const ref = useRef<HTMLElement>(null)
   const more = useRef<HTMLButtonElement>(null)
   const choices = useRef<HTMLDivElement>(null)
   const textVisible = !site.privateMode || Boolean(site.user) || Boolean(post.public_text)
   const imagesVisible = !site.privateMode || Boolean(site.user) || Boolean(post.public_images)
-  const html = DOMPurify.sanitize(
-    marked.parse(post.content, { async: false }),
-    imagesVisible ? {} : { FORBID_TAGS: ['img', 'picture', 'video', 'source'] },
+  const html = useMemo(
+    () =>
+      DOMPurify.sanitize(
+        marked.parse(post.content, { async: false }),
+        imagesVisible
+          ? {}
+          : {
+              FORBID_TAGS: ['img', 'picture', 'video', 'source'],
+              FORBID_ATTR: ['background', 'style'],
+            },
+      ),
+    [post.content, imagesVisible],
   )
   useEffect(() => {
     if (location.search.includes('comment=')) setComments((value) => value + 1)

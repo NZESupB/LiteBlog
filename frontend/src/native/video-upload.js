@@ -1,5 +1,6 @@
 // 视频分片续传与任务恢复；草稿保存身份信息，不缓存大视频原件。
-import { api, uploadWithProgress } from './utils.js'
+import { api } from '../lib/api'
+import { uploadWithProgress } from './utils.js'
 import { videoContentType } from './media.js'
 function wait(ms, signal) {
   signal?.throwIfAborted()

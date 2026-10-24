@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useApp } from '../../app/AppProviders'
 import { api } from '../../lib/api'
+import { JOURNAL_WRITE_ANCHOR_ID } from '../../lib/dom-ids'
 import { dateLabel, monthKey, errorMessage, type Post } from '../../lib/types'
 import { PostCard } from '../posts/PostCard'
 import { Archive } from './Archive'
@@ -13,7 +14,7 @@ interface Page {
   total: number
 }
 export function Timeline() {
-  const { site, compose, revision } = useApp()
+  const { site, compose, revision, toast } = useApp()
   const [month, setMonth] = useState('')
   const [page, setPage] = useState<Page>({ posts: [], hasMore: false, nextCursor: null, total: 0 })
   const [error, setError] = useState(''),
@@ -77,9 +78,11 @@ export function Timeline() {
           setTotal(data.total)
         }
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (!controller.signal.aborted) toast(errorMessage(error))
+      })
     return () => controller.abort()
-  }, [load, revision])
+  }, [load, revision, toast])
   useEffect(() => {
     if (!sentinel.current || loading || error || !page.hasMore) return
     const observer = new IntersectionObserver(
@@ -121,7 +124,7 @@ export function Timeline() {
           {site.user && (
             <button
               className="write-trigger"
-              id="journalWriteAnchor"
+              id={JOURNAL_WRITE_ANCHOR_ID}
               type="button"
               onClick={(event) => compose(null, event.currentTarget)}
             >
@@ -149,7 +152,7 @@ export function Timeline() {
           <section key={label} className="day-group" data-month={monthKey(posts[0].created_at)}>
             <h2 className="date-divider">{label}</h2>
             {posts.map((post) => (
-              <PostCard post={post} key={`${post.id}-${revision}`} />
+              <PostCard post={post} key={post.id} />
             ))}
           </section>
         ))}

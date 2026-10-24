@@ -1,7 +1,9 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -19,17 +21,25 @@ interface AppState {
   refresh: () => Promise<void>
   revision: number
   changed: () => void
-  postMenuId: number | null
-  setPostMenuId: Dispatch<SetStateAction<number | null>>
   compose: (post?: Post | null, origin?: HTMLElement | null) => void
   composer: ComposerRequest | null
   closeComposer: () => void
   toast: (message: string) => void
   notifications: ReturnType<typeof createBrowserNotifications>
 }
+interface PostMenuState {
+  postMenuId: number | null
+  setPostMenuId: Dispatch<SetStateAction<number | null>>
+}
 const AppContext = createContext<AppState | null>(null)
+const PostMenuContext = createContext<PostMenuState | null>(null)
 export const useApp = () => {
   const value = useContext(AppContext)
+  if (!value) throw new Error('应用尚未初始化')
+  return value
+}
+export const usePostMenu = () => {
+  const value = useContext(PostMenuContext)
   if (!value) throw new Error('应用尚未初始化')
   return value
 }
@@ -49,11 +59,36 @@ export function AppProviders({ children }: { children: ReactNode }) {
       getUser: () => siteRef.current?.user,
     }),
   )
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     const next = await api<Site>('/api/site')
     siteRef.current = next
     setSite(next)
-  }
+  }, [])
+  const changed = useCallback(() => setRevision((n) => n + 1), [])
+  const closeComposer = useCallback(() => setComposer(null), [])
+  const compose = useCallback((post: Post | null = null, origin: HTMLElement | null = null) => {
+    if (!siteRef.current?.user) {
+      location.hash = '#/login'
+      return
+    }
+    const source = origin || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setComposer((current) => current || { post, origin: source })
+  }, [])
+  const menuValue = useMemo(() => ({ postMenuId, setPostMenuId }), [postMenuId])
+  const value = useMemo<AppState>(
+    () => ({
+      site: site!,
+      refresh,
+      revision,
+      changed,
+      compose,
+      composer,
+      closeComposer,
+      toast: setMessage,
+      notifications,
+    }),
+    [site, refresh, revision, changed, compose, composer, closeComposer, notifications],
+  )
   useEffect(() => {
     const controller = new AbortController()
     api<Site>('/api/site', { signal: controller.signal })
@@ -94,38 +129,18 @@ export function AppProviders({ children }: { children: ReactNode }) {
       </main>
     )
   return (
-    <AppContext.Provider
-      value={{
-        site,
-        refresh,
-        revision,
-        changed: () => setRevision((n) => n + 1),
-        postMenuId,
-        setPostMenuId,
-        compose: (post = null, origin = null) => {
-          if (!site.user) {
-            location.hash = '#/login'
-            return
-          }
-          const source =
-            origin || (document.activeElement instanceof HTMLElement ? document.activeElement : null)
-          setComposer((current) => current || { post, origin: source })
-        },
-        composer,
-        closeComposer: () => setComposer(null),
-        toast: setMessage,
-        notifications,
-      }}
-    >
-      {children}
-      {message && (
-        <div className="toast" role="status">
-          {message}
-          <button onClick={() => setMessage('')} aria-label="关闭提示">
-            ×
-          </button>
-        </div>
-      )}
+    <AppContext.Provider value={value}>
+      <PostMenuContext.Provider value={menuValue}>
+        {children}
+        {message && (
+          <div className="toast" role="status">
+            {message}
+            <button onClick={() => setMessage('')} aria-label="关闭提示">
+              ×
+            </button>
+          </div>
+        )}
+      </PostMenuContext.Provider>
     </AppContext.Provider>
   )
 }

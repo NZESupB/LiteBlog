@@ -201,7 +201,7 @@ export function toggleEmojiPanel(input, trigger) {
   }
   position()
   animatePresence(panel, true, { className: 'emoji-panel-presence' })
-  panel.querySelector('button').focus({ preventScroll: true })
+  panel.querySelector('.emoji-btn')?.focus({ preventScroll: true })
 }
 
 export function attachEmojiButton(button, input) {

@@ -121,7 +121,7 @@ function ConfigForm({
   return (
     <form
       ref={form}
-      className="card settings-card"
+      className="card settings-card api-config-card"
       onSubmit={(event) => {
         event.preventDefault()
         void action('save')
@@ -133,9 +133,9 @@ function ConfigForm({
           <p>凭据只存服务器，留空表示沿用已保存密钥。</p>
         </div>
       </div>
-      <div role="radiogroup" aria-label={`${title}配置来源`}>
+      <div className="api-source-selector" role="radiogroup" aria-label={`${title}配置来源`}>
         {(['shared', 'custom'] as const).map((value) => (
-          <label className="row" key={value}>
+          <label className="api-source-option" key={value}>
             <input
               type="radio"
               name={`${path}-mode`}
@@ -143,12 +143,12 @@ function ConfigForm({
               checked={mode === value}
               onChange={() => setMode(value)}
             />
-            {value === 'shared' ? '使用共享 API' : '使用独立 API'}
+            <span>{value === 'shared' ? '使用共享 API' : '使用独立 API'}</span>
           </label>
         ))}
       </div>
       {(['shared', 'custom'] as const).map((kind) => (
-        <div key={kind} hidden={mode !== kind} inert={mode !== kind}>
+        <div className="api-source-fields" key={kind} hidden={mode !== kind} inert={mode !== kind}>
           <label>
             接口地址
             <input

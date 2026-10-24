@@ -1170,7 +1170,6 @@ body.lightbox-open { overflow: hidden; }
 .backup-status { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 18px; margin: 22px 0 0; font-size: var(--fs-footnote); }
 .backup-status dt { color: var(--muted); }
 .backup-status dd { margin: 0; overflow-wrap: anywhere; color: var(--ink); }
-.backup-warning { color: var(--ink); line-height: 1.65; }
 .backup-restore-button { color: var(--danger); }
 .btn.backup-restore-button {
   background: var(--danger) !important;

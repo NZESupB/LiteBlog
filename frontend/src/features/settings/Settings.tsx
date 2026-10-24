@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useParams } from 'react-router-dom'
 import { Bell, ChevronRight, Database, Globe, HardDrive, Sparkles } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
 import { json } from '../../lib/api'
-import { errorMessage } from '../../lib/types'
+import { useAsyncAction } from '../../lib/use-async-action'
 import { useResource } from '../../lib/use-resource'
 import { ApiConfigCard } from './ApiConfigCard'
 import { Backup } from './Backup'
@@ -247,34 +247,23 @@ function Theme({ compact = false }: { compact?: boolean } = {}) {
   )
 }
 function SiteForm() {
-  const { site, refresh } = useApp(),
-    [message, setMessage] = useState(''),
-    [busy, setBusy] = useState(false),
-    [messageOk, setMessageOk] = useState(false)
+  const { site, refresh } = useApp()
+  const { busy, message, ok, run } = useAsyncAction()
   return (
     <form
       className="card settings-card"
-      onSubmit={async (event) => {
+      onSubmit={(event) => {
         event.preventDefault()
-        if (busy) return
-        setMessage('')
         const values = new FormData(event.currentTarget)
-        setBusy(true)
-        try {
+        void run(async () => {
           await json('/api/settings', 'PUT', {
             title: values.get('title'),
             anniversary: values.get('anniversary'),
             privateMode: values.has('privateMode'),
           })
           await refresh()
-          setMessage('已保存')
-          setMessageOk(true)
-        } catch (error) {
-          setMessage(errorMessage(error))
-          setMessageOk(false)
-        } finally {
-          setBusy(false)
-        }
+          return '已保存'
+        })
       }}
     >
       <div className="settings-card-heading">
@@ -301,11 +290,7 @@ function SiteForm() {
           {busy ? '保存中…' : '保存'}
         </button>
       </div>
-      <p
-        className="form-message"
-        data-state={messageOk ? 'success' : 'error'}
-        role={messageOk ? 'status' : 'alert'}
-      >
+      <p className="form-message" data-state={ok ? 'success' : 'error'} role={ok ? 'status' : 'alert'}>
         {message}
       </p>
     </form>
@@ -315,8 +300,7 @@ function VideoSettings() {
   const { data, error } = useResource<{ enabled: boolean; available: boolean; error?: string }>(
     '/api/uploads/video/config',
   )
-  const [message, setMessage] = useState(''),
-    [messageOk, setMessageOk] = useState(false)
+  const { message, ok, run } = useAsyncAction()
   return (
     <section className="card settings-card">
       <div className="settings-card-heading">
@@ -330,21 +314,21 @@ function VideoSettings() {
           <input
             type="checkbox"
             defaultChecked={data.enabled}
-            onChange={async (event) => {
+            onChange={(event) => {
               const input = event.currentTarget,
                 value = input.checked
               input.disabled = true
-              try {
-                await json('/api/uploads/video/config', 'PUT', { enabled: value })
-                setMessage('设置仅影响后续上传')
-                setMessageOk(true)
-              } catch (error) {
-                input.checked = !value
-                setMessage(errorMessage(error))
-                setMessageOk(false)
-              } finally {
-                input.disabled = false
-              }
+              void run(async () => {
+                try {
+                  await json('/api/uploads/video/config', 'PUT', { enabled: value })
+                  return '设置仅影响后续上传'
+                } catch (error) {
+                  input.checked = !value
+                  throw error
+                } finally {
+                  input.disabled = false
+                }
+              })
             }}
           />
           后台自动压缩
@@ -355,8 +339,8 @@ function VideoSettings() {
       </p>
       <p
         className="form-message"
-        data-state={error || data?.error || !messageOk ? 'error' : 'success'}
-        role={error || data?.error || !messageOk ? 'alert' : 'status'}
+        data-state={error || data?.error || !ok ? 'error' : 'success'}
+        role={error || data?.error || !ok ? 'alert' : 'status'}
       >
         {error || data?.error || message}
       </p>
@@ -369,9 +353,7 @@ interface StorageData {
 }
 function Storage() {
   const { data, error, loading } = useResource<StorageData>('/api/storage')
-  const [message, setMessage] = useState(''),
-    [busy, setBusy] = useState(false),
-    [messageOk, setMessageOk] = useState(false)
+  const { busy, message, ok, run } = useAsyncAction()
   return loading ? (
     <p role="status">正在读取…</p>
   ) : error ? (
@@ -380,22 +362,13 @@ function Storage() {
     data && (
       <form
         className="card settings-card"
-        onSubmit={async (event) => {
+        onSubmit={(event) => {
           event.preventDefault()
-          if (busy) return
-          setMessage('')
-          setBusy(true)
           const values = Object.fromEntries(new FormData(event.currentTarget))
-          try {
+          void run(async () => {
             await json('/api/storage', 'PUT', values)
-            setMessage('已保存')
-            setMessageOk(true)
-          } catch (error) {
-            setMessage(errorMessage(error))
-            setMessageOk(false)
-          } finally {
-            setBusy(false)
-          }
+            return '已保存'
+          })
         }}
       >
         <div className="settings-card-heading">
@@ -438,25 +411,16 @@ function Storage() {
             type="button"
             className="btn-ghost"
             disabled={busy}
-            onClick={async (event) => {
+            onClick={(event) => {
               const form = event.currentTarget.form!
-              if (busy) return
-              setMessage('')
-              setBusy(true)
-              try {
+              void run(async () => {
                 const result = await json<{ message?: string }>(
                   '/api/storage/webdav/test',
                   'POST',
                   Object.fromEntries(new FormData(form)),
                 )
-                setMessage(result.message || '连接成功')
-                setMessageOk(true)
-              } catch (error) {
-                setMessage(errorMessage(error))
-                setMessageOk(false)
-              } finally {
-                setBusy(false)
-              }
+                return result.message || '连接成功'
+              })
             }}
           >
             保存并测试连接
@@ -465,11 +429,7 @@ function Storage() {
             保存
           </button>
         </div>
-        <p
-          className="form-message"
-          data-state={messageOk ? 'success' : 'error'}
-          role={messageOk ? 'status' : 'alert'}
-        >
+        <p className="form-message" data-state={ok ? 'success' : 'error'} role={ok ? 'status' : 'alert'}>
           {message}
         </p>
       </form>

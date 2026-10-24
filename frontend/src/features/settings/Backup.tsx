@@ -1,8 +1,10 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { api, json } from '../../lib/api'
+import { useAsyncAction } from '../../lib/use-async-action'
 import { errorMessage } from '../../lib/types'
 import { createDraftStorage } from '../../native/features/composer/draft-storage.js'
 import { TimePicker } from '../../components/ui/TimePicker'
+import { InfoHint } from '../../components/ui/InfoHint'
 
 interface BackupStatus {
   enabled: boolean
@@ -22,11 +24,12 @@ interface BackupStatus {
 }
 
 export function Backup() {
-  const [status, setStatus] = useState<BackupStatus | null>(null),
-    [configMessage, setConfigMessage] = useState(''),
-    [configOk, setConfigOk] = useState(false),
-    [restoreMessage, setRestoreMessage] = useState(''),
-    [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<BackupStatus | null>(null)
+  const [restoreMessage, setRestoreMessage] = useState('')
+  const [restoreBusy, setRestoreBusy] = useState(false)
+  const config = useAsyncAction()
+  const busy = config.busy || restoreBusy
+  const configFail = config.fail
 
   useEffect(() => {
     const controller = new AbortController()
@@ -36,10 +39,7 @@ export function Backup() {
         const result = await api<BackupStatus>('/api/backups', { signal: controller.signal })
         if (!controller.signal.aborted) setStatus(result)
       } catch (error) {
-        if (!controller.signal.aborted) {
-          setConfigOk(false)
-          setConfigMessage(errorMessage(error))
-        }
+        if (!controller.signal.aborted) configFail(errorMessage(error))
       }
       if (!controller.signal.aborted) {
         timer = setTimeout(poll, 5000)
@@ -50,44 +50,27 @@ export function Backup() {
       controller.abort()
       clearTimeout(timer)
     }
-  }, [])
-
-  const handleSaveConfig = async (event: FormEvent<HTMLFormElement>) => {
+  }, [configFail])
+  const handleSaveConfig = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    setBusy(true)
-    setConfigMessage('')
     const values = new FormData(event.currentTarget)
-    try {
+    void config.run(async () => {
       const next = await json<BackupStatus>('/api/backups/config', 'PUT', {
         enabled: values.has('enabled'),
         time: values.get('time'),
       })
       setStatus(next)
-      setConfigOk(true)
-      setConfigMessage('定时设置已保存')
-    } catch (error) {
-      setConfigOk(false)
-      setConfigMessage(errorMessage(error))
-    } finally {
-      setBusy(false)
-    }
+      return '定时设置已保存'
+    })
   }
 
-  const handleBackupNow = async () => {
-    if (busy || !status || status.state !== 'idle') return
-    setBusy(true)
-    setConfigMessage('')
-    try {
+  const handleBackupNow = () => {
+    if (!status || status.state !== 'idle') return
+    void config.run(async () => {
       const next = await json<BackupStatus>('/api/backups', 'POST')
       setStatus(next)
-      setConfigOk(true)
-      setConfigMessage('备份已开始，可以离开此页面；结果会保存在服务中。')
-    } catch (error) {
-      setConfigOk(false)
-      setConfigMessage(errorMessage(error))
-    } finally {
-      setBusy(false)
-    }
+      return '备份已开始，可以离开此页面；结果会保存在服务中。'
+    })
   }
 
   const handleRestore = async (event: FormEvent<HTMLFormElement>) => {
@@ -100,8 +83,12 @@ export function Backup() {
       setRestoreMessage('文件超过导入大小上限')
       return
     }
+    if (String(values.get('confirm') || '').trim() !== '恢复') {
+      setRestoreMessage('请输入「恢复」二字以确认')
+      return
+    }
     if (!confirm('确定整体恢复数据库？当前账号、密码、动态和设置都将被替换。')) return
-    setBusy(true)
+    setRestoreBusy(true)
     setRestoreMessage('')
     values.set('confirm', 'true')
     try {
@@ -131,7 +118,7 @@ export function Backup() {
       location.reload()
     } catch (error) {
       setRestoreMessage(errorMessage(error))
-      setBusy(false)
+      setRestoreBusy(false)
     }
   }
 
@@ -147,8 +134,16 @@ export function Backup() {
         <div className="settings-card-heading">
           <div>
             <h2>数据库备份</h2>
-            <p>备份到图片存储所配置的 WebDAV 目录，仅保留最新一份数据库。</p>
+            <p>备份到图片存储的 WebDAV 目录，仅保留最新一份。</p>
           </div>
+          <InfoHint label="备份计划">
+            <ul className="info-hint-list">
+              <li>服务运行时才执行自动备份。</li>
+              <li>重新启动后会补执行当天错过的备份。</li>
+              <li>当天手动备份成功后，不再重复自动备份。</li>
+              <li>尚未配置 WebDAV 时，仍可使用下方导入恢复。</li>
+            </ul>
+          </InfoHint>
         </div>
         <p className="backup-connection storage-status" role="status">
           {status ? (
@@ -189,9 +184,6 @@ export function Backup() {
                   ariaLabel="北京时间"
                 />
               </div>
-              <p className="storage-hint">
-                服务运行时自动执行；重新启动后会补执行当天错过的备份。当天手动备份成功后，不再重复自动备份。
-              </p>
               <div className="settings-actions">
                 <button
                   type="button"
@@ -239,13 +231,13 @@ export function Backup() {
             </dd>
           </dl>
         )}
-        {configMessage && (
+        {config.message && (
           <p
             className="form-message backup-message"
-            data-state={configOk ? 'success' : 'error'}
-            role={configOk ? 'status' : 'alert'}
+            data-state={config.ok ? 'success' : 'error'}
+            role={config.ok ? 'status' : 'alert'}
           >
-            {configMessage}
+            {config.message}
           </p>
         )}
       </section>
@@ -256,14 +248,16 @@ export function Backup() {
             <h2>导入数据库恢复</h2>
             <p>选择本站备份的 .db 文件，整体替换当前数据库。</p>
           </div>
+          <InfoHint label="恢复影响">
+            <ul className="info-hint-list">
+              <li>账号、密码、动态、评论、草稿、任务记录、通知订阅、站点设置和个人设置均以导入文件为准。</li>
+              <li>恢复完成后，所有成员都需要重新登录。</li>
+              <li>图片、视频和头像不包含在 .db 中；现有媒体文件保留原位，缺失文件需另行补回。</li>
+              <li>恢复前会在服务的数据目录内保留当前数据库副本。</li>
+              <li>正在上传、处理视频或生成配图时，请先完成或取消任务。</li>
+            </ul>
+          </InfoHint>
         </div>
-        <p className="backup-warning">
-          账号、密码、动态、评论、草稿、任务记录、通知订阅、站点设置和个人设置均以导入文件为准。恢复后，所有成员都需要重新登录。
-        </p>
-        <p className="storage-hint">
-          图片、视频和头像不包含在 .db
-          中。现有媒体文件会保留原位，缺失文件需要另行补回。正在上传、处理视频或生成配图时，请先完成或取消任务。
-        </p>
         <form className="backup-restore" onSubmit={handleRestore}>
           <fieldset className="backup-restore-fields" disabled={busy || !status || status.state !== 'idle'}>
             <label>
@@ -276,11 +270,13 @@ export function Backup() {
                 disabled={busy || !status || status.state !== 'idle'}
               />
             </label>
-            <p className="storage-hint backup-limit">
-              {status?.maxImportBytes
-                ? `文件上限 ${formatSize(status.maxImportBytes)}。恢复前会在服务的数据目录内保留当前数据库副本。`
-                : '正在读取文件大小上限…'}
-            </p>
+            <label>
+              确认操作
+              <input name="confirm" required autoComplete="off" placeholder="输入「恢复」以确认" />
+            </label>
+            {!!status?.maxImportBytes && (
+              <p className="storage-hint backup-limit">文件上限 {formatSize(status.maxImportBytes)}</p>
+            )}
             <div className="settings-actions">
               <button
                 type="submit"

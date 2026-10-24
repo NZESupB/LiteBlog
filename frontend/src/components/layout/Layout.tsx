@@ -3,6 +3,7 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { Bell, Heart, Image, List, LogOut, Settings, User } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
 import { api } from '../../lib/api'
+import { JOURNAL_WRITE_ANCHOR_ID } from '../../lib/dom-ids'
 import { errorMessage, type Notice } from '../../lib/types'
 import { NotificationToggle } from '../../features/settings/Settings'
 import { Presence } from './Presence'
@@ -18,14 +19,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
     sentinel = useRef<HTMLDivElement>(null)
   const [menu, setMenu] = useState<'user' | 'bell' | null>(null),
     [items, setItems] = useState<Notice[]>([])
-  const [clock, setClock] = useState(Date.now())
   const writeSlot = useRef<HTMLSpanElement>(null)
   const [unread, setUnread] = useState(0)
   const userId = site.user?.id
   useLayoutEffect(() => {
     const slot = writeSlot.current!
     void animatePresence(slot, false, { className: 'header-write-presence', immediate: true })
-    const source = document.getElementById('journalWriteAnchor')
+    const source = document.getElementById(JOURNAL_WRITE_ANCHOR_ID)
     if (location.pathname !== '/' || !userId || !source) return
     const headerHeight = Math.round(header.current!.getBoundingClientRect().height)
     const observer = new IntersectionObserver(
@@ -45,7 +45,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
     }
   }, [location.pathname, userId])
   useEffect(() => {
-    const timer = setInterval(() => setClock(Date.now()), 1000)
     const close = () => setMenu(null),
       key = (event: KeyboardEvent) => {
         if (event.key === 'Escape') close()
@@ -53,7 +52,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
     document.addEventListener('click', close)
     document.addEventListener('keydown', key)
     return () => {
-      clearInterval(timer)
       document.removeEventListener('click', close)
       document.removeEventListener('keydown', key)
     }
@@ -104,12 +102,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setMenu(null)
   }, [location.pathname])
-  const day = new Date(clock),
-    midnight = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime()
-  const progress = (clock - midnight) / 86400000
-  const days = site.anniversary
-    ? Math.floor((midnight - new Date(`${site.anniversary}T00:00:00`).getTime()) / 86400000) + 1
-    : 0
   return (
     <>
       <div className="top-material-sentinel" ref={sentinel} />
@@ -122,24 +114,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               </span>
               <span className="site-name">{site.title}</span>
             </Link>
-            {days > 0 && (
-              <div className={`days${progress > 0.5 ? ' is-filled' : ''}`}>
-                <span
-                  className="day-progress"
-                  role="progressbar"
-                  aria-label="到下一天的进度"
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.floor(progress * 100)}
-                  style={{ '--day-progress': progress } as React.CSSProperties}
-                >
-                  <span className="day-progress-fill" aria-hidden="true" />
-                  <span className="day-progress-label">
-                    <strong>{days}天</strong>
-                  </span>
-                </span>
-              </div>
-            )}
+            {site.anniversary && <DayProgress anniversary={site.anniversary} />}
           </div>
           <nav className="site-nav" aria-label="主要导航">
             <div className="nav-segments">
@@ -296,5 +271,37 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </NavLink>
       </nav>
     </>
+  )
+}
+
+// 纪念日进度胶囊自带时钟，30 秒粒度足够；避免整个顶栏每秒重渲染。
+function DayProgress({ anniversary }: { anniversary: string }) {
+  const [clock, setClock] = useState(Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 30000)
+    return () => clearInterval(timer)
+  }, [])
+  const day = new Date(clock),
+    midnight = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime()
+  const progress = (clock - midnight) / 86400000
+  const days = Math.floor((midnight - new Date(`${anniversary}T00:00:00`).getTime()) / 86400000) + 1
+  if (days <= 0) return null
+  return (
+    <div className={`days${progress > 0.5 ? ' is-filled' : ''}`}>
+      <span
+        className="day-progress"
+        role="progressbar"
+        aria-label="到下一天的进度"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.floor(progress * 100)}
+        style={{ '--day-progress': progress } as React.CSSProperties}
+      >
+        <span className="day-progress-fill" aria-hidden="true" />
+        <span className="day-progress-label">
+          <strong>{days}天</strong>
+        </span>
+      </span>
+    </div>
   )
 }

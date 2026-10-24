@@ -1,4 +1,5 @@
-import { api, streamSse, formatBytes } from '../../native/utils.js'
+import { api } from '../../lib/api'
+import { streamSse, formatBytes } from '../../native/utils.js'
 import { createDraftStorage } from '../../native/features/composer/draft-storage.js'
 import { normalizeMediaFiles } from '../../native/live-photo.js'
 import { isVideoFile, readVideoPoster } from '../../native/media.js'

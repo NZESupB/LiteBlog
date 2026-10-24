@@ -10,9 +10,10 @@ export class ApiError extends Error {
 }
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, { ...init, credentials: 'same-origin' })
-  let data: unknown
+  let data: unknown = {}
   try {
-    data = await response.json()
+    const text = await response.text()
+    if (text) data = JSON.parse(text)
   } catch {
     throw new ApiError(`服务器返回无效响应 (${response.status})`, response.status)
   }

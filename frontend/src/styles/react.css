@@ -156,7 +156,7 @@ form.settings-card,
   display: flex;
   gap: 12px;
   padding: 8px 10px;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   transition: background-color 0.3s ease;
 }
 .comment.comment-target-flash {
@@ -215,11 +215,12 @@ form.settings-card,
   background: var(--fill);
   border: none;
   border-left: 2px solid var(--accent);
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
   cursor: pointer;
+  overflow-wrap: anywhere;
   transition:
     background 0.15s ease,
     color 0.15s ease;
@@ -250,7 +251,7 @@ form.settings-card,
   margin: -2px -3px;
   background: none;
   border: 0;
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
   color: var(--muted);
   font-size: 12px;
   cursor: pointer;
@@ -522,6 +523,86 @@ form.settings-card,
     color: var(--accent-deep);
   }
 }
+/* InfoHint：长文案悬浮说明，右对齐避免窄屏溢出 */
+.info-hint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.info-hint-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--fill);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.12s ease;
+}
+.info-hint-button:focus-visible {
+  outline: 2px solid var(--accent-deep);
+  outline-offset: 2px;
+}
+.info-hint-button:active {
+  transform: scale(0.92);
+}
+.info-hint-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  width: min(320px, calc(100vw - 48px));
+  padding: 12px 14px;
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-4px) scale(0.98);
+  transform-origin: top right;
+  transition:
+    opacity 0.14s ease-out,
+    transform 0.14s ease-out,
+    visibility 0.14s ease-out;
+}
+.info-hint.is-open .info-hint-pop {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0) scale(1);
+}
+.info-hint-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .info-hint-button:hover {
+    background: var(--fill-strong);
+    color: var(--accent-deep);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .info-hint-button,
+  .info-hint-pop {
+    transition: none;
+  }
+}
 /* 备份计划：行式控件，与设置首页的分组行同一节奏 */
 .backup-fields {
   display: grid;
@@ -550,12 +631,6 @@ form.settings-card,
 }
 .backup-toggle-row {
   cursor: pointer;
-}
-.backup-toggle-row input[type='checkbox'] {
-  width: 18px;
-  height: 18px;
-  margin: 0;
-  accent-color: var(--accent);
 }
 .backup-time-row .time-picker-root {
   max-width: 180px;
@@ -672,6 +747,139 @@ form.settings-card,
 .settings-card :is(input, select):focus-visible {
   outline: 2px solid var(--accent-deep);
   outline-offset: 3px;
+}
+/* 设置表单的选择控件：与主题色/44px 行高一致，替代系统原生外观 */
+.settings-card input[type='checkbox'],
+.settings-card input[type='radio'] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1.5px solid var(--separator-strong);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.12s ease;
+}
+.settings-card input[type='checkbox'] {
+  border-radius: 6px;
+}
+.settings-card input[type='radio'] {
+  border-radius: 50%;
+}
+.settings-card input[type='checkbox']::after,
+.settings-card input[type='radio']::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto;
+}
+.settings-card input[type='checkbox']::after {
+  width: 5px;
+  height: 9px;
+  border: solid var(--on-accent);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0.5);
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.settings-card input[type='radio']::after {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--on-accent);
+  transform: scale(0.4);
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.settings-card input[type='checkbox']:checked,
+.settings-card input[type='radio']:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.settings-card input[type='checkbox']:checked::after,
+.settings-card input[type='radio']:checked::after {
+  opacity: 1;
+  transform: rotate(45deg) scale(1);
+}
+.settings-card input[type='radio']:checked::after {
+  transform: scale(1);
+}
+.settings-card input[type='checkbox']:active,
+.settings-card input[type='radio']:active {
+  transform: scale(0.92);
+}
+@media (hover: hover) and (pointer: fine) {
+  .settings-card input[type='checkbox']:hover,
+  .settings-card input[type='radio']:hover {
+    border-color: var(--accent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-card input[type='checkbox'],
+  .settings-card input[type='radio'] {
+    transition: none;
+  }
+}
+
+/* AI 配置卡：来源选择双列紧凑排布，字段与操作区收小行距 */
+.settings-card.api-config-card {
+  display: grid;
+  gap: 12px;
+}
+.api-config-card .settings-card-heading {
+  margin-bottom: 0;
+}
+.api-source-selector {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.api-source-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 12px;
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--radius-sm);
+  background: var(--fill);
+  color: var(--muted);
+  font-size: var(--fs-footnote);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+.api-source-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-weight: 600;
+}
+.api-source-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.api-source-fields {
+  display: grid;
+  gap: 10px;
+}
+.api-source-fields label {
+  gap: 6px;
+}
+.api-config-card .settings-actions {
+  margin-top: 0;
 }
 .account-avatar-row {
   display: flex;

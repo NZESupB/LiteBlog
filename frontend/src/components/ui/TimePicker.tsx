@@ -39,9 +39,6 @@ export function TimePicker({
     const normalized = normalizeTime(nextValue)
     if (!isControlled) setInternalValue(normalized)
     onChange?.(normalized)
-    if (inputRef.current) {
-      inputRef.current.value = normalized
-    }
   }
 
   // 监听外部点击关闭弹层
