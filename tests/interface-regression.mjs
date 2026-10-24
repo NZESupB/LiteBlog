@@ -213,7 +213,7 @@ function morphPanel() {
   let closed = false
   const motion = attachSheetMotion(dialog, overlay, handle, () => { closed = true; motion.dispose() }, { origin })
   return {
-    motion, dialog, morph, morphStyles, overlayStyles, overlayClasses, appended,
+    motion, dialog, rect: dialogRect, morph, morphStyles, overlayStyles, overlayClasses, appended,
     send(type, y) {
       const event = Object.assign(new Event(type), { clientY: y, pointerId: 1, isPrimary: true, button: 0 })
       Object.defineProperty(event, 'timeStamp', { value: time })
@@ -268,6 +268,12 @@ try {
   assert.ok(Math.abs(controller.getValue() + 36) < .001, '重定向最终到达新目标')
   assert.ok(controllerRests.includes(-36), '重定向完成回调只在目标稳定后触发')
   assert.ok(controllerUpdates.some((update) => update.target === 120), '控制器持续报告目标与速度')
+  // 首帧画起点:挂载同帧的表单渲染/懒加载会拖慢第一次 rAF,从调用时刻计时会让第一眼就跳过一段动画。
+  const firstFrame = createSpringController({ value: 0, response: .3 })
+  firstFrame.retarget(100)
+  advance(1)
+  assert.equal(firstFrame.getValue(), 0, '弹簧首帧渲染起点而不是吞掉起始段')
+  firstFrame.dispose()
   // 软调整:布局重排时换目标/挪位置,不能打断正在跑的帧,也不能丢速度
   const soft = createSpringController({ value: 0, response: .3 })
   soft.retarget(120)
@@ -481,6 +487,23 @@ try {
     assert.equal(resized.morph.style.top, '772px')
   } finally {
     resized.restore()
+  }
+
+  // 表单在挂载后撑高面板:进度量程随之换新,但入场进度不能倒退,终点按新几何落定
+  const grown = morphPanel()
+  try {
+    advance(1)
+    const startTop = parseFloat(grown.morph.style.top)
+    grown.dialog.offsetHeight = 740
+    grown.rect.height = 740
+    fakeWindow.dispatchEvent(new Event('resize'))
+    advance(2)
+    assert.ok(parseFloat(grown.morph.style.top) <= startTop + .001, '面板变高时入场进度不倒退')
+    advance(88)
+    assert.equal(grown.morph.style.display, 'none', '按新几何照常落地')
+    assert.ok(Math.abs(parseFloat(grown.morph.style.height) - 740) < 2, '终点矩形就是撑开后的面板')
+  } finally {
+    grown.restore()
   }
 
   reduced = true

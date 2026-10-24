@@ -9,6 +9,7 @@ import { ApiConfigCard } from './ApiConfigCard'
 import { Backup } from './Backup'
 import { animateElement, disposeAnimations, motionTiming } from '../../native/ui/motion.js'
 import { SettingsPage } from '../../components/layout/SettingsPage'
+import { Avatar } from '../../components/Avatar'
 
 declare global {
   interface Window {
@@ -113,13 +114,7 @@ export function Settings() {
           <section className="settings-group-card">
             <div className="settings-profile-compact">
               <div className="profile-info-left">
-                {site.user.avatarUrl ? (
-                  <img src={site.user.avatarUrl} alt={site.user.name} className="avatar compact-avatar" />
-                ) : (
-                  <span className="avatar compact-avatar fallback">
-                    {(site.user.name || '?').slice(0, 1).toUpperCase()}
-                  </span>
-                )}
+                <Avatar name={site.user.name} url={site.user.avatarUrl} className="compact-avatar" />
                 <div className="profile-text">
                   <strong className="profile-name">{site.user.name}</strong>
                   <span className="profile-username">@{site.user.username}</span>

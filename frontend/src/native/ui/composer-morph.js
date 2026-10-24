@@ -79,7 +79,9 @@ export function createSpringController({
   }
   const schedule = () => {
     if (frame || disposed) return
-    previousTime = globalThis.performance?.now?.() ?? 0
+    // 下一帧先画起点，再开始累计真实时间。首次挂载可能被表单渲染和懒加载拖住，
+    // 若从调用时刻计时，用户看到的第一帧会直接越过很长一段动画。
+    previousTime = 0
     frame = globalThis.requestAnimationFrame(tick)
   }
   const retarget = (nextTarget, nextVelocity = null) => {
@@ -142,6 +144,8 @@ export function shouldDismiss(position, velocity, height) {
 
 const clamp01 = (value) => value < 0 ? 0 : value > 1 ? 1 : value
 const lerp = (from, to, ratio) => from + (to - from) * ratio
+// 几何由弹簧连续驱动；材质透明度只在各阶段内平滑变化，避免分段线性衔接出现顿挫。
+function smoothStep(value) { const ratio = clamp01(value); return ratio * ratio * (3 - 2 * ratio) }
 function lengthPx(value) { const number = Number.parseFloat(value); return Number.isFinite(number) ? number : 0 }
 
 export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = null } = {}) {
@@ -179,8 +183,11 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
     morph.style.display = 'none'
     overlay.appendChild(morph)
   }
-  // 收起目标位移:变形路径拿它当进度量程(拖拽要有行程,所以按面板高度取),回退路径才是真的位移。
-  const distance = () => Math.min(320, Math.max(120, dialog.offsetHeight * .3))
+  // 收起目标位移与进度量程共用一份缓存。面板高度随内容变化时先保留旧量程下的进度，
+  // 再更新量程和几何；实时读取新高度会让同一个 position 对应不同进度，画面因此倒退。
+  const spanFor = () => Math.min(320, Math.max(120, dialog.offsetHeight * .3))
+  let span = spanFor()
+  const distance = () => span
   // 宽屏触屏(iPad 横屏等)展开时给材质变化更多时间,避免桌面布局下显得生硬;收起仍保持快速。
   const response = (closing) => closing ? .3 : coarse.matches && !mobile.matches ? .42 : .3
   let position = reduced.matches ? 0 : distance()
@@ -224,11 +231,9 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
     morph.style.height = `${lerp(restRect.height, originRect.height, ratio)}px`
     morph.style.borderRadius = restRadius.map((radius) => `${lerp(radius, pill, ratio)}px`).join(' ')
     // 材质分三段:触发元素的实色 → 透明液态玻璃(滑行时一路能看见底下的内容)→ 最后一段
-    // 才凝成纸面;内容再晚一步跟上。收回时顺序正好相反,所以缩回去也是玻璃质感。
-    // 强调色早点让位给玻璃:开头那段粉色别再拖那么久(收起时顺序反过来,照样收成粉色胶囊)
-    const glassIn = clamp01((.95 - ratio) / .35)
-    const paper = clamp01((.2 - ratio) / .16)
-    const content = clamp01((.18 - ratio) / .14)
+    const glassIn = smoothStep((.95 - ratio) / .35)
+    const paper = smoothStep((.2 - ratio) / .16)
+    const content = smoothStep((.18 - ratio) / .14)
     morph.style.setProperty('--morph-glass-opacity', String(glassIn * (1 - paper)))
     morph.style.setProperty('--morph-paper', String(paper))
     if (triggerFill) morph.style.background = `rgba(${triggerFill[0]}, ${triggerFill[1]}, ${triggerFill[2]}, ${(1 - glassIn).toFixed(3)})`
@@ -329,7 +334,8 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
       const closing = spring.getTarget() > 0
       const ratio = clamp01(position / Math.max(1, distance()))
       measure()
-      // 只按新几何换算进度与目标,当前的位移、速度与动画帧都原样接着走
+      span = spanFor()
+      // 只按新几何换算进度与目标,当前的位移、速度与动画帧都原样接着走。
       spring.adjust(ratio * distance(), closing ? distance() : 0)
     })
   }
@@ -341,6 +347,9 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
   handle.addEventListener('lostpointercapture', end)
   handle.addEventListener('click', keyboardClick)
   window.addEventListener('resize', resized)
+  // React 表单随后挂载、媒体增删和输入内容都会改变面板高度，不只 window resize。
+  const sizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(resized) : null
+  sizeObserver?.observe(dialog)
   render()
   animate(0)
   return {
@@ -350,6 +359,7 @@ export function attachSheetMotion(dialog, overlay, handle, onClose, { origin = n
       if (resizedFrame) globalThis.cancelAnimationFrame(resizedFrame)
       resizedFrame = 0
       spring.dispose()
+      sizeObserver?.disconnect()
       originNode?.classList.remove('composer-origin-hidden')
       if (morph) overlay.classList.remove('morph')
       window.removeEventListener('resize', resized)

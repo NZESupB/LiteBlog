@@ -166,14 +166,29 @@ export function Backup() {
         {status && (
           <form className="backup-config" onSubmit={handleSaveConfig}>
             <fieldset className="backup-fields" disabled={busy || status.state !== 'idle'}>
-              <label className="row">
+              <label className="backup-toggle-row">
+                <span className="settings-row-label-group">
+                  <span className="settings-row-label">每天自动备份</span>
+                  <small className="settings-row-desc">关闭后仍可随时手动备份</small>
+                </span>
                 <input type="checkbox" name="enabled" defaultChecked={status.enabled} />
-                <span>每天自动备份</span>
               </label>
-              <label>
-                北京时间
-                <TimePicker name="time" defaultValue={status.time} required ariaLabel="北京时间" />
-              </label>
+              <div className="backup-row-divider" aria-hidden="true" />
+              <div className="settings-row backup-time-row">
+                <div className="settings-row-label-group">
+                  <label className="backup-time-label" htmlFor="backup-time">
+                    备份时间
+                  </label>
+                  <small className="settings-row-desc">北京时间</small>
+                </div>
+                <TimePicker
+                  id="backup-time"
+                  name="time"
+                  defaultValue={status.time}
+                  required
+                  ariaLabel="北京时间"
+                />
+              </div>
               <p className="storage-hint">
                 服务运行时自动执行；重新启动后会补执行当天错过的备份。当天手动备份成功后，不再重复自动备份。
               </p>

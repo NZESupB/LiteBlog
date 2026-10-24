@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type ChangeEvent } from 'react'
-import { Clock } from 'lucide-react'
+import { ChevronDown, Clock } from 'lucide-react'
 import { normalizeTime } from '../../lib/time-utils'
 
 interface TimePickerProps {
@@ -82,12 +82,8 @@ export function TimePicker({
   return (
     <div className="time-picker-root" ref={containerRef}>
       <div className={`time-picker-control${open ? ' is-open' : ''}${disabled ? ' is-disabled' : ''}`}>
-        <span
-          className="time-picker-prefix"
-          aria-hidden="true"
-          onClick={() => !disabled && setOpen((prev) => !prev)}
-        >
-          <Clock className="icon" size={16} />
+        <span className="time-picker-icon" aria-hidden="true">
+          <Clock size={16} />
         </span>
         <input
           ref={inputRef}
@@ -114,7 +110,7 @@ export function TimePicker({
           disabled={disabled}
           onClick={() => setOpen((prev) => !prev)}
         >
-          {open ? '收起' : '选择'}
+          <ChevronDown size={16} aria-hidden="true" />
         </button>
       </div>
 

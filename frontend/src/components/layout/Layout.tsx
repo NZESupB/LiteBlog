@@ -7,8 +7,8 @@ import { errorMessage, type Notice } from '../../lib/types'
 import { NotificationToggle } from '../../features/settings/Settings'
 import { Presence } from './Presence'
 import { WriteIcon } from '../WriteIcon'
+import { Avatar } from '../Avatar'
 import { animatePresence, disposeAnimations } from '../../native/ui/motion.js'
-import { avatarColor } from '../../native/utils.js'
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { site, compose, notifications, refresh, changed, toast } = useApp()
@@ -187,16 +187,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                       setMenu(menu === 'user' ? null : 'user')
                     }}
                   >
-                    <span
-                      className={`avatar small${site.user.avatarUrl ? ' avatar-image' : ''}`}
-                      style={{ background: avatarColor(site.user.name) }}
-                    >
-                      {site.user.avatarUrl ? (
-                        <img src={site.user.avatarUrl} alt="" />
-                      ) : (
-                        site.user.name.slice(0, 1)
-                      )}
-                    </span>
+                    <Avatar name={site.user.name} url={site.user.avatarUrl} className="small" />
                   </button>
                   <Presence
                     open={menu === 'bell'}

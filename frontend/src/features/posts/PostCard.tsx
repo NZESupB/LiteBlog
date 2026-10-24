@@ -7,6 +7,7 @@ import { useApp } from '../../app/AppProviders'
 import { api, json } from '../../lib/api'
 import { parseTime, errorMessage, type Post, type Reaction } from '../../lib/types'
 import { MediaGrid } from '../../components/media/MediaGrid'
+import { Avatar } from '../../components/Avatar'
 import { Comments } from '../comments/Comments'
 import { revealElement, disposeAnimations } from '../../native/ui/motion.js'
 import { Presence } from '../../components/layout/Presence'
@@ -80,9 +81,7 @@ export function PostCard({ post }: { post: Post }) {
   return (
     <article className="card post" ref={ref}>
       <div className="post-head">
-        <span className="avatar">
-          {post.avatarUrl ? <img src={post.avatarUrl} alt="" /> : post.author.slice(0, 1)}
-        </span>
+        <Avatar name={post.author} url={post.avatarUrl} />
         <div className="post-meta">
           <div className="post-author">{post.author}</div>
           <Link className="post-time" to={`/post/${post.id}`}>

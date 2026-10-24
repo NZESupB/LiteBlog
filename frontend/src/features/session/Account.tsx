@@ -6,6 +6,7 @@ import { errorMessage } from '../../lib/types'
 import { openAvatarCropper } from '../../native/ui/avatar-cropper.js'
 import { createViewScope } from '../../native/views/scope.js'
 import { SettingsPage } from '../../components/layout/SettingsPage'
+import { Avatar } from '../../components/Avatar'
 
 export function Login() {
   const { site, refresh, changed } = useApp(),
@@ -112,9 +113,7 @@ export function Account() {
           </div>
         </div>
         <div className="account-avatar-row">
-          <span className="avatar">
-            {user.avatarUrl ? <img src={user.avatarUrl} alt={user.name} /> : user.name.slice(0, 1)}
-          </span>
+          <Avatar name={user.name} url={user.avatarUrl} />
           <button
             ref={avatarButton}
             className="btn-ghost"

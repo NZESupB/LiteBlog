@@ -4,6 +4,7 @@ import { Reply, Smile, Trash2, X } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
 import { api, json } from '../../lib/api'
 import { errorMessage, parseTime, type Comment, type Post } from '../../lib/types'
+import { Avatar } from '../../components/Avatar'
 import { attachInlineInputViewport } from '../../native/composer-viewport.js'
 import { attachEmojiButton, closeEmojiPanel } from '../../native/ui/emoji-picker.js'
 function formatCommentTime(createdAt: string): string {
@@ -154,13 +155,7 @@ export function Comments({
           })()
           return (
             <div className="comment" key={comment.id} id={`comment-${comment.id}`} tabIndex={-1}>
-              {comment.avatarUrl ? (
-                <img className="comment-avatar" src={comment.avatarUrl} alt={comment.author} />
-              ) : (
-                <span className="comment-avatar comment-avatar-fallback">
-                  {Array.from(comment.author || '?')[0].toUpperCase()}
-                </span>
-              )}
+              <Avatar name={comment.author} url={comment.avatarUrl} className="comment-avatar" />
               <div className="comment-body">
                 <div className="comment-header">
                   <div className="comment-meta">
