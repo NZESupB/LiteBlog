@@ -412,6 +412,8 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
 .date-divider::after { content: ""; flex: 1; height: var(--hairline); background: var(--separator); }
 
 .post { padding: 22px 0; border-top: var(--hairline) solid var(--separator); }
+/* 卡片入场变换会建立层叠上下文,菜单存在时连同卡片提升,退出动画结束后自动恢复。 */
+.post:has(.post-menu) { position: relative; z-index: 5; }
 .day-group .post:first-of-type { border-top: 0; }
 .post-head { display: flex; align-items: center; gap: 12px; }
 .avatar { box-shadow: none; }
