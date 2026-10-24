@@ -18,6 +18,8 @@ const AI_FOLDER = 'ai-generated'
 const MAX_GENERATED_BYTES = 20 * 1024 * 1024
 const JOB_TIMEOUT_MS = 10 * 60 * 1000
 const controllers = new Map()
+const runningJobs = new Set()
+let stopping = false
 
 function imageMode(userId) {
   return getUserSetting(userId, 'image_mode', 'shared') === 'custom' ? 'custom' : 'shared'
@@ -108,8 +110,9 @@ export async function cleanupDraftUploads(userId, draftId) {
 
 async function performDraftCleanup(userId, draftId) {
   if (!draftId) return 0
-  await cancelDraftVideoJobs(userId, draftId)
+  const protectedNames = await cancelDraftVideoJobs(userId, draftId)
   const pending = db.prepare('SELECT filename, storage, storage_path FROM pending_uploads WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
+    .filter((row) => !protectedNames.has(row.filename))
   const jobs = db.prepare('SELECT id, status, filename, storage, storage_path FROM image_jobs WHERE user_id = ? AND draft_id = ?').all(userId, draftId)
   const unusedJobs = jobs.filter((job) => !job.filename || !imageReferenced(job.filename))
   for (const job of unusedJobs) {
@@ -117,7 +120,8 @@ async function performDraftCleanup(userId, draftId) {
   }
   db.exec('BEGIN')
   try {
-    db.prepare('DELETE FROM pending_uploads WHERE user_id = ? AND draft_id = ?').run(userId, draftId)
+    const dropPending = db.prepare('DELETE FROM pending_uploads WHERE filename = ? AND user_id = ? AND draft_id = ?')
+    for (const row of pending) dropPending.run(row.filename, userId, draftId)
     const cancelJob = db.prepare("UPDATE image_jobs SET status = 'cancelled', error = '', updated_at = datetime('now') WHERE id = ? AND status <> 'cancelled'")
     for (const job of unusedJobs) cancelJob.run(job.id)
     db.exec('COMMIT')
@@ -297,13 +301,23 @@ async function runJob(id) {
 
 function startJob(row) {
   const release = enterOperation('media')
-  queueMicrotask(() => runJob(row.id)
+  const promise = Promise.resolve().then(() => { if (!stopping) return runJob(row.id) })
     .catch((error) => updateJob(row.id, { status: 'failed', error: error.message || 'AI 配图失败' }))
-    .finally(release))
+    .finally(() => { runningJobs.delete(promise); release() })
+  runningJobs.add(promise)
+}
+
+export async function stopImageJobs() {
+  stopping = true
+  for (const controller of controllers.values()) controller.abort(new Error('服务停止，请重新生成配图'))
+  await Promise.allSettled([...runningJobs])
 }
 
 // 进程重启时不能假装这些任务仍在执行,让用户明确重试。
-db.prepare("UPDATE image_jobs SET status = 'failed', error = '服务重启时任务中断，请点击重试', updated_at = datetime('now') WHERE status IN ('queued', 'running', 'uploading')").run()
+export function initializeImageJobs() {
+  stopping = false
+  db.prepare("UPDATE image_jobs SET status = 'failed', error = '服务重启时任务中断，请点击重试', updated_at = datetime('now') WHERE status IN ('queued', 'running', 'uploading')").run()
+}
 
 imageJobsApp.get('/', requireAuth, (c) => {
   const rows = db.prepare('SELECT * FROM image_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20').all(c.get('user').id)

@@ -7,19 +7,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
-// 实况图配对规则是纯函数,先在 Node 里把边界钉死(浏览器里跑的是同一份代码)
-const { groupMediaFiles, mediaStem, isVideoFile, videoContentType } = await import('../public/js/media.js')
+// 类型工具和生产 normalizeMediaFiles 入口分别覆盖，避免保留测试专用的旧配对实现。
+const { mediaStem, isVideoFile, videoContentType } = await import('../frontend/src/native/media.js')
 const file = (name, type) => new File([new Uint8Array([1, 2, 3])], name, type ? { type } : undefined)
-const shape = (files) => groupMediaFiles(files).map((g) => [g.still?.name, g.motion?.name, g.video?.name].filter(Boolean).join('+'))
-assert.deepEqual(shape([file('IMG_0001.JPG', 'image/jpeg'), file('IMG_0001.MOV', 'video/quicktime')]), ['IMG_0001.JPG+IMG_0001.MOV'])
-assert.deepEqual(shape([file('IMG_0001.MOV', 'video/quicktime'), file('IMG_0001.JPG', 'image/jpeg')]), ['IMG_0001.JPG+IMG_0001.MOV'])
-assert.deepEqual(shape([file('a.jpg', 'image/jpeg'), file('b.mp4', 'video/mp4')]), ['a.jpg', 'b.mp4'])
-// 同一主干上多出来的静帧不能挂到同一个动态部分上,也不该被吞掉
-assert.deepEqual(shape([file('x.jpg', 'image/jpeg'), file('x.png', 'image/png'), file('x.mp4', 'video/mp4')]), ['x.jpg+x.mp4', 'x.png'])
-// 浏览器给 HEIC / MOV 的 type 可能是空的,这时候要靠扩展名判断
-assert.deepEqual(shape([file('IMG_1.HEIC'), file('IMG_1.MOV')]), ['IMG_1.HEIC+IMG_1.MOV'])
-// Google Takeout 导出的实况图是 jpg + mp4 同名配对
-assert.deepEqual(shape([file('IMG_0002.jpg', 'image/jpeg'), file('IMG_0002.mp4', 'video/mp4')]), ['IMG_0002.jpg+IMG_0002.mp4'])
 assert.equal(mediaStem('IMG_0001.HEIC'), 'IMG_0001')
 assert.equal(isVideoFile(file('IMG_0001.MOV')), true)
 assert.equal(videoContentType(file('a.MOV')), 'video/quicktime')
@@ -44,7 +34,7 @@ class FakeArtplayer {
 }
 globalThis.Artplayer = FakeArtplayer
 
-const { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } = await import('../public/js/inline-video.js')
+const { playInlineVideo, stopInlineVideo, preloadInlineVideoPlayer } = await import('../frontend/src/native/inline-video.js')
 
 function fakeTile({ singleColumn = false, poster = null, player = true } = {}) {
   const classes = new Set()
@@ -127,6 +117,36 @@ stopInlineVideo()
 assert.equal(FakeArtplayer.instances.every((art) => art.destroyed), true)
 assert.ok((await preloadInlineVideoPlayer()) === FakeArtplayer, '已经有了就不要再插脚本标签')
 
+// 脚本延迟完成时，停止/切页必须使旧点击失效，连续点击只执行最后一次。
+const originalDocument = globalThis.document
+try {
+  delete globalThis.Artplayer
+  let script
+  globalThis.document = { createElement: () => ({}), head: { appendChild(node) { script = node } } }
+  const stale = fakeTile()
+  playInlineVideo(stale, clip)
+  stopInlineVideo()
+  stale.isConnected = false
+  globalThis.Artplayer = FakeArtplayer
+  const count = FakeArtplayer.instances.length
+  script.onload()
+  await Promise.resolve()
+  assert.equal(FakeArtplayer.instances.length, count, '停止后延迟回调不能创建播放器')
+  delete globalThis.Artplayer
+  const first = fakeTile(), last = fakeTile()
+  playInlineVideo(first, clip)
+  playInlineVideo(last, clip)
+  globalThis.Artplayer = FakeArtplayer
+  await Promise.resolve()
+  assert.equal(FakeArtplayer.instances.length, count + 1, '同一加载 Promise 仅执行最后一次点击')
+  assert.equal(first.playing(), false)
+  assert.equal(last.playing(), true)
+  stopInlineVideo()
+} finally {
+  globalThis.document = originalDocument
+  globalThis.Artplayer = FakeArtplayer
+}
+
 const root = fileURLToPath(new URL('../', import.meta.url))
 mkdirSync(path.join(root, 'data'), { recursive: true })
 const dataDir = mkdtempSync(path.join(root, 'data', 'media-regression-'))
@@ -199,6 +219,31 @@ try {
   execFileSync('ffmpeg', ['-hide_banner', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=10:d=0.5', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', fixturePath])
   const videoBytes = new Uint8Array(readFileSync(fixturePath))
   assert.ok(videoBytes.length < 4096)
+  // 原始照片必须在压缩前拆分，提取视频保持原始字节；缺失、关闭标记和歧义均不误配。
+  const { normalizeMediaFiles } = await import('../frontend/src/native/live-photo.js')
+  const motionXmp = `<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:g="http://ns.google.com/photos/1.0/camera/" g:MicroVideo="1" g:MicroVideoOffset="${videoBytes.length}"/>`
+  const metadata = Buffer.from(`http://ns.adobe.com/xap/1.0/\0${motionXmp}`)
+  const segment = Buffer.alloc(4); segment[0] = 255; segment[1] = 225; segment.writeUInt16BE(metadata.length + 2, 2)
+  const embedded = new File([coverJpeg.subarray(0, 2), segment, metadata, coverJpeg.subarray(2), videoBytes], 'motion.jpg', { type: 'image/jpeg' })
+  const [normalized] = await normalizeMediaFiles([embedded])
+  assert.equal(normalized.kind, 'live')
+  assert.equal(normalized.source.pairing, 'embedded')
+  assert.deepEqual(new Uint8Array(await normalized.motion.arrayBuffer()), videoBytes)
+  assert.equal(normalized.still.size, embedded.size - videoBytes.length)
+  const incomplete = new File([coverJpeg.subarray(0, 2), segment, metadata, coverJpeg.subarray(2)], 'broken.jpg', { type: 'image/jpeg' })
+  const [broken] = await normalizeMediaFiles([incomplete])
+  assert.equal(broken.kind, 'image')
+  assert.ok(broken.warnings.some((entry) => entry.blocking))
+  assert.equal((await normalizeMediaFiles([new File([coverJpeg], 'a.jpg'), new File([videoBytes], 'a.mov')])).length, 1)
+  assert.equal((await normalizeMediaFiles([new File([coverJpeg], 'a.jpg'), new File([coverJpeg], 'a.png'), new File([videoBytes], 'a.mov')])).length, 3)
+  const disabledMetadata = Buffer.from(`http://ns.adobe.com/xap/1.0/\0${motionXmp.replace('g:MicroVideo="1"', 'g:MicroVideo="0"')}`)
+  const disabled = new File([coverJpeg.subarray(0, 2), segment, disabledMetadata, coverJpeg.subarray(2), videoBytes], 'off.jpg')
+  assert.deepEqual((await normalizeMediaFiles([disabled, new File([videoBytes], 'off.mov')])).map((item) => item.kind), ['image', 'video'])
+  const extendedFtyp = Buffer.alloc(32)
+  extendedFtyp.writeUInt32BE(1); extendedFtyp.write('ftyp', 4); extendedFtyp.writeBigUInt64BE(32n, 8); extendedFtyp.write('heic', 16); extendedFtyp.write('mif1heic', 24)
+  const [plainHeif] = await normalizeMediaFiles([new File([extendedFtyp], 'plain.heic')])
+  assert.equal(plainHeif.kind, 'image')
+  assert.equal(plainHeif.warnings.length, 0)
   const videoName = await uploadVideo(videoBytes)
   assert.match(videoName, /^\d{8}-\d{6}-[a-f0-9]{8}\.mp4$/)
   const videoPoster = await uploadImage(coverJpeg, 'poster.jpg')
@@ -208,6 +253,12 @@ try {
   const motionName = await uploadVideo(videoBytes, 'video/quicktime')
   assert.match(motionName, /\.mov$/)
   const plain = await uploadImage(coverJpeg, 'IMG_0002.jpg')
+  const invalidLive = await request('/api/posts', { method: 'POST', body: { draftId, images: [{ filename: videoName, motion: motionName }] } })
+  assert.equal(invalidLive.status, 400)
+  assert.equal((await invalidLive.json()).error, '实况封面必须是图片')
+  const invalidPoster = await request('/api/posts', { method: 'POST', body: { draftId, images: [{ filename: still, motion: motionName, poster: videoPoster }] } })
+  assert.equal(invalidPoster.status, 400)
+  assert.equal((await invalidPoster.json()).error, '实况图片不能另挂视频封面')
 
   // 超上限:声明长度与真实长度都被校验
   const oversized = new Uint8Array(8192)
@@ -335,6 +386,8 @@ try {
 
   console.log('通过：视频流式上传、实况配对、发布契约、Range 206、相册、可见性边界与删除清理。')
 } finally {
+  const { stopVideoJobs } = await import('../server/video-jobs.js')
+  await stopVideoJobs()
   db?.close()
   rmSync(dataDir, { recursive: true, force: true })
 }

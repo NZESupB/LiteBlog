@@ -15,7 +15,8 @@ import { enterOperation, isMaintenance } from './maintenance.js'
 import { VIDEO_POLICY_VERSION, VIDEO_PROFILES, MAX_FRAME_RATE, videoProfile } from './video-profile.js'
 import { FFMPEG, command, baseOptions, inputOptions, detectVideoTools } from './video-encoder.js'
 import { artifact, signature, hashFile, syncFile, nextGeneration } from './video-checkpoints.js'
-import { probe, metrics, compatible, directContainer, hdrType, validateVideo, remuxVideo, encodeVideo } from './video-processing.js'
+import { probe, metrics, compatible, directContainer, hdrType, remuxVideo, encodeVideo } from './video-processing.js'
+import { videoReferenced, originalReady, promotePublishedVideo } from './video-publication.js'
 
 const MiB = 1024 ** 2
 const CHUNK_BYTES = 8 * MiB
@@ -23,7 +24,7 @@ const RETENTION_MS = 24 * 60 * 60 * 1000
 const ACTIVE = new Set(['receiving', 'queued', 'compressing', 'saving', 'comparing'])
 const TYPES = { 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm', 'video/x-m4v': '.mp4' }
 const jobs = new Map()
-let running = false, stopping = false
+let running = false, preparing = false, stopping = false
 function numberConfig(key, fallback, min, max) {
   const value = Number(configValue(key, fallback))
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`${key} 配置应为 ${min}–${max} 的整数`)
@@ -49,7 +50,7 @@ function draftActive(job) {
 }
 function assertActive(job) {
   job.controller.signal.throwIfAborted()
-  if (!draftActive(job)) throw fail('草稿已结束，请重新上传视频', 409)
+  if (!draftActive(job) && !videoReferenced(job)) throw fail('草稿已结束且视频未被动态采用', 409)
 }
 function selectionReady(job) { return ['done', 'failed'].includes(job.status) || (job.retryable && job.phase === 'waiting') }
 function publicVariant(variant) {
@@ -65,9 +66,12 @@ function view(job) {
     progress: job.progress || 0, completedSegments: job.completedSegments || 0, segmentCount: job.segmentCount || 0,
     currentSegment: job.currentSegment || 0, completedSeconds: job.completedSeconds || 0,
     message: job.message || '', backend: job.backend, name: job.name || '', needsPoster: job.needsPoster,
+    livePhoto: Boolean(job.livePhoto), originalReady: originalReady(job),
+    compressionPending: Boolean(originalReady(job) && job.settings?.enabled && ACTIVE.has(job.status) && !job.retryable),
     clientUploadId: job.clientUploadId || '', fingerprint: job.identity?.fingerprint || '', expiresAt: job.expiresAt,
     variants, versions: variants, comparison: job.comparison || null, recommendedVariant: job.recommendedVariant || '', selectedVariant: job.selectedVariant || '',
-    canSelect: Boolean(job.variants?.original && selectionReady(job) && draftActive(job) && !Object.values(job.variants).some((variant) => referenced(variant.filename))), fallbackAvailable: Boolean(job.fallbackAvailable),
+    selectionSource: job.selectionSource || 'auto', selectionUpdatedAt: job.selectionUpdatedAt || 0,
+    canSelect: originalReady(job) && draftActive(job) && !videoReferenced(job), fallbackAvailable: originalReady(job) && (job.status === 'failed' || Boolean(job.retryable)),
     createdAt: job.createdAt, queuedAt: job.queuedAt || null, startedAt: job.startedAt || null, finishedAt: job.finishedAt || null,
     elapsedMs: (job.processingMs || 0) + (job.attemptStartedAt ? Date.now() - job.attemptStartedAt : 0),
     totalElapsedMs: Math.max(0, now - job.createdAt), phaseElapsedMs: { ...(job.timings || {}), ...(job.phaseStartedAt ? { [job.phase]: (job.timings?.[job.phase] || 0) + Date.now() - job.phaseStartedAt } : {}) },
@@ -79,7 +83,7 @@ function view(job) {
 }
 function persistJob(job) {
   const snapshot = { ...job }
-  for (const key of ['controller', 'runPromise', 'receivingPromise', 'initializing', 'source', 'directory', 'capability', 'busy', 'attemptStartedAt', 'phaseStartedAt', 'generation']) delete snapshot[key]
+  for (const key of ['controller', 'runPromise', 'cleanupPromise', 'receivingPromise', 'initializing', 'source', 'directory', 'capability', 'busy', 'attemptStartedAt', 'phaseStartedAt', 'generation']) delete snapshot[key]
   snapshot.processingMs = view(job).elapsedMs
   snapshot.timings = view(job).phaseElapsedMs
   db.prepare(`INSERT INTO video_jobs (id, user_id, draft_id, status, snapshot, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -91,11 +95,14 @@ function restoreJob(row) {
   const state = JSON.parse(row.snapshot)
   const createdAt = uploadTime(state.createdAt ?? row.created_at)
   const directory = path.join(TMP_DIR, `vjob-${row.id}`)
-  return { ...state, id: row.id, userId: row.user_id, draftId: row.draft_id, status: row.status === 'awaiting' ? 'queued' : row.status, directory,
+  const job = { ...state, id: row.id, userId: row.user_id, draftId: row.draft_id, status: row.status === 'awaiting' ? 'queued' : row.status, directory,
     source: state.schemaVersion === 2 ? path.join(directory, 'source') : path.join(TMP_DIR, `vjob-${row.id}.source`),
     createdAt, storageTime: uploadTime(state.storageTime ?? createdAt), expiresAt: state.expiresAt || Date.now() + RETENTION_MS,
     stored: (state.stored || []).map((file) => typeof file === 'string' ? { filename: file, storagePath: file } : file),
     timings: state.timings || {}, processingMs: state.processingMs || 0, controller: new AbortController(), capability: () => tools }
+  job.originalReady = originalReady(job)
+  if (job.originalReady && !job.selectedVariant) applySelection(job, 'original')
+  return job
 }
 function findJob(id, userId) {
   const live = jobs.get(id)
@@ -130,12 +137,22 @@ async function initialize() {
   catch (error) { capability = { available: false, error: error.message, supported: [] }; console.warn(`视频工具不可用：${error.message}`) }
   for (const row of db.prepare('SELECT * FROM video_jobs ORDER BY created_at').all()) {
     const job = restoreJob(row)
-    if (!ACTIVE.has(job.status)) { if (job.status === 'done') await cleanTemp(job); continue }
+    if (!ACTIVE.has(job.status)) {
+      if (job.status === 'done') { await cleanTemp(job); if (videoReferenced(job)) await cleanStored(job) }
+      continue
+    }
     jobs.set(job.id, job)
     try {
-      if (!draftActive(job) || job.expiresAt < Date.now()) { await cancel(job); continue }
+      if ((!draftActive(job) || job.expiresAt < Date.now()) && !videoReferenced(job)) { await cancel(job); continue }
       await mkdir(job.directory, { recursive: true })
       if (job.received === 0) { const handle = await open(job.source, 'a'); await handle.close() }
+      if (originalReady(job)) {
+        const original = job.variants.original
+        if (!await verifyStoredFile(original.filename, original.backend || job.backend, original.storagePath, original.size, original.hash, job.controller.signal)) {
+          job.originalReady = false; original.available = false
+          throw new Error('已保存的原件缺失或损坏，不能发布，请重新上传')
+        }
+      }
       await verifySource(job)
       if (!job.settings?.version && !job.profile) {
         job.settings = settings()
@@ -151,9 +168,18 @@ async function initialize() {
   // 只处理有持久化任务的目录；未知残留不冒充恢复成功，也不删除未确认所有权的文件。
   return capability
 }
-const ready = (() => { const release = enterOperation('media'); return initialize().finally(release) })()
-const tools = ready.catch((error) => ({ available: false, error: `视频任务恢复失败：${error.message}`, supported: [] }))
-void tools.then(() => drain()).catch((error) => console.warn(`恢复视频队列失败：${error.message}`))
+let tools
+let cleanupTimer
+export function startVideoJobs() {
+  if (tools) return tools
+  stopping = false
+  const release = enterOperation('media')
+  tools = initialize().finally(release)
+  void tools.then(() => scheduleJobs()).catch((error) => console.warn(`恢复视频队列失败：${error.message}`))
+  cleanupTimer = setInterval(() => cleanup().catch((error) => console.warn(`清理视频任务失败：${error.message}`)), 60000)
+  cleanupTimer.unref()
+  return tools
+}
 
 export async function draftVideoJobs(userId, draftId) {
   await tools
@@ -163,7 +189,12 @@ async function cleanTemp(job) {
   await rm(job.directory, { recursive: true, force: true })
   for (const suffix of ['source', 'output.mp4', 'poster.jpg']) await unlink(path.join(TMP_DIR, `vjob-${job.id}.${suffix}`)).catch((error) => { if (error.code !== 'ENOENT') throw error })
 }
-async function cleanStored(job) {
+function cleanStored(job) {
+  if (job.cleanupPromise) return job.cleanupPromise
+  job.cleanupPromise = performStoredCleanup(job).finally(() => { job.cleanupPromise = null })
+  return job.cleanupPromise
+}
+async function performStoredCleanup(job) {
   for (const file of [...job.stored]) {
     if (referenced(file.filename)) continue
     const pending = db.prepare('SELECT * FROM pending_uploads WHERE filename = ?').get(file.filename)
@@ -177,7 +208,7 @@ async function cleanStored(job) {
   }
 }
 async function cancel(job) {
-  if (referenced(job.filename)) throw fail('视频已发布，不能取消上传任务', 409)
+  if (videoReferenced(job)) throw fail('视频已发布，不能取消上传任务', 409)
   job.status = job.phase = 'cancelled'; job.controller.abort()
   await Promise.allSettled([job.receivingPromise, job.runPromise].filter(Boolean))
   job.status = job.phase = 'cancelled'; job.error = ''; job.retryable = false
@@ -191,11 +222,16 @@ async function cancel(job) {
 }
 export async function cancelDraftVideoJobs(userId, draftId) {
   await tools
+  const protectedJobs = []
   for (const row of db.prepare('SELECT * FROM video_jobs WHERE user_id = ? AND draft_id = ?').all(userId, draftId)) {
     const job = jobs.get(row.id) || restoreJob(row)
-    if (!referenced(job.filename)) await cancel(job)
-    else { await job.runPromise; await cleanStored(job) }
+    if (!videoReferenced(job)) await cancel(job)
+    else if (ACTIVE.has(job.status) || job.runPromise) protectedJobs.push(job)
+    else await cleanStored(job)
   }
+  // 等待其他任务取消后再取快照，包含等待期间新增的保存意图。
+  return new Set(protectedJobs.flatMap((job) => [job.poster, job.originalFilename, job.compressedFilename,
+    ...job.stored.map((file) => file.filename), ...Object.keys(job.storageIntents || {})]).filter(Boolean))
 }
 function jobForFilename(userId, name) {
   const row = db.prepare(`SELECT * FROM video_jobs WHERE user_id = ? AND
@@ -204,7 +240,14 @@ function jobForFilename(userId, name) {
 }
 export function assertVideoUploadSelected(userId, name) {
   const job = jobForFilename(userId, name)
-  if (job && (job.status !== 'done' || job.filename !== name)) throw fail('请等待视频处理完成，并发布当前采用的版本；另一页面可能已更改选择', 409)
+  if (!job) return name
+  const selected = job.variants?.[job.selectedVariant]
+  if (job.status === 'cancelled' || selected?.available === false) throw fail('视频版本不可用，请刷新后重试', 409)
+  const ready = job.status === 'done' || originalReady(job)
+  if (ready && job.filename === name) return name
+  // 自动采用在发布请求途中完成时，沿用当前版本，不把迟到的原件重新挂回动态。
+  if (ready && selected && job.variants?.original?.filename === name && job.selectionSource !== 'user') return selected.filename
+  throw fail('视频原件尚未就绪或版本已改变，请刷新后重试', 409)
 }
 export async function cleanupPublishedVideoVersions(userId, names) {
   const release = enterOperation('media')
@@ -212,8 +255,11 @@ export async function cleanupPublishedVideoVersions(userId, names) {
     const seen = new Set()
     for (const name of names) {
       const job = jobForFilename(userId, name)
-      if (!job || seen.has(job.id) || !referenced(job.filename)) continue
-      seen.add(job.id); await job.runPromise; await cleanStored(job)
+      if (!job || seen.has(job.id) || !videoReferenced(job)) continue
+      seen.add(job.id)
+      if (ACTIVE.has(job.status)) continue
+      transaction(() => { promotePublishedVideo(job); persistJob(job) })
+      await cleanStored(job)
     }
   } finally { release() }
 }
@@ -223,15 +269,20 @@ async function cleanup() {
   try {
     for (const [id, job] of jobs) {
       if (job.expiresAt > Date.now() || job.runPromise || job.busy) continue
+      if (videoReferenced(job)) {
+        if (!ACTIVE.has(job.status)) { await cleanStored(job); jobs.delete(id) }
+        continue
+      }
       if (job.status !== 'done' && job.status !== 'cancelled') await cancel(job)
       if (!ACTIVE.has(job.status)) jobs.delete(id)
     }
     db.prepare(`DELETE FROM video_jobs WHERE updated_at < ? AND status NOT IN ('receiving', 'queued', 'compressing', 'saving', 'comparing')
+      AND NOT EXISTS (SELECT 1 FROM images, json_each(json_array(json_extract(video_jobs.snapshot, '$.filename'),
+        json_extract(video_jobs.snapshot, '$.variants.original.filename'), json_extract(video_jobs.snapshot, '$.variants.compressed.filename'))) AS media
+        WHERE images.filename = media.value OR images.motion_filename = media.value OR images.poster_filename = media.value)
       AND NOT EXISTS (SELECT 1 FROM drafts WHERE drafts.id = video_jobs.draft_id AND drafts.user_id = video_jobs.user_id AND drafts.status = 'active')`).run(Date.now() - RETENTION_MS)
   } finally { release() }
 }
-const cleanupTimer = setInterval(() => cleanup().catch((error) => console.warn(`清理视频任务失败：${error.message}`)), 60000)
-cleanupTimer.unref()
 
 function validateIdentity(body) {
   if (!body.fingerprint && !body.hashes) return null
@@ -247,7 +298,8 @@ async function createJob(userId, body) {
   const capability = await tools
   if (!capability.available) throw fail(capability.error, 503)
   await cleanup()
-  const { draftId, contentType, size, needsPoster = true, name = '', clientUploadId } = body
+  const { draftId, contentType, size, needsPoster = true, livePhoto = false, name = '', clientUploadId } = body
+  if (typeof livePhoto !== 'boolean') throw fail('实况视频标记无效')
   if (!TYPES[contentType]) throw fail('不支持的视频格式，请上传 MP4 / MOV / WebM')
   if (size !== null && (!Number.isSafeInteger(size) || size <= 0)) throw fail('视频大小无效')
   if (size > MAX_BYTES) throw fail(`原视频不能超过 ${(MAX_BYTES / MiB).toFixed(0)}MiB`, 413)
@@ -257,7 +309,7 @@ async function createJob(userId, body) {
     const key = db.prepare('SELECT job_id FROM video_upload_keys WHERE user_id = ? AND client_id = ?').get(userId, clientUploadId)
     if (key) {
       const existing = findJob(key.job_id, userId)
-      if (existing.draftId !== (draftId || null) || existing.total !== size || existing.identity?.fingerprint !== identity?.fingerprint || existing.contentType !== contentType || existing.needsPoster !== needsPoster) throw fail('此上传标识已绑定另一文件或草稿', 409)
+      if (existing.draftId !== (draftId || null) || existing.total !== size || existing.identity?.fingerprint !== identity?.fingerprint || existing.contentType !== contentType || existing.needsPoster !== needsPoster || Boolean(existing.livePhoto) !== livePhoto) throw fail('此上传标识已绑定另一文件或草稿', 409)
       if (existing.status === 'cancelled') throw fail('任务已取消，请新建上传', 410)
       await existing.initializing
       return existing
@@ -266,8 +318,8 @@ async function createJob(userId, body) {
   if ([...jobs.values()].filter((job) => ACTIVE.has(job.status)).length >= MAX_JOBS) throw fail('视频任务已满，请等待当前视频处理完成', 429)
   const id = randomUUID(), createdAt = Date.now(), directory = path.join(TMP_DIR, `vjob-${id}`)
   const job = { id, schemaVersion: 2, userId, draftId: draftId || null, contentType, total: size, received: 0, status: 'receiving', phase: 'receiving',
-    source: path.join(directory, 'source'), directory, identity, clientUploadId: clientUploadId || '', needsPoster, name: String(name).slice(0, 255),
-    settings: settings(), encoder: capability.encoder, backend: activeBackend(), controller: new AbortController(), stored: [],
+    source: path.join(directory, 'source'), directory, identity, clientUploadId: clientUploadId || '', needsPoster, livePhoto, originalReady: false, name: String(name).slice(0, 255),
+    settings: { ...settings(), ...(livePhoto ? { enabled: true } : {}) }, encoder: capability.encoder, backend: activeBackend(), controller: new AbortController(), stored: [],
     createdAt, storageTime: createdAt, expiresAt: createdAt + RETENTION_MS, timings: {}, processingMs: 0, capability: () => tools }
   assertActive(job); jobs.set(id, job)
   try {
@@ -410,7 +462,7 @@ function compareVersions(job) {
   }
   job.comparison = { original, compressed: compressed || null, savingBytes, savingPercent,
     compressionRatio: compressed ? compressed.size / original.size : null, qualityScore: null, changes, reason }
-  applySelection(job, job.selectedVariant && job.variants[job.selectedVariant] ? job.selectedVariant : job.recommendedVariant)
+  applySelection(job, job.selectionSource === 'user' && job.variants[job.selectedVariant] ? job.selectedVariant : job.recommendedVariant)
   job.message = reason
 }
 async function ensureOriginal(job, sourceHash) {
@@ -425,7 +477,7 @@ async function ensureOriginal(job, sourceHash) {
     persistJob(job)
   })
 }
-async function processJob(job) {
+async function processJob(job, prepareOnly = false) {
   job.attemptStartedAt = Date.now(); job.startedAt ||= job.attemptStartedAt; job.finishedAt = null
   job.error = ''; job.retryable = false; job.encodingSpeed = null; job.estimatedRemainingMs = null
   nextGeneration(job)
@@ -451,35 +503,46 @@ async function processJob(job) {
       } })
   }
   try {
-    assertActive(job); phase('verifying_source')
-    await verifySource(job)
-    const sourceHash = await hashFile(job.source, { signal: job.controller.signal })
-    if (job.sourceHash && job.sourceHash !== sourceHash) throw new Error('原件内容已改变，无法恢复')
-    job.sourceHash = sourceHash
-    await ensureOriginal(job, sourceHash)
-    phase('probing')
-    const info = await probe(job.source, job.controller.signal)
-    job.duration = info.duration; job.profile ||= videoProfile(info); job.encoder ||= (await tools).encoder
-    const original = job.variants.original
-    Object.assign(original, metrics(info, job.received), { lossy: false })
-    const mp4 = /^(?:iso[0-9a-z]|mp4[12]|M4V |avc1|MSNV)/.test(info.format.tags?.major_brand || '')
-    original.playbackCompatible = mp4 && ['h264', 'hevc'].includes(info.video.codec_name)
-      && (info.video.codec_name !== 'hevc' || info.video.codec_tag_string === 'hvc1')
-      && ['yuv420p', 'yuvj420p', 'yuv420p10le'].includes(info.video.pix_fmt) && !original.hdr
-      && (info.video.codec_name !== 'h264' || original.bitDepth === 8) && info.rate <= MAX_FRAME_RATE && info.rotation === 0
-      && info.audio.length <= 1 && info.audio.every((stream) => stream.codec_name === 'aac' && stream.channels <= 2)
-      && await faststart(job.source)
-    original.compatibilityNote = original.playbackCompatible ? '容器与音视频格式符合本站播放规则；HEVC 仍取决于设备解码支持' : '原件不符合本站目标播放规则，保留时需自行确认设备支持'
-    persistJob(job)
-    if (job.needsPoster) {
-      phase('poster')
-      const poster = await artifact(job, 'poster.jpg', signature({ source: sourceHash }),
-        (file) => run([...baseOptions, ...inputOptions, '-ss', String(Math.min(.1, info.duration / 10)), '-i', job.source, '-map', `0:${info.video.index}`, '-frames:v', '1',
-          '-vf', 'scale=1280:1280:force_original_aspect_ratio=decrease', '-threads', String(job.encoder.threads), file]), async (file) => ({ size: (await stat(file)).size }))
-      job.poster ||= filename('.jpg', job.storageTime)
-      job.posterStoragePath = await saveOutput(job, job.poster, poster.path, 'image/jpeg', poster.hash)
-      registerMedia(() => { registerPending(job, job.poster, poster.hash, job.posterStoragePath); persistJob(job) })
+    assertActive(job)
+    let sourceHash = job.sourceHash
+    let info
+    if (!originalReady(job)) {
+      phase('verifying_source')
+      await verifySource(job)
+      sourceHash = await hashFile(job.source, { signal: job.controller.signal })
+      if (job.sourceHash && job.sourceHash !== sourceHash) throw new Error('原件内容已改变，无法恢复')
+      job.sourceHash = sourceHash
+      await ensureOriginal(job, sourceHash)
+      phase('probing')
+      info = await probe(job.source, job.controller.signal)
+      job.duration = info.duration; job.profile ||= videoProfile(info); job.encoder ||= (await tools).encoder
+      const original = job.variants.original
+      Object.assign(original, metrics(info, job.received), { lossy: false })
+      const mp4 = /^(?:iso[0-9a-z]|mp4[12]|M4V |avc1|MSNV)/.test(info.format.tags?.major_brand || '')
+      original.playbackCompatible = mp4 && ['h264', 'hevc'].includes(info.video.codec_name)
+        && (info.video.codec_name !== 'hevc' || info.video.codec_tag_string === 'hvc1')
+        && ['yuv420p', 'yuvj420p', 'yuv420p10le'].includes(info.video.pix_fmt) && !original.hdr
+        && (info.video.codec_name !== 'h264' || original.bitDepth === 8) && info.rate <= MAX_FRAME_RATE && info.rotation === 0
+        && info.audio.length <= 1 && info.audio.every((stream) => stream.codec_name === 'aac' && stream.channels <= 2)
+        && await faststart(job.source)
+      original.compatibilityNote = original.playbackCompatible ? '容器与音视频格式符合本站播放规则；HEVC 仍取决于设备解码支持' : '原件不符合本站目标播放规则，保留时需自行确认设备支持'
+      if (job.needsPoster) {
+        phase('poster')
+        const poster = await artifact(job, 'poster.jpg', signature({ source: sourceHash }),
+          (file) => run([...baseOptions, ...inputOptions, '-ss', String(Math.min(.1, info.duration / 10)), '-i', job.source, '-map', `0:${info.video.index}`, '-frames:v', '1',
+            '-vf', 'scale=1280:1280:force_original_aspect_ratio=decrease', '-threads', String(job.encoder.threads), file]), async (file) => ({ size: (await stat(file)).size }))
+        job.poster ||= filename('.jpg', job.storageTime)
+        job.posterStoragePath = await saveOutput(job, job.poster, poster.path, 'image/jpeg', poster.hash)
+        registerMedia(() => { registerPending(job, job.poster, poster.hash, job.posterStoragePath); persistJob(job) })
+      }
+      assertActive(job)
+      job.originalReady = true
+      applySelection(job, 'original')
+      job.message = job.settings.enabled ? '原件已保存，可以发布；压缩在后台继续' : '原件已保存，可以发布'
+      job.status = 'queued'; phase('compression_queued')
     }
+    if (prepareOnly) return
+    info ||= await probe(job.source, job.controller.signal)
     let output = null
     if (job.settings.enabled) {
       job.status = 'compressing'; phase('planning')
@@ -504,20 +567,26 @@ async function processJob(job) {
     job.status = 'comparing'; phase('comparing')
     try { transaction(() => {
       compareVersions(job)
+      promotePublishedVideo(job)
       if (job.phaseStartedAt) { job.timings[job.phase] = (job.timings[job.phase] || 0) + Date.now() - job.phaseStartedAt; job.phaseStartedAt = null }
       job.status = job.phase = 'done'; job.progress = 100; job.finishedAt = Date.now(); persistJob(job)
     }) } catch (error) { job.status = 'saving'; job.phase = 'registering'; job.finishedAt = null; error.retryable = true; throw error }
     await cleanTemp(job)
+    if (videoReferenced(job)) await cleanStored(job)
   } catch (error) {
     if (job.phaseStartedAt) { job.timings[job.phase] = (job.timings[job.phase] || 0) + Date.now() - job.phaseStartedAt; job.phaseStartedAt = null }
     if (job.status === 'done') console.warn(`视频已完成，暂存清理待下次启动：${error.message}`)
     else if (stopping && job.controller.signal.aborted) { job.status = 'queued'; job.phase = 'queued'; job.error = ''; job.retryable = false }
     else if (job.controller.signal.aborted) { job.status = job.phase = 'cancelled'; job.error = '' }
-    else if (error.retryable || ['ENOSPC', 'EIO', 'EBUSY', 'ECONNRESET', 'ETIMEDOUT'].includes(error.code)) {
+    else if (!draftActive(job) && !videoReferenced(job)) {
+      job.status = job.phase = 'cancelled'; job.error = ''; job.retryable = false
+      await cleanStored(job); await cleanTemp(job)
+      db.prepare('DELETE FROM video_artifacts WHERE job_id = ?').run(job.id)
+    } else if (error.retryable || ['ENOSPC', 'EIO', 'EBUSY', 'ECONNRESET', 'ETIMEDOUT'].includes(error.code)) {
       job.phase = 'waiting'; job.error = error.message; job.retryable = true; job.estimatedRemainingMs = null
     } else {
       job.status = job.phase = 'failed'; job.error = error.message; job.finishedAt = Date.now()
-      if (job.variants?.original) { job.fallbackAvailable = true; compareVersions(job); job.message = `压缩未完成，原件已保存：${error.message}` }
+      if (originalReady(job)) { job.fallbackAvailable = true; compareVersions(job); job.message = `压缩未完成，原件已保存：${error.message}` }
       console.warn(`视频任务 ${job.id} 失败：${error.message}`)
     }
   } finally {
@@ -527,15 +596,34 @@ async function processJob(job) {
     job.expiresAt = Date.now() + RETENTION_MS; persistJob(job)
   }
 }
+function scheduleJobs() {
+  void drainPreparation().catch((error) => console.warn(`原件准备失败：${error.message}`))
+  void drain().catch((error) => console.warn(`视频队列执行失败：${error.message}`))
+}
+async function drainPreparation() {
+  if (preparing || stopping || isMaintenance()) return
+  const release = enterOperation('media'); preparing = true
+  try {
+    for (;;) {
+      if (stopping) break
+      const job = [...jobs.values()].find((item) => item.status === 'queued' && !originalReady(item) && item.phase !== 'waiting' && !item.runPromise)
+      if (!job) break
+      job.runPromise = processJob(job, true)
+      try { await job.runPromise } finally { job.runPromise = null }
+      void drain().catch((error) => console.warn(`视频队列执行失败：${error.message}`))
+    }
+  } finally { preparing = false; release() }
+}
 async function drain() {
   if (running || stopping || isMaintenance()) return
   const release = enterOperation('media'); running = true
   try {
     for (;;) {
       if (stopping) break
-      const job = [...jobs.values()].find((item) => item.status === 'queued' && item.phase !== 'waiting')
+      const job = [...jobs.values()].find((item) => item.status === 'queued' && originalReady(item) && item.phase !== 'waiting' && !item.runPromise)
       if (!job) break
-      job.runPromise = processJob(job); await job.runPromise; job.runPromise = null
+      job.runPromise = processJob(job)
+      try { await job.runPromise } finally { job.runPromise = null }
     }
   } finally { running = false; release() }
 }
@@ -545,14 +633,14 @@ function complete(job) {
   if (job.busy || job.received <= 0 || (job.total !== null && job.received !== job.total)) throw fail('视频尚未完整接收', 409)
   job.total = job.received; job.status = job.phase = 'queued'; job.queuedAt = Date.now()
   job.timings.uploading = job.queuedAt - job.createdAt; persistJob(job)
-  void drain().catch((error) => console.warn(`视频队列执行失败：${error.message}`))
+  scheduleJobs()
 }
 export const videoJobsApp = new Hono()
 videoJobsApp.use('*', requireAuth)
 videoJobsApp.use('*', async (_c, next) => { await tools; if (stopping) throw fail('服务正在停止，请稍后续传', 503); await next() })
 videoJobsApp.onError((error, c) => c.json({ error: error.name === 'AbortError' ? '视频上传已停止' : error.message }, error.status || 500))
 videoJobsApp.get('/config', async (c) => c.json({ ...settings(), ...(await tools), profiles: VIDEO_PROFILES, maxBytes: MAX_BYTES, chunkBytes: CHUNK_BYTES,
-  codec: 'hevc', maxFps: MAX_FRAME_RATE, resolution: 'original', retentionMs: RETENTION_MS }))
+  codec: 'hevc', maxFps: MAX_FRAME_RATE, resolution: 'original', livePhotoCompression: true, retentionMs: RETENTION_MS }))
 videoJobsApp.put('/config', async (c) => {
   const body = await c.req.json().catch(() => null)
   if (!body || typeof body.enabled !== 'boolean' || Object.keys(body).some((key) => key !== 'enabled')) throw fail('视频采用固定档位，仅允许修改自动压缩开关')
@@ -588,10 +676,11 @@ videoJobsApp.post('/:id/select', async (c) => {
   const job = c.get('videoJob'), body = await c.req.json().catch(() => null)
   if (!body || !['original', 'compressed'].includes(body.variant)) throw fail('请选择原文件或压缩版本')
   assertActive(job)
-  if (!selectionReady(job)) throw fail('请等待视频处理完成', 409)
-  await job.runPromise
+  const ready = () => originalReady(job) && (body.variant === 'original' || selectionReady(job))
+  if (!ready()) throw fail('所选视频版本尚未就绪', 409)
+  if (selectionReady(job)) await job.runPromise
   assertActive(job)
-  if (!selectionReady(job)) throw fail('任务状态已改变，请刷新后重试', 409)
+  if (!ready()) throw fail('任务状态已改变，请刷新后重试', 409)
   if (referenced(job.filename) || Object.values(job.variants || {}).some((variant) => referenced(variant.filename))) throw fail('视频已发布，不能修改版本', 409)
   const selected = job.variants?.[body.variant]
   if (!selected || selected.available === false || !selected.codec) throw fail('所选版本不可用或未经视频探测验证', 409)
@@ -600,15 +689,15 @@ videoJobsApp.post('/:id/select', async (c) => {
   const previous = { ...job }
   try { transaction(() => {
     applySelection(job, body.variant)
-    job.selectionSource = 'user'; job.selectionUpdatedAt = Date.now(); job.retryable = false
-    job.status = job.phase = 'done'; job.finishedAt ||= Date.now(); job.progress = 100
+    job.selectionSource = 'user'; job.selectionUpdatedAt = Date.now()
+    if (!ACTIVE.has(job.status)) { job.retryable = false; job.status = job.phase = 'done'; job.finishedAt ||= Date.now(); job.progress = 100 }
     job.message = `已采用${body.variant === 'original' ? '原文件' : '压缩版本'}${job.error ? '；处理失败原因仍保留' : ''}`
     persistJob(job)
   }) } catch (error) {
     for (const key of ['filename', 'selectedVariant', 'storagePath', 'size', 'codec', 'duration', 'selectionSource', 'selectionUpdatedAt', 'retryable', 'status', 'phase', 'finishedAt', 'progress', 'message']) job[key] = previous[key]
     throw error
   }
-  await cleanTemp(job)
+  if (!ACTIVE.has(job.status)) await cleanTemp(job)
   return c.json(view(job))
 })
 videoJobsApp.post('/:id/resume', async (c) => {
@@ -621,7 +710,7 @@ videoJobsApp.post('/:id/resume', async (c) => {
     }
     job.identity = identity; job.expiresAt = Date.now() + RETENTION_MS; persistJob(job)
   } else if (job.retryable) {
-    assertActive(job); job.retryable = false; job.error = ''; job.status = job.phase = 'queued'; persistJob(job); void drain()
+    assertActive(job); job.retryable = false; job.error = ''; job.status = job.phase = 'queued'; persistJob(job); scheduleJobs()
   }
   return c.json(view(job))
 })
@@ -630,12 +719,13 @@ videoJobsApp.delete('/:id', async (c) => {
   if (!job) throw fail('上传任务不存在或已过期', 404)
   await cancel(job); return c.json({ ok: true })
 })
-export function videoJobsBusy() { return running || [...jobs.values()].some((job) => ACTIVE.has(job.status) || job.busy) }
+export function videoJobsBusy() { return running || preparing || [...jobs.values()].some((job) => ACTIVE.has(job.status) || job.busy) }
 export async function stopVideoJobs() {
   stopping = true; clearInterval(cleanupTimer); await tools
   for (const job of jobs.values()) if (ACTIVE.has(job.status)) job.controller.abort(new DOMException('服务停止，保留检查点', 'AbortError'))
-  await Promise.allSettled([...jobs.values()].flatMap((job) => [job.runPromise, job.receivingPromise]).filter(Boolean))
+  await Promise.allSettled([...jobs.values()].flatMap((job) => [job.runPromise, job.cleanupPromise, job.receivingPromise]).filter(Boolean))
   for (const job of jobs.values()) if (ACTIVE.has(job.status)) persistJob(job)
+  jobs.clear(); running = preparing = false; tools = null; cleanupTimer = null
 }
 export async function resetVideoJobsAfterRestore() {
   if (videoJobsBusy()) throw fail('仍有视频任务未结束，无法清空恢复前状态', 409)
@@ -643,5 +733,5 @@ export async function resetVideoJobsAfterRestore() {
   for (const entry of await readdir(TMP_DIR, { withFileTypes: true })) {
     if (/^vjob-[a-f0-9-]{36}(?:\.(?:source|output\.mp4|poster\.jpg))?$/.test(entry.name)) await rm(path.join(TMP_DIR, entry.name), { recursive: true, force: true })
   }
-  jobs.clear(); running = false
+  jobs.clear(); running = preparing = false
 }

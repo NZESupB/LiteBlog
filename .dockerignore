@@ -28,3 +28,7 @@ AGENTS.md
 TODO
 visual-design-review.md
 .gitignore
+dist
+playwright-report
+test-results
+coverage

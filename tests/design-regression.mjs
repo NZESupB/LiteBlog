@@ -1,9 +1,11 @@
 // 使用内置断言验证改版涉及的页面资源与图文流程,不引入测试依赖。
 // 执行: node tests/design-regression.mjs
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
+import vm from 'node:vm'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 mkdirSync(path.join(root, 'data'), { recursive: true })
@@ -132,38 +134,40 @@ try {
   assert.equal((await request(avatar.avatarUrl, { authenticated: false })).status, 200)
   assert.equal((await request('/api/profile/avatar', { method: 'DELETE' })).status, 200)
   assert.equal((await (await request('/api/site')).json()).user.avatarUrl, null)
-  for (const resource of ['/', '/style.css', '/app.js', '/js/theme.js', '/js/sheet-motion.js', '/js/composer-viewport.js', '/images/journal-cover.jpg', '/vendor/icons.js', '/vendor/artplayer.min.js']) {
-    assert.equal((await request(resource, { authenticated: false })).status, 200, resource)
+  const shellAssets = JSON.parse(readFileSync(path.join(root, 'dist/shell-assets.json'), 'utf8'))
+  for (const resource of ['/', '/style.css', '/js/theme.js', '/images/journal-cover.jpg', '/vendor/artplayer.min.js', '/vendor/motion.js', ...shellAssets]) {
+    const response = await request(resource, { authenticated: false })
+    assert.equal(response.status, 200, resource)
+    if (resource.endsWith('.js')) assert.match(response.headers.get('content-type'), /javascript/, resource)
   }
+  assert.equal((await request('/app.js')).status, 404, '移除原生应用入口')
+  assert.equal((await request('/assets/missing.js')).status, 404, '缺失脚本不能返回 HTML')
+  assert.ok(shellAssets.some((name) => /ComposerDialog.*\.js$/.test(name)), '写作懒加载 chunk')
+  assert.ok(shellAssets.some((name) => /video-fingerprint-worker.*\.js$/.test(name)), '指纹 Worker')
   const manifest = await (await request('/manifest.webmanifest')).json()
   assert.equal(manifest.theme_color, '#a54363')
-  // 灯箱的三件套:一图一视频一 LIVE 角标,全部由用户点击才播(脚本里搜不到 autoplay)
   const shell = await (await request('/index.html')).text()
-  for (const id of ['lightboxImg', 'lightboxVideo', 'lightboxLive']) assert.ok(shell.includes(`id="${id}"`), id)
+  for (const id of ['root', 'lightboxImg', 'lightboxVideo', 'lightboxLive']) assert.ok(shell.includes(`id="${id}"`), id)
   assert.ok(shell.includes('playsinline'))
   assert.ok(!/autoplay/.test(shell))
-  for (const asset of ['/js/lightbox.js', '/js/media.js', '/js/inline-video.js']) {
-    const body = await (await request(asset)).text()
+  for (const asset of ['lightbox.js', 'media.js', 'inline-video.js']) {
+    const body = readFileSync(path.join(root, 'frontend/src/native', asset), 'utf8')
     assert.ok(!/autoplay\s*=/.test(body), `${asset} 不应自行自动播放`)
   }
-  // 顶栏写入口:槽负责撑开占位、按钮负责吸附缩放,三处文件名/类名要能对上(app.js 的 watchHeaderWrite)
-  assert.ok(shell.includes('id="headerWriteSlot"'), 'headerWriteSlot')
-  assert.ok(shell.includes('id="headerWrite"'), 'headerWrite')
-  const styles = await (await request('/style.css')).text()
-  assert.ok(styles.includes('.header-write-slot'), '顶栏写入口槽样式')
-  assert.ok(styles.includes('.header-write-slot[hidden]'), '顶栏写入口要能被 hidden 收起')
-  assert.ok(styles.includes('--spring-bounce'), '吸附曲线')
-  const appJs = await (await request('/app.js')).text()
-  assert.ok(appJs.includes('watchHeaderWrite'), '顶栏写入口的显隐逻辑')
-  assert.ok(appJs.includes('attachInlineInputViewport'), '评论输入框跟随键盘')
-  assert.ok(appJs.includes('closeEmojiPanel'), '切页时关闭触屏表情盘')
-  assert.ok(appJs.includes("className: 'header-write-presence'"), '顶栏写入口的 presence 类名')
-  const toolbarJs = await (await request('/vendor/md-toolbar.js')).text()
-  assert.ok(toolbarJs.includes('emoji-panel-tray'), '触屏底部表情盘')
-  assert.ok(toolbarJs.includes('emoji-panel-popover'), '鼠标锚定表情浮层')
-  assert.ok(toolbarJs.includes('keyboardInset'), '底部表情盘跟随键盘位移')
+  const vendorManifest = JSON.parse(readFileSync(path.join(root, 'public/vendor/manifest.json'), 'utf8'))
+  for (const vendor of vendorManifest.vendors) {
+    const bytes = readFileSync(path.join(root, 'public/vendor', vendor.file))
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), vendor.sha256, `${vendor.name} 校验和`)
+  }
+  const sw = readFileSync(path.join(root, 'dist/sw.js'), 'utf8')
+  const precached = vm.runInNewContext(`${sw}\nSHELL`, { self: { addEventListener() {} } })
+  assert.deepEqual([...precached].sort(), [...shellAssets].sort())
+  for (const name of readdirSync(path.join(root, 'dist/assets'))) {
+    assert.ok(shellAssets.includes(`/assets/${name}`), `${name} 必须预缓存`)
+  }
   console.log('通过：登录、图文发布、读取、相册、归档、私密边界、页面资源、灯箱外壳与主题。')
 } finally {
-  db?.close()
+  const { stopRuntime } = await import('../server/bootstrap.js')
+  await stopRuntime()
   rmSync(dataDir, { recursive: true, force: true })
 }

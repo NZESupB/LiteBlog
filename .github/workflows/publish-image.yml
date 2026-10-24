@@ -12,7 +12,12 @@ on:
         type: string
 
 jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+    permissions:
+      contents: read
   build-and-push:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read

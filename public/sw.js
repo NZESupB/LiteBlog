@@ -1,87 +1,55 @@
-const CACHE_NAME = 'couple-blog-shell-v16'
-const SHELL = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/images/journal-cover.jpg',
-  '/app.js',
-  '/manifest.webmanifest',
-  '/vendor/marked.min.js',
-  '/vendor/purify.min.js',
-  '/vendor/md-toolbar.js',
-  '/vendor/icons.js',
-  '/js/utils.js',
-  '/js/backup-settings.js',
-  '/js/browser-notifications.js',
-  '/js/theme.js',
-  '/js/sheet-motion.js',
-  '/js/composer-viewport.js',
-  '/js/media.js',
-  '/js/video-upload.js',
-  '/js/video-fingerprint-worker.js',
-  '/js/lightbox.js',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-]
-
+// 构建时写入内容哈希与完整资源清单；源码本身不作为生产 SW 使用。
+const CACHE_NAME = /* BUILD_CACHE */ 'couple-blog-shell-development'
+const SHELL = /* BUILD_SHELL */ []
+const PREFIX = 'couple-blog-shell-'
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()))
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL.map((url) => new Request(url, { cache: 'reload' })))))
 })
-
+self.addEventListener('message', (event) => { if (event.data?.type === 'SKIP_WAITING') void self.skipWaiting() })
 self.addEventListener('activate', (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))).then(() => self.clients.claim()))
+  event.waitUntil((async () => {
+    const names = (await caches.keys()).filter((name) => name.startsWith(PREFIX) && name !== CACHE_NAME)
+    // 多标签页可能还在使用更早的脚本；只在单标签页时回收到上一版。
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    if (windows.length <= 1) await Promise.all(names.slice(0, -1).map((name) => caches.delete(name)))
+    await self.clients.claim()
+  })())
 })
-
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url)
-  if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname.startsWith('/uploads/') || url.pathname === '/sw.js') return
-  if (event.request.mode === 'navigate') {
-    event.respondWith(fetch(event.request).then(async (response) => {
-      if (response.ok) {
-        const cache = await caches.open(CACHE_NAME)
-        await cache.put('/index.html', response.clone())
-      }
-      return response
-    }).catch(() => caches.match('/index.html')))
+  const { request } = event, url = new URL(request.url)
+  if (request.method !== 'GET' || url.origin !== self.location.origin || /^\/(?:api|uploads|avatars)(?:\/|$)/.test(url.pathname)) return
+  if (request.mode === 'navigate') {
+    event.respondWith(fetch(request).catch(async () => (await caches.open(CACHE_NAME)).match('/index.html')))
     return
   }
-  event.respondWith(fetch(event.request).then((response) => {
-    if (response.ok) caches.open(CACHE_NAME).then((cache) => cache.put(event.request, response.clone()))
-    return response
-  }).catch(() => caches.match(event.request)))
+  if (!SHELL.includes(url.pathname) && !/^\/(?:assets|js|vendor)\//.test(url.pathname) && url.pathname !== '/app.js') return
+  event.respondWith((async () => {
+    const oldResource = !SHELL.includes(url.pathname)
+    if (url.pathname.startsWith('/assets/') || oldResource) {
+      const cached = await caches.match(request)
+      if (cached) return cached
+    }
+    try {
+      const response = await fetch(request)
+      if (response.ok) return response
+      return await caches.match(request) || response
+    } catch {
+      return await caches.match(request) || Response.error()
+    }
+  })())
 })
-
-// 服务端推来的新评论。userVisibleOnly 订阅必须弹通知,取不到载荷时也给个兜底文案。
 self.addEventListener('push', (event) => {
-  let data = {}
-  try { data = event.data?.json() ?? {} } catch {}
-  event.waitUntil(self.registration.showNotification(data.title || '新评论', {
-    body: data.body || '',
-    tag: data.tag,
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
-    data: { postId: data.postId, commentId: data.commentId },
-  }))
+  let payload = {}
+  try { payload = event.data?.json() || {} } catch { payload = { body: event.data?.text() || '' } }
+  event.waitUntil(self.registration.showNotification(payload.title || '新的评论', { body: payload.body || '', icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', tag: payload.tag || `comment-${payload.commentId || ''}`, data: { postId: payload.postId, commentId: payload.commentId } }))
 })
-
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
-  const data = event.notification.data || {}
-  const target = `/#/post/${data.postId}?comment=${data.commentId}`
+  const { postId, commentId } = event.notification.data || {}, hash = postId ? `#/post/${postId}${commentId ? `?comment=${commentId}` : ''}` : '#/'
   event.waitUntil((async () => {
-    const pages = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-    for (const page of pages) {
-      if (!('focus' in page)) continue
-      try {
-        const targetPage = await page.navigate(target)
-        await (targetPage || page).focus()
-        return
-      } catch {
-        await page.focus()
-        page.postMessage({ type: 'notification-click', postId: data.postId, commentId: data.commentId })
-        return
-      }
-    }
-    await self.clients.openWindow(target)
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    const target = windows.find((client) => new URL(client.url).origin === self.location.origin)
+    if (target) { await target.navigate('/' + hash); await target.focus() }
+    else await self.clients.openWindow('/' + hash)
   })())
 })

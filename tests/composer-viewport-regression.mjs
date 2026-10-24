@@ -1,6 +1,6 @@
 // 执行：node tests/composer-viewport-regression.mjs。模拟键盘只改变 VisualViewport 的手机行为。
 import assert from 'node:assert/strict'
-import { attachComposerViewport, attachInlineInputViewport } from '../public/js/composer-viewport.js'
+import { attachComposerViewport, attachInlineInputViewport } from '../frontend/src/native/composer-viewport.js'
 
 const originals = { window: globalThis.window, document: globalThis.document, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame }
 const frames = new Map()
