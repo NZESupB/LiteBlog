@@ -2,7 +2,7 @@ import { api } from '../../lib/api'
 import { streamSse, formatBytes } from '../../native/utils.js'
 import { createDraftStorage } from '../../native/features/composer/draft-storage.js'
 import { normalizeMediaFiles } from '../../native/live-photo.js'
-import { isVideoFile, readVideoPoster } from '../../native/media.js'
+import { isVideoFile, materializePickedFile, readVideoPoster } from '../../native/media.js'
 import {
   uploadVideo,
   waitForVideoUpload,
@@ -33,6 +33,8 @@ const pendingStates = ['processing', 'uploading', 'selecting']
 const activeImage = (task) => task && ['queued', 'running', 'uploading'].includes(task.status)
 const preview = (draftId, name) =>
   name ? `/api/drafts/${encodeURIComponent(draftId)}/preview/${encodeURIComponent(name)}` : ''
+const failureDetail = (error) =>
+  `${error.name && error.name !== 'Error' ? `${error.name}：` : ''}${error.message || error}`
 
 // 只管理业务状态和资源，页面与 DOM 由 React 独占。卸载不代表丢弃远端草稿。
 export function createComposerService({
@@ -72,6 +74,7 @@ export function createComposerService({
     restoring: true,
     restoreError: '',
     error: '',
+    cacheWarning: '',
     saved: true,
     busy: false,
     imageTask: null,
@@ -123,6 +126,8 @@ export function createComposerService({
           needsReview: Boolean(file._needsReview),
           motionName: file._motion?.name || '',
           error: file._errMsg || '',
+          cacheError: file._cacheError || '',
+          readError: Boolean(file._readError),
         })),
     }
   }
@@ -219,7 +224,7 @@ export function createComposerService({
       if (disposed || item._removed) return
       if (!state.busy && item._status !== 'selecting' && !finished) applyVideo(item, result, needsPoster)
       emit()
-      if (item._parent?._status === 'done' && !item._parent._needsReview) await removeCached(item._parent._id)
+      if (item._parent?._cached && item._parent._status === 'done' && !item._parent._needsReview) await removeCached(item._parent._id)
       if (result.compressionPending) {
         try {
           const completed = await waitForVideoUpload(item._videoJobId, { ...options, waitForCompression: true })
@@ -255,24 +260,43 @@ export function createComposerService({
     _parent: parent,
     _file: file,
   })
+  // 本地缓存只保障刷新恢复，不作为当前会话上传的前置条件。
+  async function cacheOriginal(item, original) {
+    if (item._cached || item._cachePending) return
+    item._cachePending = true
+    try {
+      if (!(await storage.saveDraftFile(draftId, original))) throw new Error('浏览器未保存该媒体')
+      item._cached = true
+      item._cacheError = ''
+    } catch (error) {
+      item._cacheError = failureDetail(error)
+    } finally {
+      item._cachePending = false
+      if (item._cached && (item._removed || finished || (item._status === 'done' && !item._needsReview && (!item._motion || item._motion._status === 'done'))))
+        await removeCached(item._id)
+      if (!disposed && !item._removed) emit()
+    }
+  }
   async function processImage(item) {
     if (disposed || item._removed) return
     item._kind = 'image'
     item._status = 'processing'
     emit()
     const current = controller()
+    let phase = '原件读取'
     try {
       const original = item instanceof Blob ? item : item._originalFile
       if (!(original instanceof Blob)) throw new Error('请重新选择原始照片继续处理')
       original._id = item._id
-      await storage.saveDraftFile(draftId, original)
-      if (disposed || item._removed) return
+      void cacheOriginal(item, original)
+      phase = '图片格式处理'
       const compressed = await prepareImage(item._uploadStill || original)
       if (disposed || item._removed) return
       revoke(item)
       item._url = URL.createObjectURL(compressed)
       item._status = 'uploading'
       emit()
+      phase = '图片上传'
       await ready
       current.signal.throwIfAborted()
       const form = new FormData()
@@ -287,12 +311,12 @@ export function createComposerService({
       item._name = result.filename
       item._status = 'done'
       item._errMsg = ''
-      if (!item._needsReview && (!item._motion || item._motion._status === 'done'))
+      if (item._cached && !item._needsReview && (!item._motion || item._motion._status === 'done'))
         await removeCached(item._id)
     } catch (error) {
       if (!disposed && !item._removed) {
         item._status = 'error'
-        item._errMsg = error.message || '图片处理失败'
+        item._errMsg = `${phase}失败：${failureDetail(error)}`
       }
     } finally {
       controllers.delete(current)
@@ -362,6 +386,8 @@ export function createComposerService({
           _originalReady: Boolean(entry.originalReady),
           _needsReview: Boolean(entry.needsReview),
           _errMsg: entry.error || (entry.filename ? '' : '请重新选择原件继续处理'),
+          _cacheError: entry.cacheError || '',
+          _readError: Boolean(entry.readError),
         }
         state.files.push(item)
         if (entry.motion || entry.motionJobId || entry.motionStatus)
@@ -378,6 +404,7 @@ export function createComposerService({
             _fingerprint: entry.motionFingerprint || '',
           }
         for (const video of [kind === 'video' ? item : null, item._motion].filter(Boolean)) {
+          if (video._readError) continue
           const job = jobs.get(video._videoJobId),
             poster = video === item
           if (job?.status === 'done' || (job?.originalReady && job?.filename)) applyVideo(video, job, poster)
@@ -409,10 +436,16 @@ export function createComposerService({
         if (job.status === 'done' || (job.originalReady && job.filename)) applyVideo(item, job, true)
         if (job.status !== 'done' && (!job.originalReady || job.compressionPending)) void runVideo(item, null, true)
       }
-      const blobs = await storage.loadDraftFiles(draftId)
+      let blobs = []
+      try {
+        blobs = await storage.loadDraftFiles(draftId)
+      } catch (error) {
+        state.cacheWarning = `浏览器媒体缓存读取失败：${failureDetail(error)}。已保留远端草稿；未上传的原件请重新选择。`
+      }
       for (const blob of blobs) {
         if (disposed) return
         const item = state.files.find((file) => file._id === blob._id)
+        if (item) { item._cached = true; item._cacheError = '' }
         if (item?._name) {
           item._originalFile = blob
           if (item._motion?._needsFile && item._source?.pairing === 'embedded') void resumeMotion(item, blob)
@@ -422,6 +455,8 @@ export function createComposerService({
         if (disposed) return
         const restoredItem = item || blob
         restoredItem._originalFile = blob
+        restoredItem._cached = true
+        restoredItem._cacheError = ''
         restoredItem._uploadStill = group.still
         restoredItem._source ||= group.source
         restoredItem._warnings ||= group.warnings
@@ -453,23 +488,37 @@ export function createComposerService({
     const current = controller(),
       placeholder = {
         _id: newDraftId(),
-        name: `解析 ${picked.length} 个文件`,
+        name: `读取 ${picked.length} 个文件`,
         _parsing: true,
         _status: 'processing',
         _kind: 'image',
         _parseController: current,
       }
+    const readable = [], failed = []
     state.files.push(placeholder)
     emit(false)
     try {
-      for (const original of picked) {
-        if (isVideoFile(original)) continue
-        original._id ||= newDraftId()
-        await storage.saveDraftFile(draftId, original)
+      for (const original of new Set(picked)) {
+        try {
+          const file = await materializePickedFile(original, { signal: current.signal })
+          file._id = original._id || newDraftId()
+          readable.push(file)
+        } catch (error) {
+          if (current.signal.aborted) throw error
+          failed.push({
+            _id: newDraftId(), name: original.name, type: original.type,
+            _kind: isVideoFile(original) ? 'video' : 'image',
+            _status: 'error', _readError: true, _errMsg: error.message,
+          })
+        }
+        if (disposed || placeholder._removed) return
       }
-      const groups = await normalizeMediaFiles(picked, { signal: current.signal })
+      placeholder.name = `识别 ${readable.length} 个文件`
+      emit(false)
+      const groups = await normalizeMediaFiles(readable, { signal: current.signal })
       if (disposed || placeholder._removed) return
       state.files = state.files.filter((item) => item !== placeholder)
+      state.files.push(...failed)
       for (const group of groups) {
         const item = group.original || group.video || group.still
         item._id ||= newDraftId()
@@ -488,12 +537,11 @@ export function createComposerService({
     } catch (error) {
       if (!disposed && !current.signal.aborted) {
         placeholder._status = 'error'
-        placeholder._errMsg = error.message
-        fail(error)
+        placeholder._errMsg = `媒体识别失败：${failureDetail(error)}`
+        fail(new Error(placeholder._errMsg))
       }
     } finally {
       controllers.delete(current)
-      if (placeholder._removed) for (const original of picked) await removeCached(original._id)
       emit()
     }
   }
@@ -519,7 +567,8 @@ export function createComposerService({
     revoke(item)
     state.files = state.files.filter((file) => file !== item)
     emit()
-    const results = await Promise.allSettled([...cleanup, removeCached(item._id)])
+    if (item._cached) cleanup.push(removeCached(item._id))
+    const results = await Promise.allSettled(cleanup)
     for (const result of results)
       if (result.status === 'rejected') fail(new Error(`媒体已移除，但清理失败：${result.reason.message}`))
   }
@@ -541,7 +590,7 @@ export function createComposerService({
       item._needsReview = false
       item._source = { ...item._source, pairing: 'static' }
       item._warnings = [{ code: 'STATIC_ONLY', message: '已选择仅保留静态图', blocking: false }]
-      await removeCached(item._id)
+      if (item._cached) await removeCached(item._id)
     } catch (error) {
       if (motion) {
         motion._removed = false

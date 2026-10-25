@@ -162,7 +162,11 @@ function ComposerForm({
       <div className="compose-heading">
         <span>{editing ? '编辑这段日常' : '今天，有什么想记住的？'}</span>
         <span className="draft-save-state" aria-live="polite">
-          {state.restoring ? '正在恢复草稿…' : state.saved ? '已保存到此浏览器' : '浏览器缓存不可用'}
+          {state.restoring
+            ? '正在恢复草稿…'
+            : state.saved
+              ? '正文已保存到此浏览器'
+              : '正文未能保存到此浏览器'}
         </span>
       </div>
       <div ref={toolbar} className="md-toolbar" role="toolbar" aria-label="Markdown 格式">
@@ -350,13 +354,19 @@ function ComposerForm({
           <Preview key={item._id || item.id} item={item} service={service} busy={state.busy} />
         ))}
       </div>
+      {state.cacheWarning && (
+        <p className="form-message" data-state="warning" role="status">
+          {state.cacheWarning}
+        </p>
+      )}
       <div className="storage-hint" aria-live="polite">
         {state.files.map((item) => (
           <MediaDetails key={item._id} item={item} service={service} busy={state.busy} />
         ))}
       </div>
       <p className="storage-hint live-photo-help">
-        实况照片请选择原件；iPhone 请同时选择照片和配对 MOV。系统只提供静态图时，无法恢复动态内容。
+        实况照片需先导出原件，再从“文件”同时选择照片与配对
+        MOV。照片图库可能只提供静态图，网页无法恢复未收到的动态内容。
       </p>
       <p className="form-error" role="alert">
         {state.restoreError ? `恢复草稿失败：${state.restoreError}` : state.error}
@@ -518,14 +528,27 @@ function MediaDetails({
   service: ComposerService
   busy: boolean
 }) {
+  const replacement = useRef<HTMLInputElement>(null)
   return (
     <>
+      {item._cacheError && (
+        <p className="form-message" data-state="warning" role="status">
+          {item.name || '照片'}的浏览器媒体缓存失败：{item._cacheError}
+          。当前仍可上传；上传完成前关闭或刷新页面，可能需要重新选择原件。
+        </p>
+      )}
       {Boolean(item._warnings?.length || item._status === 'error' || item._motion) && (
         <div className="live-photo-notice">
-          <p>
-            {item.name || '照片'}：
-            {item._warnings?.map((warning) => warning.message).join('；') || item._errMsg || '实况照片'}
-          </p>
+          {Boolean(item._warnings?.length) && (
+            <p>
+              {item.name || '照片'}：{item._warnings?.map((warning) => warning.message).join('；')}
+            </p>
+          )}
+          {item._status === 'error' && (
+            <p className="form-error" role="alert">
+              {item.name || '媒体'}：{item._errMsg || '处理失败'}
+            </p>
+          )}
           {item._kind !== 'video' && item._status === 'done' && (item._motion || item._needsReview) && (
             <button
               type="button"
@@ -536,38 +559,49 @@ function MediaDetails({
               仅保留静态图
             </button>
           )}
-          {item._kind !== 'video' && item._status === 'error' && !item._parsing && (
+          {(item._kind !== 'video' || item._readError) && item._status === 'error' && !item._parsing && (
             <>
+              {!item._readError && (
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  disabled={busy}
+                  onClick={() => service.retryImage(item)}
+                >
+                  重试图片
+                </button>
+              )}
               <button
                 type="button"
                 className="btn-ghost"
                 disabled={busy}
-                onClick={() => service.retryImage(item)}
+                onClick={() => replacement.current?.click()}
               >
-                重试图片
-              </button>
-              <label className="btn-ghost">
                 重新选择原件
-                <input
-                  type="file"
-                  hidden
-                  accept="image/*,.heic,.heif"
-                  disabled={busy}
-                  onChange={async (event) => {
-                    const files = [...(event.target.files || [])]
-                    event.target.value = ''
-                    if (files.length) {
-                      await service.remove(item)
-                      await service.addFiles(files)
-                    }
-                  }}
-                />
-              </label>
+              </button>
+              <input
+                ref={replacement}
+                type="file"
+                hidden
+                accept={
+                  item._readError ? 'image/*,video/*,.heic,.heif,.avif,.mov,.mp4' : 'image/*,.heic,.heif'
+                }
+                multiple={item._readError}
+                disabled={busy}
+                onChange={async (event) => {
+                  const files = [...(event.target.files || [])]
+                  event.target.value = ''
+                  if (files.length) {
+                    await service.remove(item)
+                    await service.addFiles(files)
+                  }
+                }}
+              />
             </>
           )}
         </div>
       )}
-      {[item._kind === 'video' ? item : null, item._motion]
+      {[item._kind === 'video' && !item._readError ? item : null, item._motion]
         .filter((video): video is DraftMedia => Boolean(video))
         .map((video) => (
           <VideoDetails

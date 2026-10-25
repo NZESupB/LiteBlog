@@ -41,6 +41,30 @@ export function videoContentType(file) {
   return 'video/mp4'
 }
 
+// 小文件先读取字节，脱离照片提供器的临时文件；大文件只预检，不全量复制到内存。
+export async function materializePickedFile(file, { signal } = {}) {
+  signal?.throwIfAborted()
+  try {
+    if (!file.size) throw new Error('收到空文件，原件可能尚未下载完成')
+    if (file.size <= 32 * 1024 * 1024) {
+      const bytes = await file.arrayBuffer()
+      signal?.throwIfAborted()
+      if (bytes.byteLength !== file.size) throw new Error('原件读取不完整')
+      return new File([bytes], file.name, { type: file.type, lastModified: file.lastModified })
+    }
+    const count = 64 * 1024
+    for (const offset of [0, file.size - count]) {
+      const bytes = await file.slice(offset, offset + count).arrayBuffer()
+      signal?.throwIfAborted()
+      if (bytes.byteLength !== count) throw new Error('原件读取不完整')
+    }
+    return file
+  } catch (error) {
+    if (signal?.aborted) throw error
+    throw new Error(`原件读取失败：${error.message || error}。请先下载或导出原件，再从“文件”重新选择。`, { cause: error })
+  }
+}
+
 // 秒钟 → 封面角标用的 m:ss
 export function formatDuration(seconds) {
   const total = Math.max(0, Math.round(Number(seconds) || 0))

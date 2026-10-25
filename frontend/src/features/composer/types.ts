@@ -46,6 +46,8 @@ export interface DraftMedia {
   _status?: string
   _originalReady?: boolean
   _errMsg?: string
+  _cacheError?: string
+  _readError?: boolean
   _motion?: DraftMedia | null
   _duration?: number
   _jobId?: string
@@ -80,6 +82,7 @@ export interface ComposerState {
   restoring: boolean
   restoreError: string
   error: string
+  cacheWarning: string
   saved: boolean
   busy: boolean
   imageBusy: boolean
