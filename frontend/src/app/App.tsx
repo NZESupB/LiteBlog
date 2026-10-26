@@ -44,13 +44,7 @@ export function App() {
         </Routes>
       </Layout>
       {composer && (
-        <Suspense
-          fallback={
-            <div className="toast" role="status">
-              正在打开写作面板…
-            </div>
-          }
-        >
+        <Suspense fallback={null}>
           <ComposerDialog post={composer.post} origin={composer.origin} />
         </Suspense>
       )}

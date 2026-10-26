@@ -422,3 +422,259 @@ test('Live 点击后持续循环，停止、切图和关闭释放视频', async 
   await expect(page.locator('#lightbox')).not.toBeVisible()
   expect(errors).toEqual([])
 })
+
+const pickerPlatforms = [
+  {
+    name: 'iPhone',
+    ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)',
+    platform: 'iPhone',
+    touch: 5,
+    apple: true,
+    ios: true,
+    mobile: true,
+  },
+  {
+    name: 'iPadOS 桌面标识',
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)',
+    platform: 'MacIntel',
+    touch: 5,
+    apple: true,
+    ios: true,
+    mobile: true,
+  },
+  {
+    name: 'macOS',
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15)',
+    platform: 'MacIntel',
+    touch: 0,
+    apple: true,
+    ios: false,
+    mobile: false,
+  },
+  {
+    name: 'Android',
+    ua: 'Mozilla/5.0 (Linux; Android 15)',
+    platform: 'Linux armv8l',
+    touch: 5,
+    apple: false,
+    ios: false,
+    mobile: true,
+  },
+  {
+    name: 'Windows',
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    platform: 'Win32',
+    touch: 0,
+    apple: false,
+    ios: false,
+    mobile: false,
+  },
+  {
+    name: 'Linux',
+    ua: 'Mozilla/5.0 (X11; Linux x86_64)',
+    platform: 'Linux x86_64',
+    touch: 0,
+    apple: false,
+    ios: false,
+    mobile: false,
+  },
+]
+for (const device of pickerPlatforms) {
+  test(`${device.name} 媒体入口、文件选择与取消保护`, async ({ page }) => {
+    await page.addInitScript((device) => {
+      Object.defineProperties(navigator, {
+        userAgent: { value: device.ua, configurable: true },
+        platform: { value: device.platform, configurable: true },
+        maxTouchPoints: { value: device.touch, configurable: true },
+      })
+    }, device)
+    await login(page)
+    await compose(page)
+    await expect(page.locator('.toast').filter({ hasText: '正在打开写作面板' })).toHaveCount(0)
+    await expect(page.locator('.pick-live-file')).toHaveCount(device.apple ? 1 : 0)
+    await expect(page.locator('.camera-input')).toHaveCount(device.mobile ? 1 : 0)
+    await expect(page.locator('.album-input')).toHaveAttribute(
+      'accept',
+      device.ios
+        ? 'image/*'
+        : device.mobile
+          ? 'image/*,video/*'
+          : 'image/*,video/*,.heic,.heif,.avif,.mov,.mp4',
+    )
+    await expect(page.locator('.album-input')).not.toHaveAttribute('capture')
+    if (device.ios)
+      await expect(page.locator('.live-photo-help')).toContainText('iOS系统下，仅能上传静态图片。')
+    if (device.apple) {
+      const choosing = page.waitForEvent('filechooser')
+      await page.locator('.pick-live-file').click()
+      const chooser = await choosing
+      expect(await chooser.element().getAttribute('class')).toContain('originals-input')
+      expect(chooser.isMultiple()).toBe(true)
+      await chooser.setFiles([])
+      await page.locator('.originals-input').dispatchEvent('cancel', { bubbles: true })
+      await expect(page.locator('.composer-overlay')).toHaveAttribute('open', '')
+      await expect(page.locator('.preview-item')).toHaveCount(0)
+      await expect(page.locator('body')).toHaveClass(/modal-open/)
+      await page.locator('.live-photo-guide summary').focus()
+      await page.keyboard.press('Enter')
+      await expect(page.locator('.live-photo-guide')).toHaveAttribute('open', '')
+      await expect(page.locator('.live-photo-guide')).toContainText('同批选中原照片和配套 MOV')
+    }
+    await page.locator('.album-input').dispatchEvent('cancel', { bubbles: true })
+    await expect(page.locator('.composer-overlay')).toHaveAttribute('open', '')
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.composer-overlay')).toHaveCount(0)
+    await expect(page.locator('body')).not.toHaveClass(/modal-open/)
+  })
+}
+
+test('网页丢弃确认取消保留草稿、删除失败可重试、提交防重复', async ({ page }) => {
+  const errors: string[] = []
+  let nativeDialogs = 0
+  page.on('pageerror', (error) => errors.push(error.message))
+  page.on('dialog', async (dialog) => {
+    nativeDialogs++
+    await dialog.dismiss()
+  })
+  await login(page)
+  await compose(page)
+  await page.getByLabel('动态正文').fill('丢弃确认前的正文')
+  await page.locator('.album-input').setInputFiles('public/images/journal-cover.jpg')
+  await expect(page.locator('.upload-badge')).toBeVisible()
+  const discard = page.locator('.discard-draft')
+  const confirmation = page.getByRole('alertdialog', { name: '确定丢弃这篇草稿？' })
+  for (const action of ['button', 'escape', 'backdrop']) {
+    await discard.click()
+    await expect(confirmation).toBeVisible()
+    await expect(confirmation.getByRole('button', { name: '继续编辑' })).toBeFocused()
+    if (action === 'button') await confirmation.getByRole('button', { name: '继续编辑' }).click()
+    else if (action === 'escape') await page.keyboard.press('Escape')
+    else await page.locator('.confirm-overlay').click({ position: { x: 3, y: 3 } })
+    await expect(confirmation).toHaveCount(0)
+    await expect(page.getByLabel('动态正文')).toHaveValue('丢弃确认前的正文')
+    await expect(page.locator('.upload-badge')).toBeVisible()
+    await expect(discard).toBeFocused()
+    await expect(page.locator('body')).toHaveClass(/modal-open/)
+  }
+  let deletes = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/api/drafts/*', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.continue()
+    deletes++
+    if (deletes === 1) {
+      await gate
+      return route.fulfill({ status: 503, json: { error: '测试删除失败' } })
+    }
+    await route.continue()
+  })
+  await discard.click()
+  await confirmation.getByRole('button', { name: '丢弃草稿', exact: true }).click()
+  await expect(confirmation.getByRole('button', { name: '正在丢弃…' })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(confirmation).toBeVisible()
+  expect(deletes).toBe(1)
+  release()
+  await expect(confirmation.getByRole('alert')).toContainText('测试删除失败')
+  await expect(confirmation.getByRole('button', { name: '丢弃草稿', exact: true })).toBeEnabled()
+  await confirmation.getByRole('button', { name: '继续编辑' }).click()
+  await expect(page.getByLabel('动态正文')).toHaveValue('丢弃确认前的正文')
+  await discard.click()
+  await confirmation.getByRole('button', { name: '丢弃草稿', exact: true }).click()
+  await expect(confirmation).toHaveCount(0)
+  await expect(page.locator('.composer-overlay')).toHaveCount(0)
+  await expect(page.locator('body')).not.toHaveClass(/modal-open/)
+  expect(deletes).toBe(2)
+  await compose(page)
+  await expect(page.getByLabel('动态正文')).toHaveValue('')
+  await expect(page.locator('.preview-item')).toHaveCount(0)
+  await discard.click()
+  await page.evaluate(() => {
+    location.hash = '#/settings'
+  })
+  await expect(page.locator('.confirm-overlay')).toHaveCount(0)
+  await expect(page.locator('body')).not.toHaveClass(/modal-open/)
+  expect(nativeDialogs).toBe(0)
+  expect(errors).toEqual([])
+})
+
+test('Apple 文件入口同批配对照片与空 MIME MOV、重复选图', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperties(navigator, {
+      platform: { value: 'MacIntel', configurable: true },
+      maxTouchPoints: { value: 5, configurable: true },
+    })
+  })
+  await login(page)
+  await compose(page)
+  await page.getByLabel('动态正文').fill('文件入口 Live 双资源回归')
+  const photo = await (await page.request.get('/images/journal-cover.jpg')).body()
+  const movie = await (await page.request.get('/__test/video')).body()
+  await page.locator('.originals-input').setInputFiles([
+    { name: 'IMG_4321.jpg', mimeType: 'image/jpeg', buffer: photo },
+    { name: 'IMG_4321.MOV', mimeType: '', buffer: movie },
+  ])
+  await expect(page.locator('.preview-item')).toHaveCount(1)
+  await expect(page.locator('.preview-item .media-live')).toBeVisible()
+  await expect(page.getByRole('button', { name: '发布', exact: true })).toBeEnabled({ timeout: 30000 })
+  await expect(page.locator('.originals-input')).toHaveValue('')
+  await page.getByRole('button', { name: '发布', exact: true }).click()
+  await expect(page.locator('.composer-overlay')).toHaveCount(0)
+  await expect(page.locator('.post-content').first()).toContainText('文件入口 Live 双资源回归')
+  await expect(page.locator('.post').first().locator('.media-live')).toBeVisible()
+  await compose(page)
+  for (let count = 1; count <= 2; count++) {
+    await page
+      .locator('.originals-input')
+      .setInputFiles({ name: 'repeat.jpg', mimeType: 'image/jpeg', buffer: photo })
+    await expect(page.locator('.upload-badge')).toHaveCount(count)
+    await expect(page.locator('.originals-input')).toHaveValue('')
+  }
+})
+
+test('Apple 指南与网页确认的四种宽度、明暗和减少动态', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperties(navigator, {
+      platform: { value: 'MacIntel', configurable: true },
+      maxTouchPoints: { value: 5, configurable: true },
+    })
+  })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await login(page)
+  for (const width of [320, 390, 820, 1280]) {
+    await page.setViewportSize({ width, height: 900 })
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate((theme) => {
+        document.documentElement.dataset.theme = theme
+      }, theme)
+      const desktop = page.locator('.journal-heading-actions button')
+      await ((await desktop.isVisible()) ? desktop : page.locator('.mobile-compose')).click()
+      await expect(page.locator('.discard-draft')).toBeEnabled()
+      await page.locator('.live-photo-guide summary').click()
+      await expect(page.locator('.live-photo-guide')).toHaveAttribute('open', '')
+      const file = page.locator('.pick-live-file')
+      await file.scrollIntoViewIfNeeded()
+      const box = (await file.boundingBox())!
+      expect(box.height).toBeGreaterThanOrEqual(44)
+      expect(box.x).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width).toBeLessThanOrEqual(width + 1)
+      expect(
+        await page.locator('.composer-body').evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
+      ).toBe(true)
+      await page.locator('.discard-draft').click()
+      await expect(page.getByRole('alertdialog')).toBeVisible()
+      const surface = (await page.locator('.confirm-dialog').boundingBox())!
+      expect(surface.x).toBeGreaterThanOrEqual(0)
+      expect(surface.x + surface.width).toBeLessThanOrEqual(width + 1)
+      expect(
+        await page.locator('.confirm-overlay').evaluate((node) => getComputedStyle(node).backgroundColor),
+      ).not.toBe('rgba(0, 0, 0, 0)')
+      await page.getByRole('button', { name: '继续编辑' }).click()
+      await expect(page.getByRole('alertdialog')).toHaveCount(0)
+      await page.getByRole('button', { name: '关闭', exact: true }).click()
+      await expect(page.locator('.composer-overlay')).toHaveCount(0)
+    }
+  }
+})

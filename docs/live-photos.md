@@ -4,31 +4,56 @@
 
 ## 选择文件
 
-- iPhone/iPad：可从相册入口选择照片或视频；能否保留 Live Photo 取决于系统实际交付的资源。网页收到完整单文件或照片与配套 MOV 时会解析并上传；如果系统只交付静态图，网页不能额外读取照片库中的 MOV。有 Apple 内容标识时允许文件改名；标识缺失时仅对唯一的同名照片、视频配对。
+- iPhone/iPad：相册入口仅选择图片，并显示“iOS系统下，仅能上传静态图片。”；保留实况请使用新增“文件”按钮，同批选择未修改的原照片和配套 MOV。macOS 同样提供“文件”入口。网页不能额外读取系统未交付的动态资源；有 Apple 内容标识时允许改名，标识缺失时仅对唯一同名照片、视频配对。
 - 小米、Pixel 和其他 Android：选择相册导出的**实况原件**。标准单文件会自动拆出封面和内嵌视频，不需要预先转换为视频。
 - 系统文件选择器、聊天软件或相册分享若只交付静态图，网页无法还原缺失视频。普通静态图正常上传；原图含实况标记却缺少视频时，会说明原因，并提供“重新选择原件”或“仅保留静态图”。
 - 缺失动态、解析错误及图片/视频失败都会阻止发布。动态可重试或重选原件续传，封面成功后也可明确选择仅保留静态图。多个同名候选或标识冲突保持独立，避免误配。
 
 ## Web / H5 / PWA 的选择配置
 
-当前项目使用 React Web，没有原生照片库权限或 WebView 桥接。桌面平台只显示“选择照片或视频”，由浏览器打开系统媒体文件面板；iPhone、iPadOS、Android 保留相册和独立拍照入口。平台判断仅影响入口展示，iPadOS 的桌面标识结合多点触控仍按移动设备处理，不用屏幕宽度或是否连接鼠标判断媒体能力。
+当前项目使用 React Web，没有原生照片库权限或 WebView 桥接。iOS/iPadOS 提供图片、文件和拍照入口；macOS 提供媒体与文件入口；Android 保留媒体相册和拍照入口；Windows/Linux 保留媒体入口。iPadOS 的桌面标识结合多点触控识别，不用窗口宽度或鼠标判断平台。
 
 ```html
 <!-- 同一媒体入口：桌面补充原件扩展名，兼容系统缺少 MIME 映射。 -->
 <input type="file" accept="image/*,video/*,.heic,.heif,.avif,.mov,.mp4" multiple>
 
-<!-- 移动相册入口：只声明照片/视频，不设置 capture。 -->
-<input type="file" accept="image/*,video/*" multiple>
+<!-- iOS/iPadOS 相册：图片；Android 相册仍为 image/*,video/*。 -->
+<input type="file" accept="image/*" multiple>
+
+<!-- Apple Live 原片文件入口：同批选择照片和配套 MOV，无 capture。 -->
+<input type="file" accept="image/*,video/*,.heic,.heif,.avif,.jpg,.jpeg,.mov,.mp4" multiple>
 
 <!-- 独立拍照入口：仅用于用户明确要求调用相机。 -->
 <input type="file" accept="image/*" capture="environment">
 ```
 
-实际实现位于 `frontend/src/features/composer/ComposerDialog.tsx`：按钮在用户点击事件内同步调用对应 input 的 `click()`；`addPickedFiles()` 先复制 FileList、再清空 input，只有非空选择才调用既有 `service.addFiles()`。取消不上传、不改变正文或已有媒体；两个入口继续共用读取、解析配对和上传流程。桌面不显示会退回文件选择器的拍照入口，不申请桌面摄像头权限。
+实际实现位于 `frontend/src/features/composer/ComposerDialog.tsx`：按钮在用户点击事件内同步调用对应 input 的 `click()`；`addPickedFiles()` 先复制 FileList、再清空 input，只有非空选择才调用既有 `service.addFiles()`。取消不上传、不改变正文或已有媒体，全部入口共用读取、解析配对和上传。桌面不申请摄像头权限。
 
-`accept` 是文件类型提示，不是照片库专用 API。桌面唯一入口同时声明媒体 MIME 与原件扩展名，避免依赖系统是否注册 HEIC/MOV 等类型；移动端继续使用媒体通配过滤。两种配置都**不保证隐藏**“照片图库 / 拍摄照片或视频 / 选择文件”或第三方提供器。WebKit 的文件上传面板会根据媒体类型、设备及 capture 配置决定菜单；`capture="environment"` 指向相机，不能用于强制打开相册，`capture="false"` 也不等于移除该属性。`showPicker()` 或 `click()` 仍调用浏览器的选择器，不会授予网页 PhotoKit 权限。
+`accept` 是文件类型提示，不是照片库专用 API。媒体与原片文件入口的扩展名过滤用于兼容缺失 MIME 映射；iOS 相册仅使用 image/*。这些配置都**不保证隐藏**“照片图库 / 拍摄照片或视频 / 选择文件”。`capture="environment"` 指向相机，`capture="false"` 不等于移除属性；`showPicker()` 或 `click()` 不会授予 PhotoKit 权限。文件入口遇到系统菜单时，选择“选取文件／浏览”。
 
 浏览器返回转码后的静态 JPEG 且未携带实况标识时，网页无法可靠区分它与普通静态照片。不能据此承诺动态已保留，也不能把所有普通图片都当成“缺 MOV”。已识别的缺动态与配对冲突继续要求处理，不能静默发布为完整实况。
+
+## Apple Live 图片上传指南
+
+网页帮助区提供可展开的“Live 图片上传指南”，相册静态提示只描述 iOS/iPadOS 的相册入口；Apple 文件入口仍可上传完整双资源。
+
+### iPhone / iPad
+1. 在“照片”App 中打开实况照片。
+2. 轻点“共享”按钮（方框向上箭头），不固定位置。
+3. 选择“导出未修改的原片”。
+4. 在保存界面选择文件夹并保存；若显示“存储到文件”，按提示继续。确认包含原照片（HEIC/JPG）和配套 MOV。
+5. 返回本站点击“文件”；若出现系统来源菜单，选择“选取文件／浏览”，进入保存的文件夹，**同批选择原照片和配套 MOV**。
+
+菜单及保存位置随系统版本与存储条件变化。Apple 官方移动端导出示例针对外置存储，不能保证各版本都可按相同路径保存到本机；没有对应选项时可在 Mac 导出后上传。普通分享或“存储到文件”不保证包含 MOV。上传仅选择照片和对应 MOV，不需要 XMP/AAE。
+
+### Mac
+在“照片”App 选中实况照片，选择“文件 → 导出 → 导出未修改的原片”，保存到文件夹。Live Photo 导出为照片和视频两个文件，返回本站点击“文件”后同批选择。原片导出依据：
+
+```text
+https://support.apple.com/zh-cn/guide/iphone/iph480caa1f3/ios
+https://support.apple.com/zh-cn/guide/ipad/ipad99c6eb3e/ipados
+https://support.apple.com/zh-cn/guide/photos/pht6e157c5f/mac
+```
 
 ## 取消选择与编辑框
 

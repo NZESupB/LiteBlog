@@ -1,20 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect } from 'react'
 import { useApp } from './AppProviders'
+import { errorMessage } from '../lib/types'
 
 export function UpdatePrompt() {
-  const { composer } = useApp()
-  const [waiting, setWaiting] = useState<ServiceWorker | null>(null)
-  const [stale, setStale] = useState(false)
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
-  const requested = useRef(false)
+  const { toast } = useApp()
   useEffect(() => {
     if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return
     let active = true
+    let controlled = Boolean(navigator.serviceWorker.controller)
+    let reloading = false
     let registration: ServiceWorkerRegistration | undefined
     let worker: ServiceWorker | null = null
+    const reloadOnce = () => {
+      if (!active || reloading) return
+      reloading = true
+      location.reload()
+    }
     const inspect = () => {
-      if (active && registration?.waiting) setWaiting(registration.waiting)
+      const waiting = registration?.waiting
+      if (active && waiting && waiting.state !== 'redundant') waiting.postMessage({ type: 'SKIP_WAITING' })
     }
     const installed = () => {
       if (worker?.state === 'installed') inspect()
@@ -23,14 +27,35 @@ export function UpdatePrompt() {
       worker?.removeEventListener('statechange', installed)
       worker = registration?.installing || null
       worker?.addEventListener('statechange', installed)
+      installed()
     }
     const changed = () => {
-      if (requested.current) location.reload()
-      else setWaiting(null)
+      const upgrading = controlled
+      controlled = Boolean(navigator.serviceWorker.controller)
+      if (upgrading && controlled) reloadOnce()
+    }
+    const report = (failure: unknown) => {
+      if (active) toast(`离线资源更新失败：${errorMessage(failure)}`)
+    }
+    const check = async () => {
+      if (!registration) return
+      await registration.update()
+      inspect()
     }
     const failed = (event: Event) => {
+      const payload = (event as Event & { payload?: unknown }).payload
+      const resource = errorMessage(payload) || location.href
+      // 同一缺失资源在当前标签页只自动恢复一次；持续失败交还错误边界。
+      try {
+        const key = 'couple-blog-preload-recovery'
+        const recovered = JSON.parse(sessionStorage.getItem(key) || '[]') as string[]
+        if (recovered.includes(resource)) return
+        sessionStorage.setItem(key, JSON.stringify([...recovered, resource]))
+      } catch {
+        return
+      }
       event.preventDefault()
-      setStale(true)
+      void check().catch(report).finally(reloadOnce)
     }
     navigator.serviceWorker.addEventListener('controllerchange', changed)
     window.addEventListener('vite:preloadError', failed)
@@ -39,52 +64,23 @@ export function UpdatePrompt() {
       .then((result) => {
         if (!active) return
         registration = result
+        registration.addEventListener('updatefound', found)
         inspect()
         found()
-        registration.addEventListener('updatefound', found)
       })
-      .catch((failure: Error) => {
-        if (active) setError(`离线资源更新失败：${failure.message}`)
-      })
-    const check = () => {
-      if (document.visibilityState === 'visible') void registration?.update().catch(() => {})
+      .catch(report)
+    const visible = () => {
+      if (document.visibilityState === 'visible') void check().catch(report)
     }
-    document.addEventListener('visibilitychange', check)
+    document.addEventListener('visibilitychange', visible)
     return () => {
       active = false
       registration?.removeEventListener('updatefound', found)
       worker?.removeEventListener('statechange', installed)
       navigator.serviceWorker.removeEventListener('controllerchange', changed)
       window.removeEventListener('vite:preloadError', failed)
-      document.removeEventListener('visibilitychange', check)
+      document.removeEventListener('visibilitychange', visible)
     }
-  }, [])
-  if (!waiting && !stale && !error) return null
-  return (
-    <aside className="update-prompt" role="status">
-      <span>
-        {error || (composer ? '新版本已就绪，关闭写作面板后即可更新。' : '新版本已就绪，草稿会保留。')}
-      </span>
-      {!error && (
-        <button
-          className="btn-ghost"
-          disabled={Boolean(composer) || busy}
-          onClick={() => {
-            setBusy(true)
-            if (waiting && waiting.state !== 'redundant') {
-              requested.current = true
-              waiting.postMessage({ type: 'SKIP_WAITING' })
-            } else location.reload()
-          }}
-        >
-          {busy ? '正在更新…' : '更新并重新加载'}
-        </button>
-      )}
-      {error && (
-        <button className="btn-ghost" onClick={() => setError('')}>
-          关闭提示
-        </button>
-      )}
-    </aside>
-  )
+  }, [toast])
+  return null
 }

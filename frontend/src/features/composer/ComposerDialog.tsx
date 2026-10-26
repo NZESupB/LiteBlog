@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
 import {
   Bold,
   Italic,
@@ -14,12 +14,14 @@ import {
   Smile,
   Sparkles,
   Image,
+  FileUp,
   Camera,
   Lock,
   Play,
   Check,
 } from 'lucide-react'
 import { useApp } from '../../app/AppProviders'
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import type { Post } from '../../lib/types'
 import { createComposerService, draftIdFor, uploadProgressText } from './composer-service.js'
 import { createDialog } from '../../native/ui/dialog.js'
@@ -133,8 +135,11 @@ function ComposerForm({
   const textarea = useRef<HTMLTextAreaElement>(null),
     toolbar = useRef<HTMLDivElement>(null),
     album = useRef<HTMLInputElement>(null),
+    originals = useRef<HTMLInputElement>(null),
     camera = useRef<HTMLInputElement>(null),
     result = useRef<HTMLDivElement>(null)
+  const livePhotoHelpId = useId()
+  const [discardOpen, setDiscardOpen] = useState(false)
   const resizeDrag = useRef<{ y: number; height: number } | null>(null)
   useEffect(() => attachMdToolbar(toolbar.current!, textarea.current!), [])
   useEffect(() => {
@@ -152,13 +157,19 @@ function ComposerForm({
     event.currentTarget.value = ''
     if (files.length) void service.addFiles(files)
   }
-  // 仅调整入口展示；iPadOS 桌面标识配合多点触控仍按移动设备处理。
-  const mobilePicker =
-    /Android|iPhone|iPad|iPod/.test(navigator.userAgent) ||
+  // iPadOS 的桌面标识仍按触屏 Apple 设备处理，不依赖窗口宽度。
+  const iosPicker =
+    /iPhone|iPad|iPod/.test(navigator.userAgent) ||
     (/Mac/.test(navigator.platform) && navigator.maxTouchPoints > 1)
-  const pickerLabel = mobilePicker ? '从相册选择照片或视频' : '选择照片或视频'
-  // 桌面唯一入口保留扩展名过滤，兼容系统缺少 HEIC/MOV MIME 映射。
-  const pickerAccept = mobilePicker ? 'image/*,video/*' : 'image/*,video/*,.heic,.heif,.avif,.mov,.mp4'
+  const macPicker = !iosPicker && (/Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent))
+  const applePicker = iosPicker || macPicker
+  const mobilePicker = iosPicker || /Android/.test(navigator.userAgent)
+  const pickerLabel = iosPicker ? '从相册选择图片' : mobilePicker ? '从相册选择照片或视频' : '选择照片或视频'
+  const pickerAccept = iosPicker
+    ? 'image/*'
+    : mobilePicker
+      ? 'image/*,video/*'
+      : 'image/*,video/*,.heic,.heif,.avif,.mov,.mp4'
   const guard = service.publishGuard(),
     task = state.imageTask
   const activeTask = Boolean(task && ['queued', 'running', 'uploading'].includes(task.status))
@@ -376,10 +387,55 @@ function ComposerForm({
           <MediaDetails key={item._id} item={item} service={service} busy={state.busy} />
         ))}
       </div>
-      <p className="storage-hint live-photo-help">
-        {mobilePicker ? '可从相册选择照片或视频。' : '可选择照片或视频文件。'}
-        实况需包含动态资源；系统只提供静态图时无法保留实况效果。
-      </p>
+      <div className="storage-hint live-photo-help" id={livePhotoHelpId}>
+        {iosPicker && (
+          <p>
+            <strong>从相册选择：</strong>iOS系统下，仅能上传静态图片。
+          </p>
+        )}
+        {applePicker ? (
+          <>
+            <p>
+              <strong>上传 Live 照片：</strong>请先导出未修改的原片，再点击“文件”，同批选择原照片和配套 MOV。
+            </p>
+            <details className="live-photo-guide">
+              <summary>Live 图片上传指南</summary>
+              <h3>iPhone / iPad</h3>
+              <ol>
+                <li>在“照片”App 中打开需要上传的实况照片。</li>
+                <li>轻点“共享”按钮（方框向上箭头）。</li>
+                <li>在菜单中选择“导出未修改的原片”。</li>
+                <li>
+                  在保存界面选择文件夹并保存；若显示“存储到文件”，按提示继续选择位置。确认导出结果包含原照片（HEIC/JPG）和配套
+                  MOV。
+                </li>
+                <li>
+                  返回本站，点击“文件”。若出现系统来源菜单，选择“选取文件／浏览”，进入刚才的文件夹，
+                  <strong>同批选中原照片和配套 MOV</strong> 后上传。
+                </li>
+              </ol>
+              <h3>Mac</h3>
+              <ol>
+                <li>在“照片”App 中选中实况照片，选择“文件 → 导出 → 导出未修改的原片”。</li>
+                <li>选择保存文件夹，完成导出。Live Photo 会包含静态照片和视频两个文件。</li>
+                <li>返回本站点击“文件”，同批选择这两个文件上传。</li>
+              </ol>
+              <p>
+                菜单名称和保存位置随系统版本及存储条件变化；没有“导出未修改的原片”时，可在 Mac 上导出后上传。
+              </p>
+              <p>
+                仅选择照片或普通“存储到文件”的结果，不保证包含 Live 动态资源，请确认 MOV
+                一并导出。上传时只选择照片和对应 MOV，无需附带 XMP/AAE 等辅助文件。
+              </p>
+            </details>
+          </>
+        ) : (
+          <p>
+            {mobilePicker ? '可从相册选择照片或视频。' : '可选择照片或视频文件。'}
+            实况需包含动态资源；系统只提供静态图时无法保留实况效果。
+          </p>
+        )}
+      </div>
       <p className="form-error" role="alert">
         {state.restoreError ? `恢复草稿失败：${state.restoreError}` : state.error}
       </p>
@@ -394,6 +450,20 @@ function ComposerForm({
         >
           <Image className="icon" />
         </button>
+        {applePicker && (
+          <button
+            className="btn-ghost pick-live-file"
+            type="button"
+            aria-label="从文件导入 Live 原片"
+            title="从文件导入 Live 原片"
+            aria-describedby={livePhotoHelpId}
+            disabled={state.busy || state.restoring}
+            onClick={() => originals.current?.click()}
+          >
+            <FileUp className="icon" />
+            <span>文件</span>
+          </button>
+        )}
         {mobilePicker && (
           <button
             className="btn-ghost camera"
@@ -442,8 +512,9 @@ function ComposerForm({
             className="btn-ghost discard-draft"
             type="button"
             disabled={state.busy || state.restoring}
-            onClick={async () => {
-              if (confirm('确定丢弃这篇未发布的草稿吗？') && (await service.discard())) onClose()
+            onClick={(event) => {
+              event.currentTarget.focus({ preventScroll: true })
+              setDiscardOpen(true)
             }}
           >
             丢弃草稿
@@ -463,6 +534,18 @@ function ComposerForm({
         disabled={state.busy || state.restoring}
         onChange={addPickedFiles}
       />
+      {applePicker && (
+        <input
+          ref={originals}
+          className="hidden-input originals-input"
+          type="file"
+          accept="image/*,video/*,.heic,.heif,.avif,.jpg,.jpeg,.mov,.mp4"
+          multiple
+          hidden
+          disabled={state.busy || state.restoring}
+          onChange={addPickedFiles}
+        />
+      )}
       {mobilePicker && (
         <input
           ref={camera}
@@ -473,6 +556,23 @@ function ComposerForm({
           hidden
           disabled={state.busy || state.restoring}
           onChange={addPickedFiles}
+        />
+      )}
+      {discardOpen && (
+        <ConfirmDialog
+          title="确定丢弃这篇草稿？"
+          description="丢弃后，未发布的正文和媒体将被移除。"
+          confirmLabel="丢弃草稿"
+          cancelLabel="继续编辑"
+          onConfirm={async () => {
+            if (!(await service.discard())) {
+              throw new Error(service.getState().error || '丢弃草稿失败，请重试。')
+            }
+          }}
+          onClose={(confirmed) => {
+            setDiscardOpen(false)
+            if (confirmed) onClose()
+          }}
         />
       )}
     </form>

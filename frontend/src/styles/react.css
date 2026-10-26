@@ -311,30 +311,69 @@ form.settings-card,
 .settings-card .theme-option {
   display: inline-flex;
 }
-.update-prompt {
-  position: fixed;
-  z-index: 30;
-  left: 50%;
-  bottom: calc(90px + env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: max-content;
-  max-width: calc(100vw - 32px);
-  padding: 12px 18px;
-  border-radius: 18px;
+.confirm-overlay {
+  display: grid;
+  place-items: center;
+  padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(20px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--scrim);
+  overflow-y: auto;
+}
+.confirm-dialog {
+  width: min(400px, 100%);
+  padding: 24px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   color: var(--ink);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
+  box-shadow: var(--shadow-pop);
+  overflow-wrap: anywhere;
 }
-.update-prompt button {
-  flex-shrink: 0;
+.confirm-dialog h2 {
+  margin: 0 0 12px;
+  font-size: var(--fs-title);
+}
+.confirm-dialog p {
+  margin: 0 0 20px;
+  line-height: 1.6;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.confirm-actions button,
+.compose-actions .pick-live-file,
+.live-photo-guide summary {
+  min-height: 44px;
+}
+.confirm-destructive {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+.live-photo-help p {
+  margin: 0 0 6px;
+}
+.live-photo-guide {
+  overflow-wrap: anywhere;
+}
+.live-photo-guide summary {
+  align-content: center;
+  cursor: pointer;
+  color: var(--ink);
+}
+.live-photo-guide h3 {
+  margin: 10px 0 4px;
+  font-size: inherit;
+}
+.live-photo-guide ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+}
+.live-photo-guide li + li {
+  margin-top: 6px;
 }
 @media (max-width: 559px) {
-  .update-prompt {
-    flex-wrap: wrap;
-  }
   .settings-page,
   .account-page {
     padding-bottom: calc(90px + env(safe-area-inset-bottom));
