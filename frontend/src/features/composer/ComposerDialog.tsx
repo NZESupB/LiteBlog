@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ChangeEvent } from 'react'
 import {
   Bold,
   Italic,
@@ -133,6 +133,7 @@ function ComposerForm({
   const textarea = useRef<HTMLTextAreaElement>(null),
     toolbar = useRef<HTMLDivElement>(null),
     album = useRef<HTMLInputElement>(null),
+    originals = useRef<HTMLInputElement>(null),
     camera = useRef<HTMLInputElement>(null),
     result = useRef<HTMLDivElement>(null)
   const resizeDrag = useRef<{ y: number; height: number } | null>(null)
@@ -147,6 +148,11 @@ function ComposerForm({
   useEffect(() => {
     if (result.current) result.current.scrollTop = result.current.scrollHeight
   }, [state.polish.result])
+  const addPickedFiles = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = [...(event.currentTarget.files || [])]
+    event.currentTarget.value = ''
+    void service.addFiles(files)
+  }
   const guard = service.publishGuard(),
     task = state.imageTask
   const activeTask = Boolean(task && ['queued', 'running', 'uploading'].includes(task.status))
@@ -365,8 +371,15 @@ function ComposerForm({
         ))}
       </div>
       <p className="storage-hint live-photo-help">
-        实况照片需先导出原件，再从“文件”同时选择照片与配对
-        MOV。照片图库可能只提供静态图，网页无法恢复未收到的动态内容。
+        可从相册选择照片或视频。实况需包含动态资源；系统只提供静态图时无法保留实况效果。
+        <button
+          className="btn-ghost"
+          type="button"
+          disabled={state.busy || state.restoring}
+          onClick={() => originals.current?.click()}
+        >
+          从文件导入实况原件
+        </button>
       </p>
       <p className="form-error" role="alert">
         {state.restoreError ? `恢复草稿失败：${state.restoreError}` : state.error}
@@ -441,14 +454,21 @@ function ComposerForm({
         ref={album}
         className="album-input"
         type="file"
+        accept="image/*,video/*"
+        multiple
+        hidden
+        disabled={state.busy || state.restoring}
+        onChange={addPickedFiles}
+      />
+      <input
+        ref={originals}
+        className="originals-input"
+        type="file"
         accept="image/*,video/*,.heic,.heif,.avif,.mov,.mp4"
         multiple
         hidden
-        onChange={(event) => {
-          const files = [...(event.target.files || [])]
-          event.target.value = ''
-          void service.addFiles(files)
-        }}
+        disabled={state.busy || state.restoring}
+        onChange={addPickedFiles}
       />
       <input
         ref={camera}
@@ -457,11 +477,8 @@ function ComposerForm({
         accept="image/*"
         capture="environment"
         hidden
-        onChange={(event) => {
-          const files = [...(event.target.files || [])]
-          event.target.value = ''
-          void service.addFiles(files)
-        }}
+        disabled={state.busy || state.restoring}
+        onChange={addPickedFiles}
       />
     </form>
   )
