@@ -4,108 +4,45 @@
 
 ## 选择文件
 
-- iPhone/iPad：可直接从相册选择照片或视频；能否保留 Live Photo 取决于系统实际交付的资源。网页收到完整单文件或照片与配套 MOV 时会解析并上传；如果系统只交付静态图，网页不能额外读取照片库中的 MOV。已有导出的双资源可用“从文件导入实况原件”一次选入。有 Apple 内容标识时允许文件改名；标识缺失时仅对唯一的同名照片、视频配对。
+- iPhone/iPad：可从相册入口选择照片或视频；能否保留 Live Photo 取决于系统实际交付的资源。网页收到完整单文件或照片与配套 MOV 时会解析并上传；如果系统只交付静态图，网页不能额外读取照片库中的 MOV。有 Apple 内容标识时允许文件改名；标识缺失时仅对唯一的同名照片、视频配对。
 - 小米、Pixel 和其他 Android：选择相册导出的**实况原件**。标准单文件会自动拆出封面和内嵌视频，不需要预先转换为视频。
 - 系统文件选择器、聊天软件或相册分享若只交付静态图，网页无法还原缺失视频。普通静态图正常上传；原图含实况标记却缺少视频时，会说明原因，并提供“重新选择原件”或“仅保留静态图”。
 - 缺失动态、解析错误及图片/视频失败都会阻止发布。动态可重试或重选原件续传，封面成功后也可明确选择仅保留静态图。多个同名候选或标识冲突保持独立，避免误配。
 
 ## Web / H5 / PWA 的选择配置
 
-当前项目使用 React Web，没有原生照片库权限或 WebView 桥接。所有平台共用相同入口，不根据 iPad 的桌面 UA 或屏幕宽度猜测系统能力：
+当前项目使用 React Web，没有原生照片库权限或 WebView 桥接。桌面平台只显示“选择照片或视频”，由浏览器打开系统媒体文件面板；iPhone、iPadOS、Android 保留相册和独立拍照入口。平台判断仅影响入口展示，iPadOS 的桌面标识结合多点触控仍按移动设备处理，不用屏幕宽度或是否连接鼠标判断媒体能力。
 
 ```html
-<!-- 相册入口：只声明照片/视频，不设置 capture。 -->
+<!-- 同一媒体入口：桌面补充原件扩展名，兼容系统缺少 MIME 映射。 -->
+<input type="file" accept="image/*,video/*,.heic,.heif,.avif,.mov,.mp4" multiple>
+
+<!-- 移动相册入口：只声明照片/视频，不设置 capture。 -->
 <input type="file" accept="image/*,video/*" multiple>
 
 <!-- 独立拍照入口：仅用于用户明确要求调用相机。 -->
 <input type="file" accept="image/*" capture="environment">
-
-<!-- 已有双资源的导入入口：保留原件扩展名过滤，兼容空 MIME 文件。 -->
-<input type="file" accept="image/*,video/*,.heic,.heif,.avif,.mov,.mp4" multiple>
 ```
 
-实际实现位于 `frontend/src/features/composer/ComposerDialog.tsx`：按钮在用户点击事件内同步调用对应 input 的 `click()`；`addPickedFiles()` 先复制 FileList、再清空 input，允许取消后继续操作和重复选择同一文件；三个入口均调用既有 `service.addFiles()`，先读取、再解析配对、最后处理上传。
+实际实现位于 `frontend/src/features/composer/ComposerDialog.tsx`：按钮在用户点击事件内同步调用对应 input 的 `click()`；`addPickedFiles()` 先复制 FileList、再清空 input，只有非空选择才调用既有 `service.addFiles()`。取消不上传、不改变正文或已有媒体；两个入口继续共用读取、解析配对和上传流程。桌面不显示会退回文件选择器的拍照入口，不申请桌面摄像头权限。
 
-`accept` 是文件类型提示，不是照片库专用 API。删除扩展名只是让主入口的媒体过滤更明确，**不保证隐藏**“照片图库 / 拍摄照片或视频 / 选择文件”或第三方提供器。WebKit 的文件上传面板会根据媒体类型、设备及 capture 配置决定菜单；`capture="environment"` 指向相机，不能用于强制打开相册，`capture="false"` 也不等于移除该属性。`showPicker()` 或 `click()` 仍调用浏览器的选择器，不会授予网页 PhotoKit 权限。
+`accept` 是文件类型提示，不是照片库专用 API。桌面唯一入口同时声明媒体 MIME 与原件扩展名，避免依赖系统是否注册 HEIC/MOV 等类型；移动端继续使用媒体通配过滤。两种配置都**不保证隐藏**“照片图库 / 拍摄照片或视频 / 选择文件”或第三方提供器。WebKit 的文件上传面板会根据媒体类型、设备及 capture 配置决定菜单；`capture="environment"` 指向相机，不能用于强制打开相册，`capture="false"` 也不等于移除该属性。`showPicker()` 或 `click()` 仍调用浏览器的选择器，不会授予网页 PhotoKit 权限。
 
 浏览器返回转码后的静态 JPEG 且未携带实况标识时，网页无法可靠区分它与普通静态照片。不能据此承诺动态已保留，也不能把所有普通图片都当成“缺 MOV”。已识别的缺动态与配对冲突继续要求处理，不能静默发布为完整实况。
 
-## 原生 Swift / SwiftUI / WebView 参考
+## 取消选择与编辑框
 
-下列为原生宿主参考片段，未在本仓库接入、编译或真机验证。纯 Web/PWA 不执行这些 API。
+文件 input 在取消或重新选择相同文件时可能派发冒泡的 `cancel`，而原生 dialog 自身的取消也叫 `cancel`。公共 `frontend/src/native/ui/dialog.js` 必须先检查 `event.target === node`，只将 dialog 自身的事件解释为关闭请求；内部文件输入的取消不能进入外层关闭动画和组件卸载。
 
-使用 `PHPickerViewController` 直接展示照片库，不先展示文件来源菜单。普通照片、实况与视频共用时使用 `.any(of: [.images, .videos])`；只允许实况时改为 `.livePhotos`。SwiftUI 可用 `UIViewControllerRepresentable` 包装这个控制器。
+这一处理同时覆盖相册、移动拍照、失败重选与视频续传；正常 Escape、关闭按钮、遮罩点击、焦点归还及滚动锁保持原有流程。验证时需分别检查“内部 input 取消后仍可编辑”和“dialog 自身取消后正常关闭”，不能只用空 FileList 代替取消事件回归。
 
-```swift
-import Photos
-import PhotosUI
-
-@MainActor
-func makeMediaPicker(delegate: any PHPickerViewControllerDelegate) -> PHPickerViewController {
-    var configuration = PHPickerConfiguration()
-    configuration.filter = .any(of: [.images, .videos])
-    configuration.selectionLimit = 0
-    configuration.preferredAssetRepresentationMode = .current
-    let picker = PHPickerViewController(configuration: configuration)
-    picker.delegate = delegate
-    return picker
-}
-```
-
-宿主持有 delegate，并在 `picker(_:didFinishPicking:)` 中处理空结果（取消）。对实况检查 `itemProvider.canLoadObject(ofClass: PHLivePhoto.self)`，然后通过 `loadObject(ofClass: PHLivePhoto.self)` 取得 PHLivePhoto；不要只加载 UIImage。Apple 提供 `PHAssetResource.assetResources(for: livePhoto)`，可从这份选中对象取得照片与 pairedVideo，不必为了导出选中项而先取得全库权限或依赖 `assetIdentifier`。
-
-```swift
-enum LivePhotoExportError: Error {
-    case missingPair
-}
-
-// directory 由调用者在应用沙盒创建为本次专用目录，失败后由调用者清理。
-@MainActor
-func exportLivePhoto(_ livePhoto: PHLivePhoto, to directory: URL) async throws -> [URL] {
-    let resources = PHAssetResource.assetResources(for: livePhoto)
-    let photos = resources.filter { $0.type == .photo }
-    let videos = resources.filter { $0.type == .pairedVideo }
-    guard photos.count == 1, videos.count == 1 else {
-        throw LivePhotoExportError.missingPair
-    }
-    let options = PHAssetResourceRequestOptions()
-    options.isNetworkAccessAllowed = true
-    var urls: [URL] = []
-    for resource in [photos[0], videos[0]] {
-        try Task.checkCancellation()
-        let url = directory.appendingPathComponent(resource.originalFilename)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: ())
-                }
-            }
-        }
-        urls.append(url)
-    }
-    try Task.checkCancellation()
-    return urls
-}
-```
-
-- `.current` 避免要求系统兼容性转码，但不等于自动获得原件归档。照片和 MOV 均应按原始字节保存，保留内容配对标识、MIME、原始文件名和两者的关联；展示副本另行生成。当前博客的图片转换/视频处理属于展示上传，不承诺原件级回导。
-- iCloud 资源应显示下载进度、网络失败和取消状态。上述简化导出片段在写入之间检查取消；生产宿主还需管理在途请求、后台任务、失败后的部分文件清理和完成状态。回调不保证在主线程，更新 UI 要回 MainActor。
-- 若改用 `PHAsset.fetchAssets` 获取图库资产，必须另行处理 PhotoKit 读权限、limited 状态和 Info.plist 用途说明；仅使用 PHPicker 不代表获得全库读取权限。原始 `.photo/.pairedVideo` 与编辑后的 fullSize 资源不能随意混搭。
-- 若使用 `loadFileRepresentation`，必须在 completion handler 返回前复制其临时文件到沙盒，再上传。
-- WKWebView 需要宿主用原生照片选择器接管并将实际双资源交给上传层；浏览器/PWA 没有这层桥接。Android 原生宿主可使用 AndroidX 的 `PickMultipleVisualMedia`，但仍需检查照片提供器是否交付 Motion Photo 原始字节，不能保证所有厂商都相同。
-
-权威依据（HTML 类型提示、WebKit 菜单实现、Apple 选择器与底层资源 API、Android Photo Picker）：
+HTML 与 WebKit 依据：
 
 ```text
+https://html.spec.whatwg.org/multipage/input.html#file-upload-state-(type=file)
 https://html.spec.whatwg.org/multipage/input.html#attr-input-accept
 https://w3c.github.io/html-media-capture/#the-capture-attribute
 https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/ios/forms/WKFileUploadPanel.mm
-https://developer.apple.com/videos/play/wwdc2020/10652/
-https://developer.apple.com/documentation/photos/phassetresource/assetresources(for:)-2fedw
-https://developer.apple.com/documentation/photos/phassetresourcemanager/writedata(for:tofile:options:completionhandler:)
-https://developer.android.com/training/data-storage/shared/photo-picker
 ```
 
 ## 格式覆盖与验证范围

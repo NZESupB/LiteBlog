@@ -133,7 +133,6 @@ function ComposerForm({
   const textarea = useRef<HTMLTextAreaElement>(null),
     toolbar = useRef<HTMLDivElement>(null),
     album = useRef<HTMLInputElement>(null),
-    originals = useRef<HTMLInputElement>(null),
     camera = useRef<HTMLInputElement>(null),
     result = useRef<HTMLDivElement>(null)
   const resizeDrag = useRef<{ y: number; height: number } | null>(null)
@@ -151,8 +150,15 @@ function ComposerForm({
   const addPickedFiles = (event: ChangeEvent<HTMLInputElement>) => {
     const files = [...(event.currentTarget.files || [])]
     event.currentTarget.value = ''
-    void service.addFiles(files)
+    if (files.length) void service.addFiles(files)
   }
+  // 仅调整入口展示；iPadOS 桌面标识配合多点触控仍按移动设备处理。
+  const mobilePicker =
+    /Android|iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (/Mac/.test(navigator.platform) && navigator.maxTouchPoints > 1)
+  const pickerLabel = mobilePicker ? '从相册选择照片或视频' : '选择照片或视频'
+  // 桌面唯一入口保留扩展名过滤，兼容系统缺少 HEIC/MOV MIME 映射。
+  const pickerAccept = mobilePicker ? 'image/*,video/*' : 'image/*,video/*,.heic,.heif,.avif,.mov,.mp4'
   const guard = service.publishGuard(),
     task = state.imageTask
   const activeTask = Boolean(task && ['queued', 'running', 'uploading'].includes(task.status))
@@ -371,15 +377,8 @@ function ComposerForm({
         ))}
       </div>
       <p className="storage-hint live-photo-help">
-        可从相册选择照片或视频。实况需包含动态资源；系统只提供静态图时无法保留实况效果。
-        <button
-          className="btn-ghost"
-          type="button"
-          disabled={state.busy || state.restoring}
-          onClick={() => originals.current?.click()}
-        >
-          从文件导入实况原件
-        </button>
+        {mobilePicker ? '可从相册选择照片或视频。' : '可选择照片或视频文件。'}
+        实况需包含动态资源；系统只提供静态图时无法保留实况效果。
       </p>
       <p className="form-error" role="alert">
         {state.restoreError ? `恢复草稿失败：${state.restoreError}` : state.error}
@@ -388,21 +387,25 @@ function ComposerForm({
         <button
           className="btn-ghost pick"
           type="button"
-          aria-label="从相册选择照片或视频"
+          aria-label={pickerLabel}
+          title={pickerLabel}
           disabled={state.busy || state.restoring}
           onClick={() => album.current?.click()}
         >
           <Image className="icon" />
         </button>
-        <button
-          className="btn-ghost camera"
-          type="button"
-          aria-label="调用相机拍照"
-          disabled={state.busy || state.restoring}
-          onClick={() => camera.current?.click()}
-        >
-          <Camera className="icon" />
-        </button>
+        {mobilePicker && (
+          <button
+            className="btn-ghost camera"
+            type="button"
+            aria-label="调用相机拍照"
+            title="拍照"
+            disabled={state.busy || state.restoring}
+            onClick={() => camera.current?.click()}
+          >
+            <Camera className="icon" />
+          </button>
+        )}
         {privateMode && (
           <div className="public-opts">
             <span className="public-opts-tip">
@@ -454,32 +457,24 @@ function ComposerForm({
         ref={album}
         className="album-input"
         type="file"
-        accept="image/*,video/*"
+        accept={pickerAccept}
         multiple
         hidden
         disabled={state.busy || state.restoring}
         onChange={addPickedFiles}
       />
-      <input
-        ref={originals}
-        className="originals-input"
-        type="file"
-        accept="image/*,video/*,.heic,.heif,.avif,.mov,.mp4"
-        multiple
-        hidden
-        disabled={state.busy || state.restoring}
-        onChange={addPickedFiles}
-      />
-      <input
-        ref={camera}
-        className="camera-input"
-        type="file"
-        accept="image/*"
-        capture="environment"
-        hidden
-        disabled={state.busy || state.restoring}
-        onChange={addPickedFiles}
-      />
+      {mobilePicker && (
+        <input
+          ref={camera}
+          className="camera-input"
+          type="file"
+          accept="image/*"
+          capture="environment"
+          hidden
+          disabled={state.busy || state.restoring}
+          onChange={addPickedFiles}
+        />
+      )}
     </form>
   )
 }

@@ -8,6 +8,8 @@ export function createDialog(node, { remove = false, closeOnBackdrop = true, onR
   let active = false
   node.classList.add('app-dialog')
   const requestClose = (event) => {
+    // 文件 input 的 cancel 会冒泡，不能作为外层模态的关闭请求。
+    if (event.target !== node) return
     event.preventDefault()
     if (active) onRequestClose()
   }
